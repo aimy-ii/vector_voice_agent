@@ -57,8 +57,11 @@ _ACK_MAX_WORDS = 3
 def strip_system(messages: Iterable[BaseMessage]) -> list[BaseMessage]:
     """Убирает системные сообщения, пришедшие от бота.
 
+    Приведение словарей к ``BaseMessage`` — в редьюсере ``replace_messages``:
+    сюда история должна приходить уже объектами.
+
     Args:
-        messages: история как её подал плагин.
+        messages: история звонка (объекты сообщений).
 
     Returns:
         История без системных сообщений.

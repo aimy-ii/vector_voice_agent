@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from graph import nodes as nodes_module
 from graph.graph import graph
@@ -301,3 +301,80 @@ async def test_город_из_контекста_подхватывается(s
     )
     assert state["city_slug"] == "perm"
     assert state["current_step"] != "city"
+
+
+async def test_вход_словарями_как_у_сервера(spoken, kb, model):
+    """LangGraph Server подаёт messages JSON-словарями, не объектами."""
+    model["result"] = {
+        "understood": [],
+        "step_status": "unclear",
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Давайте сориентирую. В каком городе планируете обучение?",
+    }
+    state = await graph.ainvoke(
+        {"messages": [{"role": "human", "content": "Здравствуйте, хочу на механику"}]}
+    )
+
+    assert state["current_step"] == "city"
+    assert state["route"] == "lookup"
+    assert "городе" in "".join(spoken)
+    assert model["calls"] == 1
+    assert all(isinstance(m, BaseMessage) for m in state["messages"])
+    assert not any(isinstance(m, dict) for m in state["messages"])
+
+
+async def test_смешанный_вход_словарь_и_объект(spoken, kb, model):
+    model["result"] = {
+        "understood": [],
+        "step_status": "unclear",
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком городе планируете обучение?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [
+                {"role": "human", "content": "Здравствуйте"},
+                AIMessage(content="Добрый день"),
+                HumanMessage(content="Хочу учиться"),
+            ]
+        }
+    )
+    assert all(isinstance(m, BaseMessage) for m in state["messages"])
+    assert state["current_step"] == "city"
+
+
+async def test_системный_словарь_бота_отбрасывается(spoken, kb, model):
+    """Форма, которую реально шлёт бот: role=system, id=lk.agent_task.instructions."""
+    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
+    await graph.ainvoke(
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты менеджер автошколы",
+                    "id": "lk.agent_task.instructions",
+                },
+                {"role": "human", "content": "Здравствуйте"},
+            ]
+        }
+    )
+    отправленные = model["messages"]
+    assert sum(1 for m in отправленные if m.type == "system") == 1
+    assert "Ты менеджер автошколы" not in отправленные[0].content
+
+
+async def test_пустая_версия_из_env_берёт_последнюю(spoken, kb, model, monkeypatch):
+    """``SCRIPT_VERSION=`` → None → источник поднимает последнюю версию."""
+    from core.config import Settings
+
+    monkeypatch.setattr(
+        nodes_module.settings,
+        "script_version",
+        Settings(script_version="").script_version,
+    )
+    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
+    state = await graph.ainvoke({"messages": [{"role": "human", "content": "Здравствуйте"}]})
+    assert nodes_module.settings.script_version is None
+    assert state["script_version"] == "1"

@@ -19,25 +19,34 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Sequence
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, convert_to_messages
 from typing_extensions import TypedDict
 
 
-def replace_messages(current: list[BaseMessage], incoming: list[BaseMessage]) -> list[BaseMessage]:
+def replace_messages(
+    current: list[BaseMessage],
+    incoming: Sequence[BaseMessage | dict[str, Any]] | None,
+) -> list[BaseMessage]:
     """Редьюсер `messages`: новое значение вытесняет старое.
+
+    Свой редьюсер вместо штатного ``add_messages`` — значит приведение
+    входящего к ``BaseMessage`` тоже наше. ``add_messages`` делает это через
+    ``convert_to_messages``; без того же приёма здесь через LangGraph Server
+    в ``messages`` оказываются словари, и чтение ``.type`` падает.
 
     Args:
         current: что лежало в состоянии.
-        incoming: что пришло от плагина или положил узел.
+        incoming: что пришло от плагина/сервера или положил узел.
 
     Returns:
-        Входящий список; None трактуется как «не трогать».
+        Входящий список, приведённый к объектам сообщений; ``None`` —
+        «не трогать»; пустой список — очистить.
     """
     if incoming is None:
         return current
-    return list(incoming)
+    return convert_to_messages(incoming)
 
 
 class CallContext(TypedDict, total=False):

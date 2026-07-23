@@ -89,3 +89,26 @@ def test_дослушанный_шаг_остаётся_закрытым():
 
 def test_сверять_нечего():
     assert reopen_if_interrupted(state={}, messages=[], last_spoken="") == {}
+
+
+def test_сверка_на_истории_из_словарей():
+    """История с сервера — словари; после редьюсера reconcile видит AIMessage."""
+    from graph.state import replace_messages
+
+    messages = replace_messages(
+        [],
+        [{"role": "ai", "content": "Расскажу, как проходит"}],
+    )
+    state = {
+        "pending_step": "presentation",
+        "pending_len": 200,
+        "pending_ai_count": 0,
+        "step_status": {"presentation": "done", "city": "done"},
+    }
+    patch = reopen_if_interrupted(
+        state=state,
+        messages=messages,
+        last_spoken="Расскажу, как проходит",
+    )
+    assert patch["step_status"]["presentation"] == "open"
+    assert count_agent_messages(messages) == 1

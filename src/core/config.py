@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
@@ -90,6 +91,32 @@ class Settings(BaseSettings):
     # ─── Наблюдаемость ──────────────────────────────────────────────────────
     log_level: str = "INFO"
     langsmith_project: str | None = None
+
+    @field_validator(
+        "llm_base_url",
+        "llm_api_key",
+        "llm_model_fast",
+        "proxy_host",
+        "proxy_port",
+        "proxy_user",
+        "proxy_pass",
+        "proxy_scheme",
+        "script_version",
+        "script_dir",
+        "langsmith_project",
+        mode="before",
+    )
+    @classmethod
+    def _empty_str_to_none(cls, value: object) -> object:
+        """Пустая или пробельная строка из ``.env`` → ``None``.
+
+        ``SCRIPT_VERSION=`` даёт ``""``, а не ``None``; без приведения
+        источник ищет версию ``''`` и падает, хотя пустое значение значит
+        «взять последнюю». То же для остальных необязательных строковых полей.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @property
     def fast_model(self) -> str:

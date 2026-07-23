@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from graph.history import (
     find_aside,
@@ -15,6 +15,7 @@ from graph.history import (
     strip_system,
     text_of,
 )
+from graph.state import replace_messages
 
 
 def test_системные_сообщения_бота_отбрасываются():
@@ -27,6 +28,29 @@ def test_системные_сообщения_бота_отбрасываютс
     cleaned = strip_system(messages)
     assert len(cleaned) == 2
     assert not any(m.type in ("system", "developer") for m in cleaned)
+
+
+def test_история_словарями_через_редьюсер():
+    """Сервер шлёт JSON; редьюсер приводит, history работает на объектах."""
+    converted = replace_messages(
+        [],
+        [
+            {
+                "role": "system",
+                "content": "инструкции бота",
+                "id": "lk.agent_task.instructions",
+            },
+            {"role": "human", "content": "Здравствуйте"},
+            {"role": "ai", "content": "Добрый день"},
+        ],
+    )
+    assert all(isinstance(m, BaseMessage) for m in converted)
+    cleaned = strip_system(converted)
+    assert len(cleaned) == 2
+    assert isinstance(cleaned[0], HumanMessage)
+    assert isinstance(cleaned[1], AIMessage)
+    assert last_user_text(cleaned) == "Здравствуйте"
+    assert last_agent_text(cleaned) == "Добрый день"
 
 
 def test_последние_реплики_сторон():
