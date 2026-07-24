@@ -74,6 +74,29 @@ _QUESTION_MARKERS: frozenset[str] = frozenset(
     }
 )
 
+#: Просьбы рассказать / объяснить: наравне с вопросительным словом.
+_REQUEST_MARKERS: frozenset[str] = frozenset(
+    {
+        "расскажи",
+        "расскажите",
+        "объясни",
+        "объясните",
+        "подскажи",
+        "подскажите",
+        "поясни",
+        "поясните",
+        "уточни",
+        "уточните",
+        "хочу узнать",
+        "хотел бы узнать",
+        "хотела бы узнать",
+        "интересует",
+        "а про",
+        "а насчёт",
+        "а что по",
+    }
+)
+
 
 def strip_system(messages: Iterable[BaseMessage]) -> list[BaseMessage]:
     """Убирает системные сообщения, пришедшие от бота.
@@ -228,28 +251,30 @@ def find_aside(text: str, catalogue: dict[str, Sequence[str]]) -> str | None:
 
 
 def _has_question_marker(text: str) -> bool:
-    """Есть ли в тексте знак вопроса или вопросительное слово из списка.
+    """Есть ли знак вопроса, вопросительное слово или просьба рассказать.
 
     Args:
         text: реплика клиента.
 
     Returns:
-        True, если найден вопросительный признак.
+        True, если найден вопросительный признак или просьба.
     """
     if "?" in text:
         return True
     haystack = normalize(text)
     if not haystack:
         return False
-    return any(normalize(marker) in haystack for marker in _QUESTION_MARKERS)
+    markers = _QUESTION_MARKERS | _REQUEST_MARKERS
+    return any(normalize(marker) in haystack for marker in markers)
 
 
 def has_something_to_answer(text: str, *, script: CompiledScript) -> bool:
     """Есть ли в реплике клиента то, на что генератору надо ответить.
 
-    Ответ по существу шага («механика», «в Санкт-Петербурге») — False:
-    отвечать нечего, шаг закроет чекер. True — справка, возражение или
-    вопросительный признак.
+    Критерий опознаёт и вопрос, и просьбу рассказать. Ответ по существу
+    шага («механика», «в Санкт-Петербурге», «сам собираюсь учиться») —
+    False: отвечать нечего, шаг закроет чекер. True — справка, возражение,
+    вопросительный признак или просьба.
 
     Args:
         text: реплика клиента.

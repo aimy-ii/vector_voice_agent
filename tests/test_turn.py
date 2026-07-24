@@ -435,7 +435,7 @@ async def test_дословный_блок_один_раз_без_переска
 ):
     state = await graph.ainvoke(
         {
-            "messages": [HumanMessage(content="Расскажите про условия обучения")],
+            "messages": [HumanMessage(content="механика")],
             "city_slug": "perm",
             "city_name": "Пермь",
             "profile": {
@@ -544,6 +544,52 @@ async def test_plan_verbatim_с_вопросом_зовёт_модель(
     assert state["skip_model"] is False
     assert model["calls"] == 1
     assert "два с половиной месяца" in "".join(spoken) or "Расскажу" in "".join(spoken)
+
+
+async def test_plan_verbatim_с_просьбой_зовёт_модель(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Дословный шаг + просьба рассказать → модель, не skip_model."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "На автомате педаль сцепления не нужна.",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content="а-а, хотел бы обучаться на механике. Расскажите про автомат"
+                )
+            ],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state["current_step"] == "terms"
+    assert state["skip_model"] is False
+    assert state["route"] != "verbatim"
+    assert model["calls"] == 1
 
 
 async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(

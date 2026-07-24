@@ -129,7 +129,15 @@ def test_has_something_to_answer(script):
     """Таблица: когда генератору есть / нечего ответить."""
     from graph.history import has_something_to_answer
 
-    for text in ("", "   ", "да, конечно", "механика", "в Санкт-Петербурге"):
+    for text in (
+        "",
+        "   ",
+        "да, конечно",
+        "механика",
+        "в Санкт-Петербурге",
+        "хотел бы обучаться на механике",
+        "сам собираюсь учиться",
+    ):
         assert has_something_to_answer(text, script=script) is False, text
     for text in (
         "а сколько стоит?",
@@ -137,5 +145,10 @@ def test_has_something_to_answer(script):
         "дорого",
         "подумаю",
         "а медкомиссия нужна?",
+        "расскажите про автомат",
+        "а-а, хотел бы обучаться на механике. Расскажите про автомат",
+        "подскажите, а автомат сложнее?",
+        "объясните про рассрочку",
+        "а насчёт медкомиссии",
     ):
         assert has_something_to_answer(text, script=script) is True, text
