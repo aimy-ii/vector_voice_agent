@@ -82,16 +82,16 @@ class Settings(BaseSettings):
     script_version: str | None = None
     #: Каталог с JSON-скриптами. Пусто — каталог `data` рядом с кодом.
     script_dir: str | None = None
-    #: Порог ходов терпения по шагу: сколько раз шаг может лежать в шапке,
-    #: прежде чем чекер закроет его без ответа клиента. Это не «попытки
-    #: спросить», а терпение: шапка собирается каждый ход.
-    step_patience_limit: int = Field(
-        default=5,
+    #: Порог попыток задать шаг: сколько раз ведущий шаг уходит в генерацию
+    #: без ответа клиента, прежде чем чекер закроет его. Счётчик растёт только
+    #: у ведущего шага хода, не у висящих в шапке.
+    step_attempt_limit: int = Field(
+        default=2,
         validation_alias=AliasChoices(
-            "step_patience_limit",
-            "STEP_PATIENCE_LIMIT",
             "step_attempt_limit",
             "STEP_ATTEMPT_LIMIT",
+            "step_patience_limit",
+            "STEP_PATIENCE_LIMIT",
         ),
     )
 

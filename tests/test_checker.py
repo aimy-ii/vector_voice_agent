@@ -147,18 +147,52 @@ async def test_модель_не_ответила_шаги_не_тронуты(s
 
 async def test_порог_исчерпан_закрывает_без_модели(script):
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
-    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 5})
-    updated, _ = await run_checker(
+    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
+    updated, closures = await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="потом скажу")],
         profile={},
         turn=6,
         client=client,
-        attempt_limit=5,
+        attempt_limit=2,
     )
     assert updated.status["name"] == "closed"
+    assert ("name", "счётчик") in closures
     assert not any(c["step_id"] == "name" for c in client.calls)
+
+
+async def test_закрытие_по_счётчику_по_заданным_не_по_ходам(script):
+    """Чекер закрывает по числу заданий; пять ходов в шапке при двух попытках."""
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    # Шаг «присутствовал» пять ходов, но ведущим брали дважды → attempts=2.
+    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
+    updated, closures = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="не сейчас")],
+        profile={},
+        turn=5,
+        client=client,
+        attempt_limit=2,
+    )
+    assert updated.status["name"] == "closed"
+    assert closures == [("name", "счётчик")]
+    assert client.calls == []
+
+    # При том же turn=5, но попыток меньше порога — не закрываем по счётчику.
+    progress2 = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})
+    updated2, closures2 = await run_checker(
+        script=script,
+        progress=progress2,
+        messages=[HumanMessage(content="не сейчас")],
+        profile={},
+        turn=5,
+        client=client,
+        attempt_limit=2,
+    )
+    assert updated2.status.get("name") != "closed" or ("name", "счётчик") not in closures2
+    assert ("name", "счётчик") not in closures2
 
 
 async def test_счётчик_ноль_модель_не_вызывается(script):

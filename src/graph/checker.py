@@ -230,13 +230,13 @@ async def run_checker(
         profile: профиль для доступности шагов.
         turn: номер хода.
         client: клиент модели; пусто — боевой.
-        attempt_limit: порог ходов терпения; пусто — из настроек.
+        attempt_limit: порог попыток задать шаг; пусто — из настроек.
 
     Returns:
         Обновлённый прогресс и список закрытий ``(step_id, основание)``.
     """
     updated = ScriptProgress.from_mapping(progress.to_dict())
-    limit = attempt_limit if attempt_limit is not None else settings.step_patience_limit
+    limit = attempt_limit if attempt_limit is not None else settings.step_attempt_limit
     reply = last_user_text(list(messages))
     closures: list[tuple[str, str]] = []
 

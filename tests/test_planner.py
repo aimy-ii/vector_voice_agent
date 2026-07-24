@@ -246,21 +246,30 @@ def test_exhausted_только_по_порогу_из_аргумента(script
     assert exhausted(step, {"city": 3}, limit=3) is True
 
 
-def test_порог_терпения_по_умолчанию_5():
-    """Закрытие по порогу из настроек; дефолт — 5 ходов терпения."""
+def test_порог_попыток_по_умолчанию_2():
+    """Закрытие по порогу из настроек; дефолт — 2 попытки задать шаг."""
     from core.config import Settings
 
-    assert Settings.model_fields["step_patience_limit"].default == 5
-    step_limit = Settings().step_patience_limit
-    assert step_limit == 5 or isinstance(step_limit, int)
+    assert Settings.model_fields["step_attempt_limit"].default == 2
+    step_limit = Settings().step_attempt_limit
+    assert step_limit == 2 or isinstance(step_limit, int)
     from script.models import Step
     from script.planner import exhausted
 
     # Синтетический шаг: закрытие ровно на пороге из настроек.
     fake = Step(id="x", kind="question", priority=1, goal="g", text="t")
-    default = Settings.model_fields["step_patience_limit"].default
+    default = Settings.model_fields["step_attempt_limit"].default
     assert exhausted(fake, {"x": default - 1}, limit=default) is False
     assert exhausted(fake, {"x": default}, limit=default) is True
+
+
+def test_exhausted_по_числу_заданий_не_по_ходам(script):
+    """Шаг ведущим дважды при пяти «присутствиях» в шапке → счётчик 2, не 5."""
+    step = script.step("name")
+    # Пять ходов в шапке, но ведущим брали только два раза.
+    assert exhausted(step, {"name": 2}, limit=2) is True
+    assert exhausted(step, {"name": 2}, limit=5) is False
+    assert exhausted(step, {"name": 5}, limit=5) is True
 
 
 def test_статусов_ровно_два():

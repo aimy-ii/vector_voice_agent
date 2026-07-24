@@ -6,8 +6,8 @@
                            ├─► lookup ──► respond ──┬─► verbatim ──► commit
                            └─► respond ─────────────┴─► commit
 
-Чекер — единственная точка закрытия шагов; генератор плюсует счётчик в момент
-взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
+Чекер — единственная точка закрытия шагов; генератор плюсует счётчик ведущему
+шагу в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from graph.context import context_from_state, merge_static
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
-    has_something_to_answer,
+    _nothing_to_say,
     is_repeat_request,
     last_agent_text,
     last_user_text,
@@ -232,7 +232,7 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
 
 
 async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Берёт шапку, плюсует счётчик взятым шагам, выбирает маршрут."""
+    """Берёт шапку, плюсует счётчик ведущему шагу, выбирает маршрут."""
     script = _script_of(state)
     progress = await _load_progress(state)
     profile = dict(state.get("profile") or {})
@@ -271,8 +271,16 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         profile=profile,
         inform_reason=inform_reason,
     )
-    # Взяли — сразу пометили.
-    for step in head:
+
+    step = head[0] if head else None
+    if state.get("resume_step") and state["resume_step"] in script.steps:
+        resume = script.step(state["resume_step"])
+        if any(s.id == resume.id for s in head):
+            step = resume
+
+    # Счётчик — только ведущему шагу хода. Висящие в шапке попытку не тратят;
+    # повтор блока уже вышел выше без инкремента.
+    if step is not None:
         prev = int(progress.attempts.get(step.id, 0))
         progress.attempts[step.id] = prev + 1
         if step.id not in progress.taken_turn:
@@ -281,15 +289,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     progress_patch = await _save_progress(progress)
 
-    step = head[0] if head else None
-    if state.get("resume_step") and state["resume_step"] in script.steps:
-        resume = script.step(state["resume_step"])
-        if any(s.id == resume.id for s in head):
-            step = resume
-
-    skip_model = bool(
-        step and step.verbatim and not has_something_to_answer(user_text, script=script)
-    )
+    skip_model = bool(step and step.verbatim and _nothing_to_say(user_text))
 
     if step is None:
         route = ROUTE_RESPOND

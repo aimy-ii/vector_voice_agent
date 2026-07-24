@@ -33,12 +33,43 @@ _LEGACY_CLOSED: frozenset[str] = frozenset({"done", "refused", "skipped", "close
 #: Виды шагов, которые рассказывают, а не спрашивают.
 _INFORM_KINDS: frozenset[str] = frozenset({"inform", "inform_check"})
 
-#: Клиент сам спросил про обучение / условия / состав пакета.
-_CLIENT_ASKS_INFORM = re.compile(
-    r"обучен|условия|что\s+вход|стоимость|сколько\s+стоит|срок|"
-    r"как\s+проход|теория|практик|пакет|под\s+ключ|что\s+включ",
-    re.IGNORECASE,
+#: Признаки: клиент сам спросил про обучение / условия / состав пакета.
+_INFORM_ASK_MARKERS: frozenset[str] = frozenset(
+    {
+        "обучение",
+        "обучения",
+        "обучении",
+        "условия",
+        "что входит",
+        "стоимость",
+        "сколько стоит",
+        "срок",
+        "как проходит",
+        "теория",
+        "теорию",
+        "практика",
+        "практику",
+        "практики",
+        "пакет",
+        "под ключ",
+        "что включено",
+        "что включены",
+    }
 )
+
+
+def _normalize_reply(text: str) -> str:
+    """Нормализует реплику для сравнения с признаками.
+
+    Args:
+        text: исходный текст.
+
+    Returns:
+        Нижний регистр, «ё»→«е», без знаков, пробелы схлопнуты.
+    """
+    lowered = text.strip().lower().replace("ё", "е")
+    without_marks = re.sub(r"[^\w\s]+", " ", lowered, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", without_marks).strip()
 
 
 def is_closed(status: str | None) -> bool:
@@ -148,13 +179,22 @@ def iter_available(
 def client_asks_inform(text: str) -> bool:
     """Клиент сам спросил про обучение, условия или состав пакета.
 
+    Детерминированный признак из набора — не разбор смысла моделью.
+    Сравнение на границах слов, как у просьбы повторить.
+
     Args:
         text: реплика клиента.
 
     Returns:
-        True, если в тексте есть повод выдать информирующий блок.
+        True, если сработал признак повода для информирующего блока.
     """
-    return bool(text and _CLIENT_ASKS_INFORM.search(text))
+    haystack = _normalize_reply(text)
+    if not haystack:
+        return False
+    return any(
+        re.search(rf"(?:^|\s){re.escape(marker)}(?:\s|$)", haystack)
+        for marker in _INFORM_ASK_MARKERS
+    )
 
 
 def answered_inform_check(
@@ -370,28 +410,27 @@ def render_step_text(step: Step, profile: Mapping[str, str]) -> str | None:
 
 
 def next_attempt(attempts: Mapping[str, int], step_id: str) -> int:
-    """Возвращает следующее значение счётчика терпения по шагу.
+    """Возвращает следующее значение счётчика попыток по шагу.
 
     Args:
-        attempts: счётчики ходов терпения по шагам.
+        attempts: счётчики попыток задать шаг.
         step_id: идентификатор шага.
 
     Returns:
-        Значение счётчика после следующего взятия в шапку, начиная с единицы.
+        Значение счётчика после следующего взятия в работу, начиная с единицы.
     """
     return int(attempts.get(step_id, 0)) + 1
 
 
 def exhausted(step: Step, attempts: Mapping[str, int], *, limit: int) -> bool:
-    """Исчерпан ли порог ходов терпения по шагу.
+    """Исчерпан ли порог попыток задать шаг.
 
-    Счётчик — сколько раз шаг лежал в шапке (ходы терпения), а не число
-    попыток «спросить заново». Порог задаётся окружением; закрытие делает
-    чекер.
+    Счётчик — сколько раз шаг был ведущим в генерации, а не сколько ходов
+    провисел в шапке. Порог задаётся окружением; закрытие делает чекер.
 
     Args:
         step: описание шага.
-        attempts: счётчики ходов терпения.
+        attempts: счётчики попыток задать шаг.
         limit: порог из настроек.
 
     Returns:

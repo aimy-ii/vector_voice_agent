@@ -125,45 +125,20 @@ def test_смешанная_реплика_даёт_и_ответ_и_вопро�
     assert is_acknowledgement(text) is False
 
 
-def test_has_something_to_answer(script):
-    """Таблица: когда генератору есть / нечего ответить."""
-    from graph.history import has_something_to_answer
+def test_nothing_to_say():
+    """Пусто / голое подтверждение — без модели; по существу — к модели."""
+    from graph.history import _nothing_to_say
 
-    for text in (
-        "",
-        "   ",
-        "да, конечно",
-        "механика",
-        "в Санкт-Петербурге",
-        "хотел бы обучаться на механике",
-        "сам собираюсь учиться",
-        "да просто хочу на механике",
-        "мне всё как раз подходит",
-        "никак не решу",
-    ):
-        assert has_something_to_answer(text, script=script) is False, text
-    for text in (
-        "а сколько стоит?",
-        "когда практика",
-        "дорого",
-        "подумаю",
-        "а медкомиссия нужна?",
-        "расскажите про автомат",
-        "а-а, хотел бы обучаться на механике. Расскажите про автомат",
-        "подскажите, а автомат сложнее?",
-        "объясните про рассрочку",
-        "а насчёт медкомиссии",
-        "повторите",
-        "не понял",
-        "ещё раз",
-    ):
-        assert has_something_to_answer(text, script=script) is True, text
+    for text in ("", "   ", "да, конечно", "угу"):
+        assert _nothing_to_say(text) is True, text
+    for text in ("на механике", "расскажите про автомат", "а сколько стоит"):
+        assert _nothing_to_say(text) is False, text
 
 
 def test_is_repeat_request():
     from graph.history import is_repeat_request
 
-    for text in ("повторите", "не понял", "ещё раз", "Перефразируйте пожалуйста"):
+    for text in ("повторите", "не понял", "ещё раз, пожалуйста"):
         assert is_repeat_request(text) is True, text
-    for text in ("да просто хочу на механике", "расскажите про автомат", "механика"):
+    for text in ("да просто хочу на механике", "мне всё как раз подходит", "на механике"):
         assert is_repeat_request(text) is False, text

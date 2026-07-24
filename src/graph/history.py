@@ -18,8 +18,6 @@ from typing import Iterable, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-from script.build import CompiledScript
-
 #: Короткие подтверждения, после которых спрашивать нечего — можно сразу
 #: выталкивать следующий блок скрипта, не тратя ход на модель.
 _ACKS: frozenset[str] = frozenset(
@@ -55,56 +53,6 @@ _ACKS: frozenset[str] = frozenset(
 #: Сколько слов ещё считается коротким подтверждением.
 _ACK_MAX_WORDS = 3
 
-#: Вопросительные слова и обороты: есть в реплике — генератору есть что ответить.
-_QUESTION_MARKERS: frozenset[str] = frozenset(
-    {
-        "сколько",
-        "какой",
-        "какая",
-        "какие",
-        "когда",
-        "где",
-        "как",
-        "почему",
-        "зачем",
-        "можно ли",
-        "есть ли",
-        "правда ли",
-        "а если",
-    }
-)
-
-#: Просьбы рассказать / объяснить: наравне с вопросительным словом.
-_REQUEST_MARKERS: frozenset[str] = frozenset(
-    {
-        "расскажи",
-        "расскажите",
-        "объясни",
-        "объясните",
-        "подскажи",
-        "подскажите",
-        "поясни",
-        "поясните",
-        "уточни",
-        "уточните",
-        "хочу узнать",
-        "хотел бы узнать",
-        "хотела бы узнать",
-        "интересует",
-        "а про",
-        "а насчёт",
-        "а что по",
-        "повтори",
-        "повторите",
-        "перефразируй",
-        "перефразируйте",
-        "не понял",
-        "не поняла",
-        "ещё раз",
-        "что вы сказали",
-    }
-)
-
 #: Просьба повторить последний дословный блок — без модели.
 _REPEAT_MARKERS: frozenset[str] = frozenset(
     {
@@ -116,6 +64,7 @@ _REPEAT_MARKERS: frozenset[str] = frozenset(
         "не поняла",
         "ещё раз",
         "что вы сказали",
+        "что вы говорите",
     }
 )
 
@@ -272,96 +221,31 @@ def find_aside(text: str, catalogue: dict[str, Sequence[str]]) -> str | None:
     return None
 
 
-def marker_hits(text: str, markers: Iterable[str]) -> bool:
-    """Есть ли признак в реплике.
+def _nothing_to_say(text: str) -> bool:
+    """Реплике нечего адресовать модели: пусто или голое подтверждение.
 
-    Однословный — среди слов, многословный — подстрокой на границах слов.
-
-    Args:
-        text: реплика клиента (уже можно сырую — нормализуем внутри).
-        markers: набор признаков.
-
-    Returns:
-        True, если сработал хотя бы один признак.
-    """
-    haystack = normalize(text)
-    if not haystack:
-        return False
-    words = haystack.split()
-    word_set = set(words)
-    for marker in markers:
-        needle = normalize(marker)
-        if not needle:
-            continue
-        if " " not in needle:
-            if needle == "как":
-                # «как раз» — усилитель, не вопросительное слово.
-                if any(
-                    words[i] == "как" and (i + 1 >= len(words) or words[i + 1] != "раз")
-                    for i in range(len(words))
-                ):
-                    return True
-                continue
-            if needle in word_set:
-                return True
-            continue
-        # Многословный: подстрока, но только на границах слов
-        # («а про» не ловит «да просто»).
-        pattern = r"(?:^|\s)" + re.escape(needle) + r"(?:\s|$)"
-        if re.search(pattern, haystack) is not None:
-            return True
-    return False
-
-
-def _has_question_marker(text: str) -> bool:
-    """Есть ли знак вопроса, вопросительное слово или просьба рассказать.
+    Единственное основание не звать генератора на дословном ходу. Никакого
+    разбора смысла: заговорил человек по существу — отвечаем живой репликой.
 
     Args:
         text: реплика клиента.
 
     Returns:
-        True, если найден вопросительный признак или просьба.
+        True, если ход можно вести дословным блоком без модели.
     """
-    if "?" in text:
-        return True
-    return marker_hits(text, _QUESTION_MARKERS | _REQUEST_MARKERS)
+    return not text.strip() or is_acknowledgement(text)
 
 
 def is_repeat_request(text: str) -> bool:
-    """Просит ли клиент повторить последнюю реплику агента.
+    """Просьба повторить последнюю реплику — повтор блока без модели.
 
     Args:
         text: реплика клиента.
 
     Returns:
-        True, если это просьба повторить / перефразировать.
+        True, если сработал признак повтора.
     """
-    return marker_hits(text, _REPEAT_MARKERS)
-
-
-def has_something_to_answer(text: str, *, script: CompiledScript) -> bool:
-    """Есть ли в реплике клиента то, на что генератору надо ответить.
-
-    Критерий опознаёт и вопрос, и просьбу рассказать. Ответ по существу
-    шага («механика», «в Санкт-Петербурге», «сам собираюсь учиться») —
-    False: отвечать нечего, шаг закроет чекер. True — справка, возражение,
-    вопросительный признак или просьба.
-
-    Args:
-        text: реплика клиента.
-        script: скомпилированный скрипт (каталог справок и возражений).
-
-    Returns:
-        True, если модель должна отработать реплику до дословного блока.
-    """
-    if not text or not text.strip():
-        return False
-    if is_acknowledgement(text):
-        return False
-    catalogue: dict[str, Sequence[str]] = {
-        **{k: v.triggers for k, v in script.helps.items()},
-        **{k: v.triggers for k, v in script.objections.items()},
-    }
-    if find_aside(text, catalogue) is not None:
-        return True
-    return _has_question_marker(text)
+    haystack = normalize(text)
+    return any(
+        re.search(rf"(?:^|\s){re.escape(normalize(m))}(?:\s|$)", haystack) for m in _REPEAT_MARKERS
+    )
