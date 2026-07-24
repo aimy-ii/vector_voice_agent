@@ -81,13 +81,17 @@ async def test_город_подтверждается_по_перечислен
         "step_status": "done",
         "aside_id": None,
         "resume_step": True,
-        "reply": "Отлично, Пермь.",
+        "reply": "Отлично, Пермь. Как могу к вам обращаться?",
     }
     state = await graph.ainvoke({"messages": [HumanMessage(content="Я из Перми")]})
 
     assert state["city_slug"] == "perm"
     assert state["profile"]["city"] == "perm"
     assert state["step_status"]["city"] == "done"
+    assert state["next_step"] == "name"
+    prompt = model["messages"][0].content
+    assert "Дальше идём к: name" in prompt
+    assert "как обращаться" in prompt.lower()
 
 
 async def test_город_вне_сети_не_записывается(spoken, kb, model):
@@ -102,6 +106,70 @@ async def test_город_вне_сети_не_записывается(spoken, 
 
     assert state["city_slug"] is None
     assert "city" not in state["profile"]
+
+
+async def test_дословный_price_без_проверки_задаёт_следующий_вопрос(spoken, kb, model):
+    """После цены в эфир уходит вопрос closing; модель не вызывается."""
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Да, понятно")],
+            "city_slug": "perm",
+            "profile": {
+                "city": "perm",
+                "caller_name": "Мария",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+                "branch": "perm_chernyshevskogo",
+            },
+            "step_status": {
+                "city": "done",
+                "name": "done",
+                "experience": "done",
+                "transmission": "done",
+                "presentation": "done",
+                "theory_format": "done",
+                "branch": "done",
+            },
+        }
+    )
+
+    текст = "".join(spoken)
+    assert state["current_step"] == "price"
+    assert state["next_step"] == "closing"
+    assert model["calls"] == 0
+    assert "43900" in текст or "стоимость" in текст.lower()
+    assert "офис" in текст.lower() or "дистанционно" in текст.lower()
+    assert state["step_status"]["price"] == "done"
+    assert state["step_status"].get("closing") != "done"
+
+
+async def test_дословный_с_проверкой_не_теряет_проверочный_вопрос(spoken, kb, model):
+    """Презентация с check_question — как раньше: блок + проверка, без next."""
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Да, конечно")],
+            "city_slug": "perm",
+            "profile": {
+                "city": "perm",
+                "caller_name": "Мария",
+                "experience": "впервые",
+                "transmission": "механика",
+            },
+            "step_status": {
+                "city": "done",
+                "name": "done",
+                "experience": "done",
+                "transmission": "done",
+            },
+        }
+    )
+
+    текст = "".join(spoken)
+    assert state["current_step"] == "presentation"
+    assert "Как вам такой подход" in текст
+    assert "теорию удобнее" not in текст.lower()
+    assert model["calls"] == 0
 
 
 async def test_перечень_городов_уходит_модели_только_пока_город_неизвестен(spoken, kb, model):
@@ -145,7 +213,7 @@ async def test_дословный_блок_идёт_мимо_модели(spoken
     assert state["current_step"] == "presentation"
     assert model["calls"] == 0
     assert "федеральная академия вождения" in текст.lower()
-    assert "Как вам в целом такой подход" in текст
+    assert "Как вам такой подход" in текст
     assert state["step_status"]["presentation"] == "done"
 
 
@@ -178,7 +246,7 @@ async def test_справка_звучит_перед_дословным_бло�
     )
 
     текст = "".join(spoken)
-    assert текст.index("Медкомиссия") < текст.index("Расскажу, как проходит")
+    assert текст.index("Медкомиссия") < текст.index("федеральная академия")
     assert "medcheck" in state["asides_done"]
     assert model["calls"] == 1
 

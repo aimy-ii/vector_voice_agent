@@ -8,6 +8,7 @@ from script.planner import (
     is_available,
     is_closed,
     next_attempt,
+    peek_next_step,
     pick_step,
     profile_has,
     render_step_text,
@@ -114,9 +115,9 @@ def test_текст_шага_ветвится_по_значению(script):
     комбинированно = render_step_text(step, {"theory_format": "комбинированно"})
     по_умолчанию = render_step_text(step, {})
 
-    assert "небольших группах" in очно
+    assert "небольшие группы" in очно
     assert "приложении" in дистанционно
-    assert "популярный" in комбинированно
+    assert "частый" in комбинированно
     assert "на стоимость это не влияет" in по_умолчанию
     assert len({очно, дистанционно, комбинированно, по_умолчанию}) == 4
 
@@ -124,3 +125,55 @@ def test_текст_шага_ветвится_по_значению(script):
 def test_когда_закрывать_нечего_шага_нет(script):
     status = {step_id: "done" for step_id in script.step_order}
     assert pick_step(script, status=status, profile={}) is None
+
+
+def test_после_города_следующим_идёт_имя(script):
+    """Закрыли город — peek отдаёт следующий открытый шаг."""
+    nxt = peek_next_step(
+        script,
+        current=script.step("city"),
+        status={},
+        profile={},
+    )
+    assert nxt is not None
+    assert nxt.id == "name"
+
+
+def test_после_последнего_шага_следующего_нет(script):
+    status = {step_id: "done" for step_id in script.step_order if step_id != "closing"}
+    nxt = peek_next_step(
+        script,
+        current=script.step("closing"),
+        status=status,
+        profile={"city": "perm"},
+    )
+    assert nxt is None
+
+
+def test_peek_учитывает_пропуск_по_признаку(script):
+    """Имя уже известно — после города сразу опыт, не имя."""
+    nxt = peek_next_step(
+        script,
+        current=script.step("city"),
+        status={},
+        profile={"caller_name": "Мария"},
+    )
+    assert nxt is not None
+    assert nxt.id == "experience"
+
+
+def test_peek_пропускает_презентацию_готовому_клиенту(script):
+    status = {
+        "city": "done",
+        "name": "done",
+        "experience": "done",
+    }
+    nxt = peek_next_step(
+        script,
+        current=script.step("transmission"),
+        status=status,
+        profile={"city": "perm", "urgency": "готов записаться"},
+    )
+    assert nxt is not None
+    assert nxt.id != "presentation"
+    assert nxt.id == "theory_format"

@@ -26,6 +26,13 @@ HISTORY_TURNS = 8
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 
+#: Запрет озвучивать служебную механику — общий для всех блоков промпта.
+_NO_MECHANICS = (
+    "Не проговаривай вслух внутреннюю механику: не объясняй, зачем задан "
+    "вопрос, не упоминай поиск, базу, справочник, шаги, поля и систему. "
+    "Собеседник разговаривает с менеджером, а не с программой."
+)
+
 
 def fill_facts(text: str, facts: Mapping[str, Any]) -> str:
     """Подставляет факты в текст скрипта.
@@ -98,30 +105,35 @@ def profile_block(script: CompiledScript, profile: Mapping[str, str]) -> str:
     return "\n".join(parts)
 
 
-def step_block(step: Step, profile: Mapping[str, str], facts: Mapping[str, Any]) -> str:
-    """Описывает шаг, которым бот занимается на этом ходу.
+def _describe_step(
+    step: Step,
+    profile: Mapping[str, str],
+    facts: Mapping[str, Any],
+    *,
+    heading: str,
+) -> list[str]:
+    """Собирает строки описания одного шага для промпта.
 
     Args:
         step: описание шага.
         profile: собранный профиль.
-        facts: факты, принесённые из справочника.
+        facts: факты справочника.
+        heading: заголовок блока («закрывается» / «далее»).
 
     Returns:
-        Текстовый блок для системного сообщения.
+        Список строк описания.
     """
-    lines = [f"Текущий шаг: {step.id} ({step.kind}).", f"Задача шага: {step.goal}"]
-
+    lines = [f"{heading}: {step.id} ({step.kind}).", f"Задача: {step.goal}"]
     text = render_step_text(step, profile)
     if text:
         filled = fill_facts(text, facts)
         if step.verbatim:
             lines.append(
-                "Этот текст произносится дословно и уже отправлен в эфир отдельно. "
-                "Не повторяй и не пересказывай его:\n" + filled
+                "Этот текст произносится дословно и уже отправлен в эфир "
+                "отдельно. Не повторяй и не пересказывай его:\n" + filled
             )
         else:
             lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
-
     if step.check_question:
         lines.append(f"Проверочный вопрос в конце: {step.check_question}")
     if step.options:
@@ -129,7 +141,60 @@ def step_block(step: Step, profile: Mapping[str, str], facts: Mapping[str, Any])
             "Предложи выбор из вариантов, а не открытый вопрос: " + ", ".join(step.options)
         )
     if step.fills:
-        lines.append("Этот шаг закрывается значениями полей: " + ", ".join(step.fills))
+        lines.append("Шаг закрывается значениями полей: " + ", ".join(step.fills))
+    return lines
+
+
+def step_block(
+    step: Step,
+    profile: Mapping[str, str],
+    facts: Mapping[str, Any],
+    *,
+    next_step: Step | None = None,
+) -> str:
+    """Описывает текущий и следующий шаги: что закрывается и куда идём.
+
+    Модель видит обе задачи сразу: клиент отвечает на текущий шаг, а реплика
+    должна уже вести к следующему — иначе разговор встаёт на подтверждении.
+
+    Args:
+        step: шаг, который клиент закрывает этим ответом.
+        profile: собранный профиль.
+        facts: факты, принесённые из справочника.
+        next_step: шаг, который откроется после закрытия текущего.
+
+    Returns:
+        Текстовый блок для системного сообщения.
+    """
+    lines = _describe_step(step, profile, facts, heading="Сейчас закрывается")
+    if next_step is not None:
+        lines.append("")
+        lines.extend(_describe_step(next_step, profile, facts, heading="Дальше идём к"))
+        if next_step.verbatim:
+            lines.append(
+                "Следующий шаг — дословный блок: его произнесёт скрипт сам. "
+                "Не зачитывай его и не дублируй вопрос, который уйдёт в эфир "
+                "сразу после блока."
+            )
+    else:
+        lines.append("После этого шага скрипт закончен — мягко подводи к завершению.")
+
+    lines.append("")
+    lines.append(
+        "Поведение на этом ходу:\n"
+        "- Клиент ответил на текущий шаг — зафиксируй значения в understood, "
+        "поставь step_status=done, не переспрашивай и не подтверждай переспросом. "
+        "Никаких «ваш город Санкт-Петербург, верно?». Достаточно короткой "
+        "человеческой реакции («Отлично, Питер») или вообще ничего — и сразу дальше.\n"
+        "- Реплика обязана заканчиваться ходом к собеседнику: вопросом или "
+        "конкретным предложением. Реплика, после которой клиенту нечего "
+        "сказать, обрывает разговор. Исключение — прощание в самом конце.\n"
+        "- Клиент ответил сразу на несколько вещей — прими всё в understood "
+        "и не спрашивай заново ничего из принятого.\n"
+        "- Переспрашивай только когда ответ действительно не разобран, и "
+        "по-человечески, а не «уточните, пожалуйста, значение поля»."
+    )
+    lines.append(_NO_MECHANICS)
     return "\n".join(lines)
 
 
@@ -147,8 +212,8 @@ def facts_block(facts: Mapping[str, Any]) -> str:
         return ""
     body = json.dumps(payload, ensure_ascii=False, indent=1)
     return (
-        "Факты из справочника автошколы. Называть можно только их; чего здесь "
-        f"нет — того не выдумывай:\n{body}"
+        "Факты, которыми можно оперировать в разговоре. Называть можно только "
+        f"их; чего здесь нет — того не выдумывай:\n{body}\n{_NO_MECHANICS}"
     )
 
 
@@ -172,6 +237,7 @@ def aside_block(script: CompiledScript, done: Sequence[str]) -> str:
         mark = " — уже отвечали" if objection_id in done else ""
         lines.append(f"- {objection_id}: возражение{mark}")
     lines.append("Ничего похожего в реплике нет — оставь aside_id пустым.")
+    lines.append(_NO_MECHANICS)
     return "\n".join(lines)
 
 
@@ -187,8 +253,9 @@ def unknown_block(script: CompiledScript) -> str:
         Текстовый блок для системного сообщения.
     """
     return (
-        "Если ответа нет ни в фактах, ни в описании шага — не придумывай. "
-        f"Скажи примерно так и веди разговор дальше: «{script.params.unknown}»"
+        "Если точного ответа нет — не придумывай. "
+        f"Скажи примерно так и веди разговор дальше: «{script.params.unknown}»\n"
+        f"{_NO_MECHANICS}"
     )
 
 
@@ -200,6 +267,7 @@ def build_turn_messages(
     facts: Mapping[str, Any],
     history: Sequence[BaseMessage],
     asides_done: Sequence[str],
+    next_step: Step | None = None,
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к модели.
 
@@ -210,17 +278,18 @@ def build_turn_messages(
         facts: факты из справочника.
         history: история звонка без системных сообщений.
         asides_done: отработанные справки и возражения.
+        next_step: шаг после текущего, если текущий закроется этим ответом.
 
     Returns:
         Список сообщений: одно системное и хвост истории.
     """
     blocks = [persona_block(script), profile_block(script, profile)]
     if step is not None:
-        blocks.append(step_block(step, profile, facts))
+        blocks.append(step_block(step, profile, facts, next_step=next_step))
     else:
         blocks.append(
             "Все шаги скрипта закрыты. Отвечай на вопросы собеседника и мягко "
-            "подводи разговор к завершению."
+            "подводи разговор к завершению.\n" + _NO_MECHANICS
         )
     facts_text = facts_block(facts)
     if facts_text:
@@ -229,7 +298,7 @@ def build_turn_messages(
     blocks.append(unknown_block(script))
     blocks.append(
         "Верни ответ строго по схеме. В поле reply — только то, что звучит "
-        "вслух: одна-две фразы разговорного русского."
+        "вслух: живой разговорный русский, без списков и канцелярита."
     )
 
     tail = list(history)[-HISTORY_TURNS:]

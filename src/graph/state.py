@@ -86,6 +86,9 @@ class CallState(TypedDict, total=False):
         resume_step: куда вернуться после справки или возражения.
         asides_done: какие справки и возражения уже отработали.
         current_step: шаг, которым занимались на этом ходу.
+        next_step: шаг, который откроется, если текущий закроется этим ответом.
+            Нужен промпту: модель должна сразу вести к следующей задаче, а не
+            подтверждать уже принятое. Пусто, если после текущего скрипт кончен.
         outcome: чем закончили: визит, дистанционная предзапись, мессенджер.
         tool_log: журнал походов в справочник. Отдельным полем, а не в
             `messages`: тот затрётся на следующем ходу.
@@ -122,6 +125,7 @@ class CallState(TypedDict, total=False):
     resume_step: str | None
     asides_done: list[str]
     current_step: str | None
+    next_step: str | None
     outcome: str | None
 
     tool_log: list[dict[str, Any]]
@@ -154,6 +158,7 @@ def new_state_defaults() -> dict[str, Any]:
         "resume_step": None,
         "asides_done": [],
         "current_step": None,
+        "next_step": None,
         "outcome": None,
         "tool_log": [],
         "turn": 0,

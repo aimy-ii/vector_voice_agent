@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Any
+from typing import Any, Mapping
 
 from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
@@ -47,7 +47,7 @@ from graph.state import CallContext, CallState, new_state_defaults
 from kb.client import vector_kb
 from script.build import CompiledScript
 from script.models import Step
-from script.planner import exhausted, pick_step, render_step_text, steps_to_skip
+from script.planner import exhausted, peek_next_step, pick_step, render_step_text, steps_to_skip
 from script.source import registry
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
 
@@ -187,9 +187,15 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         step=step.id if step else None,
         route=route,
     )
+    nxt = (
+        peek_next_step(script, current=step, status=status, profile=profile)
+        if step is not None
+        else None
+    )
     return {
         "step_status": status,
         "current_step": step.id if step is not None else None,
+        "next_step": nxt.id if nxt is not None else None,
         "route": route,
         "skip_model": skip_model,
     }
@@ -246,12 +252,15 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     """
     script = _script_of(state)
     step = _current_step(state)
+    next_step_id = state.get("next_step")
+    next_step = script.steps.get(next_step_id) if next_step_id else None
     facts = dict(state.get("facts") or {})
     spoken: list[str] = []
 
     messages = build_turn_messages(
         script=script,
         step=step,
+        next_step=next_step,
         profile=dict(state.get("profile") or {}),
         facts=facts,
         history=state.get("messages") or [],
@@ -319,7 +328,10 @@ async def verbatim_node(state: CallState, runtime: Runtime[CallContext]) -> dict
     """Выталкивает дословный блок скрипта мимо модели.
 
     Текст берётся из данных и отдаётся писателем как есть: модель его не
-    видит, поэтому переформулировать или сократить не может.
+    видит, поэтому переформулировать или сократить не может. Если у шага нет
+    проверочного вопроса, следом уходит текст следующего шага-вопроса — иначе
+    после информирования разговор обрывается тишиной. Следующий шаг при этом
+    не закрывается: вопрос задан, закроется ответом клиента.
 
     Args:
         state: состояние звонка.
@@ -347,9 +359,42 @@ async def verbatim_node(state: CallState, runtime: Runtime[CallContext]) -> dict
     if step.kind == "inform_check" and step.check_question:
         say(" " + step.check_question)
         chunks.append(" " + step.check_question)
+    elif not step.check_question:
+        follow = _verbatim_follow_up(state, profile=profile, facts=facts)
+        if follow:
+            say(" " + follow)
+            chunks.append(" " + follow)
 
     stage("verbatim", f"дословный блок шага {step.id}", "done", step=step.id)
     return {"spoken": spoken + chunks}
+
+
+def _verbatim_follow_up(
+    state: CallState,
+    *,
+    profile: Mapping[str, str],
+    facts: Mapping[str, Any],
+) -> str | None:
+    """Текст следующего шага после inform без проверочного вопроса.
+
+    Args:
+        state: состояние звонка.
+        profile: собранный профиль.
+        facts: факты хода.
+
+    Returns:
+        Текст для эфира или None, если перехода нет.
+    """
+    next_id = state.get("next_step")
+    if not next_id:
+        return None
+    nxt = _script_of(state).steps.get(next_id)
+    if nxt is None or nxt.kind not in ("question", "action"):
+        return None
+    text = render_step_text(nxt, profile)
+    if not text:
+        return None
+    return fill_facts(text, facts)
 
 
 async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:

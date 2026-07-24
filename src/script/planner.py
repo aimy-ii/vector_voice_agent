@@ -176,6 +176,42 @@ def pick_step(
     return best[2] if best is not None else None
 
 
+def peek_next_step(
+    script: CompiledScript,
+    *,
+    current: Step,
+    status: Mapping[str, str],
+    profile: Mapping[str, str],
+) -> Step | None:
+    """Какой шаг откроется, если текущий закроется прямо сейчас.
+
+    Считается детерминированно: текущий помечается закрытым, его ``fills`` —
+    заполненными фиктивными значениями, затем прогон ``pick_step`` (с учётом
+    пропусков). Ничего нового не изобретается — переиспользуются те же правила.
+
+    Args:
+        script: скомпилированный скрипт.
+        current: шаг, который клиент закрывает этим ответом.
+        status: статусы шагов на этот ход.
+        profile: собранный профиль на этот ход.
+
+    Returns:
+        Следующий шаг или None, если после закрытия текущего открывать нечего.
+    """
+    preview_status = dict(status)
+    preview_status[current.id] = "done"
+
+    preview_profile = dict(profile)
+    for key in current.fills:
+        if not profile_has(preview_profile, key):
+            preview_profile[key] = "_"
+
+    for step_id in steps_to_skip(script, status=preview_status, profile=preview_profile):
+        preview_status[step_id] = "skipped"
+
+    return pick_step(script, status=preview_status, profile=preview_profile)
+
+
 def blocked_by(
     script: CompiledScript,
     step: Step,

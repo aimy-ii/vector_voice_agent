@@ -22,6 +22,7 @@ from graph.prompts import (
     persona_block,
     profile_block,
     step_block,
+    unknown_block,
 )
 
 
@@ -70,6 +71,38 @@ def test_обычный_шаг_разрешает_свои_слова(script):
     assert "своими словами" in block
 
 
+def test_промпт_видит_оба_шага_и_запрет_переспрашивать(script):
+    block = step_block(
+        script.step("city"),
+        {},
+        {},
+        next_step=script.step("name"),
+    )
+    assert "Сейчас закрывается: city" in block
+    assert "Дальше идём к: name" in block
+    assert "Принять город" in block or "город" in block.lower()
+    assert "как обращаться" in block.lower()
+    assert "не переспрашивай" in block.lower()
+    assert "верно?" in block.lower()
+
+
+def test_промпт_требует_заканчивать_ходом_к_собеседнику(script):
+    block = step_block(script.step("city"), {}, {}, next_step=script.step("name"))
+    assert "вопросом или конкретным предложением" in block.lower() or (
+        "вопросом" in block.lower() and "предложением" in block.lower()
+    )
+
+
+def test_промпт_запрещает_озвучивать_механику(script):
+    step = step_block(script.step("city"), {}, {})
+    facts = facts_block({"city": {"name": "Пермь"}})
+    aside = aside_block(script, done=[])
+    unknown = unknown_block(script)
+    for block in (step, facts, aside, unknown):
+        assert "справочник" in block.lower() or "механик" in block.lower()
+        assert "не проговаривай" in block.lower() or "не упоминай" in block.lower()
+
+
 def test_альтернативный_вопрос_передаётся_как_приём(script):
     block = step_block(script.step("transmission"), {}, {})
     assert "механика, автомат" in block
@@ -79,6 +112,15 @@ def test_цена_подставляется_в_дословный_шаг(script
     block = step_block(script.step("price"), {}, {"price_line": "Стоимость — от 43900 рублей."})
     assert "от 43900 рублей" in block
     assert "{price_line}" not in block
+
+
+def test_ни_один_goal_не_объясняет_мотивацию(raw_script):
+    """Goals — задача модели, не реплика и не «от этого зависит»."""
+    forbidden = ("от этого зависит", "от него зависит", "от неё зависит", "это нам")
+    for step in raw_script.steps:
+        lowered = step.goal.lower()
+        for phrase in forbidden:
+            assert phrase not in lowered, f"{step.id}: {step.goal}"
 
 
 def test_пустые_факты_не_засоряют_промпт():

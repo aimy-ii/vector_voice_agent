@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4.1-mini"
     #: Быстрая модель для коротких служебных вызовов. Пусто → берётся основная.
     llm_model_fast: str | None = None
-    llm_temperature: float = 0.3
+    llm_temperature: float = 0.6
     #: Потолок одновременных вызовов модели на процесс.
     llm_max_concurrency: int = 8
     #: Потолок токенов ответа. Реплика в звонке короткая, длинный ответ — это

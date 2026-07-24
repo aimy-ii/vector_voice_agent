@@ -18,6 +18,12 @@ def test_заполненное_значение_не_портится():
     assert Settings(llm_base_url="https://api.example/v1").llm_base_url == "https://api.example/v1"
 
 
+def test_дефолт_температуры_живой():
+    """В коде дефолт 0.6; значение из окружения его перекрывает."""
+    assert Settings.model_fields["llm_temperature"].default == 0.6
+    assert Settings(llm_temperature=0.6).llm_temperature == 0.6
+
+
 def test_пустые_необязательные_строки_дают_none():
     """По одному ассерту на каждое необязательное строковое поле."""
     s = Settings(
