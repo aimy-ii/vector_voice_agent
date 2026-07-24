@@ -91,7 +91,7 @@ async def test_для_счётчика_ноль_история_с_начала(s
 async def test_реплика_не_годится_цикл_рвётся(script):
     client = FakeChecker([CheckerVerdict(reply_usable=False, step_closed=False)])
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})
-    updated = await run_checker(
+    updated, _ = await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="э-э")],
@@ -115,25 +115,26 @@ async def test_цикл_останавливается_на_первом_нез�
         status={"name": "pending", "city": "pending"},
         attempts={"name": 1, "city": 1},
     )
-    # who_studies ещё не доступен без закрытых предыдущих — только name и city
-    # после закрытия name. Сделаем оба доступными: name closed by first verdict.
-    updated = await run_checker(
+    # caller_name уже в профиле — name закрывает код до модели.
+    # city без поля в профиле: модель сказала «закрыт» — не верим, цикл рвётся.
+    updated, _ = await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="Андрей, Пермь")],
-        profile={},
+        profile={"caller_name": "Андрей"},
         turn=2,
         client=client,
     )
     assert updated.status.get("name") == "closed"
     assert updated.status.get("city") != "closed"
-    assert len(client.calls) == 2
+    assert len(client.calls) == 1
+    assert client.calls[0]["step_id"] == "city"
 
 
 async def test_модель_не_ответила_шаги_не_тронуты(script):
     client = FakeChecker([None])
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})
-    updated = await run_checker(
+    updated, _ = await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="Андрей")],
@@ -146,15 +147,15 @@ async def test_модель_не_ответила_шаги_не_тронуты(s
 
 async def test_порог_исчерпан_закрывает_без_модели(script):
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
-    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
-    updated = await run_checker(
+    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 5})
+    updated, _ = await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="потом скажу")],
         profile={},
-        turn=3,
+        turn=6,
         client=client,
-        attempt_limit=2,
+        attempt_limit=5,
     )
     assert updated.status["name"] == "closed"
     assert not any(c["step_id"] == "name" for c in client.calls)
@@ -163,7 +164,7 @@ async def test_порог_исчерпан_закрывает_без_модел�
 async def test_счётчик_ноль_модель_не_вызывается(script):
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
     progress = ScriptProgress(status={}, attempts={})
-    updated = await run_checker(
+    updated, _ = await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="Меня зовут Андрей, я из Перми")],
@@ -173,6 +174,137 @@ async def test_счётчик_ноль_модель_не_вызывается(sc
     )
     assert client.calls == []
     assert updated.status.get("name") != "closed"
+
+
+async def test_question_с_пустыми_fills_не_закрывается(script):
+    """Модель сказала «закрыт», поля профиля пустые — не верим."""
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = ScriptProgress(
+        status={"theory_format": "pending"},
+        attempts={"theory_format": 1},
+    )
+    # Предшественники закрыты, чтобы theory_format был доступен.
+    for step_id in ("name", "city", "who_studies", "experience", "transmission", "terms"):
+        progress.status[step_id] = "closed"
+        progress.attempts[step_id] = 1
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="У меня проспект Просвещения, адрес")],
+        profile={
+            "caller_name": "Мария",
+            "city": "Пермь",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+        },
+        turn=5,
+        client=client,
+    )
+    assert updated.status.get("theory_format") != "closed"
+    assert any(c["step_id"] == "theory_format" for c in client.calls)
+
+
+async def test_question_с_заполненным_fills_закрывается(script):
+    """Поле профиля заполнилось — шаг закрывает код без модели."""
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = ScriptProgress(
+        status={"theory_format": "pending"},
+        attempts={"theory_format": 1},
+    )
+    for step_id in ("name", "city", "who_studies", "experience", "transmission", "terms"):
+        progress.status[step_id] = "closed"
+        progress.attempts[step_id] = 1
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="Очно в классе")],
+        profile={
+            "caller_name": "Мария",
+            "city": "Пермь",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
+        turn=5,
+        client=client,
+    )
+    assert updated.status["theory_format"] == "closed"
+    assert not any(c["step_id"] == "theory_format" for c in client.calls)
+
+
+async def test_inform_не_попадает_в_pending(script):
+    """Inform чекеру на суд не отдаём — закрытие только по доставке."""
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = ScriptProgress(
+        status={"terms": "pending"},
+        attempts={"terms": 1},
+    )
+    for step_id in ("name", "city", "who_studies", "experience", "transmission"):
+        progress.status[step_id] = "closed"
+        progress.attempts[step_id] = 1
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="У меня проспект Просвещения, адрес")],
+        profile={
+            "caller_name": "Мария",
+            "city": "Пермь",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+        },
+        turn=4,
+        client=client,
+    )
+    assert not any(c["step_id"] == "terms" for c in client.calls)
+    assert updated.status.get("terms") != "closed"
+
+
+async def test_inform_check_закрывается_ответом_на_проверку(script):
+    """inform_check закрывается чекером по ответу на проверочный вопрос."""
+    from graph.checker import closure_criterion
+
+    practice = script.step("practice")
+    assert practice.kind == "inform_check"
+    assert practice.check_question
+    assert "проверочн" in closure_criterion(practice)
+
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = ScriptProgress(
+        status={"practice": "pending"},
+        attempts={"practice": 1},
+    )
+    for step_id in (
+        "name",
+        "city",
+        "who_studies",
+        "experience",
+        "transmission",
+        "terms",
+        "theory_format",
+        "included",
+    ):
+        progress.status[step_id] = "closed"
+        progress.attempts[step_id] = 1
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="Да, такой подход мне подходит")],
+        profile={
+            "caller_name": "Мария",
+            "city": "Пермь",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
+        turn=6,
+        client=client,
+    )
+    assert client.calls and client.calls[0]["step_id"] == "practice"
+    assert updated.status["practice"] == "closed"
 
 
 def test_close_delivered_inform_только_inform(script):

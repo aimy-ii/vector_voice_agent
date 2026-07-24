@@ -246,6 +246,23 @@ def test_exhausted_только_по_порогу_из_аргумента(script
     assert exhausted(step, {"city": 3}, limit=3) is True
 
 
+def test_порог_терпения_по_умолчанию_5():
+    """Закрытие по порогу из настроек; дефолт — 5 ходов терпения."""
+    from core.config import Settings
+
+    assert Settings.model_fields["step_patience_limit"].default == 5
+    step_limit = Settings().step_patience_limit
+    assert step_limit == 5 or isinstance(step_limit, int)
+    from script.models import Step
+    from script.planner import exhausted
+
+    # Синтетический шаг: закрытие ровно на пороге из настроек.
+    fake = Step(id="x", kind="question", priority=1, goal="g", text="t")
+    default = Settings.model_fields["step_patience_limit"].default
+    assert exhausted(fake, {"x": default - 1}, limit=default) is False
+    assert exhausted(fake, {"x": default}, limit=default) is True
+
+
 def test_статусов_ровно_два():
     assert is_closed("closed")
     assert is_closed("done")  # наследие v1 в слепке

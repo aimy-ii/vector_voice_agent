@@ -44,6 +44,14 @@ _VERBATIM_ONLY_HEAD = (
 )
 
 
+def head_is_verbatim_only(steps: Sequence[Step]) -> bool:
+    """В шапке только дословные шаги — короткая реакция, без ведения скрипта.
+
+    Тем же условием включается короткий потолок токенов в ``respond_node``.
+    """
+    return bool(steps) and all(step.verbatim for step in steps)
+
+
 def fill_facts(text: str, facts: Mapping[str, Any]) -> str:
     """Подставляет факты в текст скрипта.
 
@@ -229,10 +237,10 @@ def steps_block(
             "подводи разговор к завершению."
         )
 
-    speakable = [step for step in steps if not step.verbatim]
-    if not speakable:
+    if head_is_verbatim_only(steps):
         return _VERBATIM_ONLY_HEAD
 
+    speakable = [step for step in steps if not step.verbatim]
     lines = [
         "Шапка скрипта на этот ход. Новый вопрос — только один; уже "
         "спрашивавшиеся отрабатывай, когда уместно по разговору, не затыкай "
@@ -437,7 +445,7 @@ def build_turn_messages(
     else:
         head = []
 
-    ask_for_move = any(not step.verbatim for step in head)
+    ask_for_move = bool(head) and not head_is_verbatim_only(head)
     blocks: list[str] = [
         persona_block(script),
         naturalness_block(ask_for_move=ask_for_move),

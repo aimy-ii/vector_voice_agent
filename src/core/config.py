@@ -82,8 +82,18 @@ class Settings(BaseSettings):
     script_version: str | None = None
     #: Каталог с JSON-скриптами. Пусто — каталог `data` рядом с кодом.
     script_dir: str | None = None
-    #: Порог попыток задать шаг: исчерпан — чекер закрывает без модели.
-    step_attempt_limit: int = 2
+    #: Порог ходов терпения по шагу: сколько раз шаг может лежать в шапке,
+    #: прежде чем чекер закроет его без ответа клиента. Это не «попытки
+    #: спросить», а терпение: шапка собирается каждый ход.
+    step_patience_limit: int = Field(
+        default=5,
+        validation_alias=AliasChoices(
+            "step_patience_limit",
+            "STEP_PATIENCE_LIMIT",
+            "step_attempt_limit",
+            "STEP_ATTEMPT_LIMIT",
+        ),
+    )
 
     # ─── Redis: рабочий прогресс скрипта звонка ─────────────────────────────
     #: Адрес Redis. Совпадает с ``REDIS_URI`` сервера LangGraph.

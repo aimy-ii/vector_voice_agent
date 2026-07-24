@@ -94,6 +94,28 @@ _REQUEST_MARKERS: frozenset[str] = frozenset(
         "а про",
         "а насчёт",
         "а что по",
+        "повтори",
+        "повторите",
+        "перефразируй",
+        "перефразируйте",
+        "не понял",
+        "не поняла",
+        "ещё раз",
+        "что вы сказали",
+    }
+)
+
+#: Просьба повторить последний дословный блок — без модели.
+_REPEAT_MARKERS: frozenset[str] = frozenset(
+    {
+        "повтори",
+        "повторите",
+        "перефразируй",
+        "перефразируйте",
+        "не понял",
+        "не поняла",
+        "ещё раз",
+        "что вы сказали",
     }
 )
 
@@ -250,6 +272,47 @@ def find_aside(text: str, catalogue: dict[str, Sequence[str]]) -> str | None:
     return None
 
 
+def marker_hits(text: str, markers: Iterable[str]) -> bool:
+    """Есть ли признак в реплике.
+
+    Однословный — среди слов, многословный — подстрокой на границах слов.
+
+    Args:
+        text: реплика клиента (уже можно сырую — нормализуем внутри).
+        markers: набор признаков.
+
+    Returns:
+        True, если сработал хотя бы один признак.
+    """
+    haystack = normalize(text)
+    if not haystack:
+        return False
+    words = haystack.split()
+    word_set = set(words)
+    for marker in markers:
+        needle = normalize(marker)
+        if not needle:
+            continue
+        if " " not in needle:
+            if needle == "как":
+                # «как раз» — усилитель, не вопросительное слово.
+                if any(
+                    words[i] == "как" and (i + 1 >= len(words) or words[i + 1] != "раз")
+                    for i in range(len(words))
+                ):
+                    return True
+                continue
+            if needle in word_set:
+                return True
+            continue
+        # Многословный: подстрока, но только на границах слов
+        # («а про» не ловит «да просто»).
+        pattern = r"(?:^|\s)" + re.escape(needle) + r"(?:\s|$)"
+        if re.search(pattern, haystack) is not None:
+            return True
+    return False
+
+
 def _has_question_marker(text: str) -> bool:
     """Есть ли знак вопроса, вопросительное слово или просьба рассказать.
 
@@ -261,11 +324,19 @@ def _has_question_marker(text: str) -> bool:
     """
     if "?" in text:
         return True
-    haystack = normalize(text)
-    if not haystack:
-        return False
-    markers = _QUESTION_MARKERS | _REQUEST_MARKERS
-    return any(normalize(marker) in haystack for marker in markers)
+    return marker_hits(text, _QUESTION_MARKERS | _REQUEST_MARKERS)
+
+
+def is_repeat_request(text: str) -> bool:
+    """Просит ли клиент повторить последнюю реплику агента.
+
+    Args:
+        text: реплика клиента.
+
+    Returns:
+        True, если это просьба повторить / перефразировать.
+    """
+    return marker_hits(text, _REPEAT_MARKERS)
 
 
 def has_something_to_answer(text: str, *, script: CompiledScript) -> bool:

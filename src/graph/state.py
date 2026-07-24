@@ -49,7 +49,7 @@ class CallState(TypedDict, total=False):
         messages: история звонка на этот ход (редьюсер на замену).
         script_id / script_version: закреплённый скрипт звонка.
         step_status: pending / closed по шагам (зеркало Redis).
-        step_attempts: счётчик взятий генератором.
+        step_attempts: счётчик ходов терпения (сколько раз шаг лежал в шапке).
         step_taken_turn: ход первого взятия шага.
         script_progress: слепок прогресса (на конец звонка — на постоянку).
         profile: собранный профиль.
@@ -104,6 +104,9 @@ class CallState(TypedDict, total=False):
     branch_candidates: list[str]
     turn_result: dict[str, Any]
     call_finished: bool
+    last_verbatim_step: str | None
+    last_verbatim_text: str | None
+    repeat_verbatim: bool
 
 
 def new_state_defaults() -> dict[str, Any]:
@@ -142,4 +145,7 @@ def new_state_defaults() -> dict[str, Any]:
         "branch_candidates": [],
         "turn_result": {},
         "call_finished": False,
+        "last_verbatim_step": None,
+        "last_verbatim_text": None,
+        "repeat_verbatim": False,
     }

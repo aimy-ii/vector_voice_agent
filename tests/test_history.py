@@ -137,6 +137,9 @@ def test_has_something_to_answer(script):
         "в Санкт-Петербурге",
         "хотел бы обучаться на механике",
         "сам собираюсь учиться",
+        "да просто хочу на механике",
+        "мне всё как раз подходит",
+        "никак не решу",
     ):
         assert has_something_to_answer(text, script=script) is False, text
     for text in (
@@ -150,5 +153,17 @@ def test_has_something_to_answer(script):
         "подскажите, а автомат сложнее?",
         "объясните про рассрочку",
         "а насчёт медкомиссии",
+        "повторите",
+        "не понял",
+        "ещё раз",
     ):
         assert has_something_to_answer(text, script=script) is True, text
+
+
+def test_is_repeat_request():
+    from graph.history import is_repeat_request
+
+    for text in ("повторите", "не понял", "ещё раз", "Перефразируйте пожалуйста"):
+        assert is_repeat_request(text) is True, text
+    for text in ("да просто хочу на механике", "расскажите про автомат", "механика"):
+        assert is_repeat_request(text) is False, text

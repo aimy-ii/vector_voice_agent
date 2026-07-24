@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import logging
+import time
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
@@ -52,8 +53,8 @@ _RETRYABLE = (
 
 #: httpx-клиенты по id event loop: чужой цикл на воркере сервера недопустим.
 _http_clients: dict[int, httpx.AsyncClient] = {}
-#: Кэш ChatOpenAI: (id цикла, модель, температура, потолок токенов) → клиент.
-_chat_cache: dict[tuple[str, str, float, int], ChatOpenAI] = {}
+#: Кэш ChatOpenAI: (id цикла, id клиента, модель, температура, потолок) → клиент.
+_chat_cache: dict[tuple[str, str, str, float, int], ChatOpenAI] = {}
 
 
 class LLMTurnFailed(RuntimeError):
@@ -114,20 +115,21 @@ def _http_client_for_loop() -> httpx.AsyncClient:
     key = id(loop)
     client = _http_clients.get(key)
     if client is None or client.is_closed:
+        # Старый транспорт мёртв — ChatOpenAI с ним в кэше больше не годны.
+        stale = [cache_key for cache_key in _chat_cache if cache_key[0] == str(key)]
+        for cache_key in stale:
+            _chat_cache.pop(cache_key, None)
         client = httpx.AsyncClient(**_client_kwargs())
         _http_clients[key] = client
     return client
 
 
 def _close_http_clients() -> None:
-    """Закрывает процессные httpx-клиенты при выключении интерпретатора."""
-    for client in list(_http_clients.values()):
-        try:
-            if not client.is_closed:
-                # atexit синхронный: закрываем транспорт без await.
-                client.close()
-        except Exception:  # noqa: BLE001
-            pass
+    """Отпускает процессные httpx-клиенты при выключении интерпретатора.
+
+    У ``httpx.AsyncClient`` есть только ``aclose()``; в синхронном atexit
+    await недоступен — просто сбрасываем ссылки, процесс всё равно гаснет.
+    """
     _http_clients.clear()
     _chat_cache.clear()
 
@@ -145,8 +147,8 @@ async def get_llm(
     """Асинхронный клиент модели с бюджетом хода и прокси по флагу.
 
     HTTP-клиент общий на процесс (на текущий event loop). Объекты
-    ``ChatOpenAI`` кэшируются по модели, температуре и потолку токенов.
-    Сигнатура вызова прежняя: ``async with get_llm() as llm``.
+    ``ChatOpenAI`` кэшируются по модели, температуре, потолку токенов и
+    идентификатору живого httpx-клиента.
 
     Args:
         fast: True — быстрая модель (`LLM_MODEL_FAST`), False — основная.
@@ -160,10 +162,10 @@ async def get_llm(
     temp = settings.llm_temperature if temperature is None else temperature
     tokens = settings.llm_max_tokens if max_tokens is None else max_tokens
     loop_id = id(asyncio.get_running_loop())
-    cache_key = (str(loop_id), model_name, float(temp), int(tokens))
+    http_client = _http_client_for_loop()
+    cache_key = (str(loop_id), str(id(http_client)), model_name, float(temp), int(tokens))
     chat = _chat_cache.get(cache_key)
     if chat is None:
-        http_client = _http_client_for_loop()
         chat = ChatOpenAI(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key or "not-needed",
@@ -188,6 +190,7 @@ async def astream_structured(
     text_field: str | None = None,
     on_delta: Callable[[str], None] | None = None,
     budget: float | None = None,
+    purpose: str | None = None,
 ) -> dict[str, Any]:
     """Делает вызов модели и опционально стримит прирост текста.
 
@@ -203,6 +206,8 @@ async def astream_structured(
         text_field: имя поля с текстом реплики; None — без стрима в эфир.
         on_delta: колбэк прироста текста; None — стримить не нужно.
         budget: потолок ожидания в секундах; None — из настроек.
+        purpose: назначение вызова для лога (``чекер``, ``город``,
+            ``филиал``, ``генератор``); None — не логировать итог.
 
     Returns:
         Последний собранный объект ответа.
@@ -212,6 +217,8 @@ async def astream_structured(
     """
     limit = settings.turn_budget_seconds if budget is None else budget
     structured = llm.with_structured_output(schema, method="json_schema")
+    model_name = getattr(llm, "model_name", None) or getattr(llm, "model", "?")
+    started = time.perf_counter()
 
     async def _run() -> dict[str, Any]:
         sent = 0
@@ -229,23 +236,33 @@ async def astream_structured(
         return final
 
     last: Exception | None = None
-    for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
-        try:
-            async with _llm_semaphore:
-                result = await asyncio.wait_for(_run(), timeout=limit)
-            if result:
-                return result
-            last = LLMTurnFailed("Пустой ответ модели")
-        except TimeoutError as exc:
-            log.warning("Модель не уложилась в бюджет хода %.1f с", limit)
-            raise LLMTurnFailed("Бюджет хода исчерпан") from exc
-        except _RETRYABLE as exc:
-            last = exc
-            log.warning("Сетевой сбой вызова модели (попытка %s): %s", attempt, exc)
-            if attempt < LLM_RETRY_ATTEMPTS:
-                await asyncio.sleep(LLM_RETRY_DELAY)
-        except Exception as exc:  # noqa: BLE001
-            log.error("Ошибка вызова модели: %s", exc)
-            raise LLMTurnFailed(str(exc)) from exc
+    try:
+        for attempt in range(1, LLM_RETRY_ATTEMPTS + 1):
+            try:
+                async with _llm_semaphore:
+                    result = await asyncio.wait_for(_run(), timeout=limit)
+                if result:
+                    return result
+                last = LLMTurnFailed("Пустой ответ модели")
+            except TimeoutError as exc:
+                log.warning("Модель не уложилась в бюджет хода %.1f с", limit)
+                raise LLMTurnFailed("Бюджет хода исчерпан") from exc
+            except _RETRYABLE as exc:
+                last = exc
+                log.warning("Сетевой сбой вызова модели (попытка %s): %s", attempt, exc)
+                if attempt < LLM_RETRY_ATTEMPTS:
+                    await asyncio.sleep(LLM_RETRY_DELAY)
+            except Exception as exc:  # noqa: BLE001
+                log.error("Ошибка вызова модели: %s", exc)
+                raise LLMTurnFailed(str(exc)) from exc
 
-    raise LLMTurnFailed(str(last))
+        raise LLMTurnFailed(str(last))
+    finally:
+        if purpose:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            log.info(
+                "[llm|done] %s, модель %s, %s мс",
+                purpose,
+                model_name,
+                elapsed_ms,
+            )
