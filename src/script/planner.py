@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal, Mapping
 
 from script.build import CompiledScript
@@ -28,6 +29,16 @@ CLOSED: frozenset[str] = frozenset({"closed"})
 
 #: Совместимость со старыми слепками в треде (идущие звонки на v1).
 _LEGACY_CLOSED: frozenset[str] = frozenset({"done", "refused", "skipped", "closed"})
+
+#: Виды шагов, которые рассказывают, а не спрашивают.
+_INFORM_KINDS: frozenset[str] = frozenset({"inform", "inform_check"})
+
+#: Клиент сам спросил про обучение / условия / состав пакета.
+_CLIENT_ASKS_INFORM = re.compile(
+    r"обучен|условия|что\s+вход|стоимость|сколько\s+стоит|срок|"
+    r"как\s+проход|теория|практик|пакет|под\s+ключ|что\s+включ",
+    re.IGNORECASE,
+)
 
 
 def is_closed(status: str | None) -> bool:
@@ -134,32 +145,100 @@ def iter_available(
     return [item[2] for item in ranked]
 
 
+def client_asks_inform(text: str) -> bool:
+    """Клиент сам спросил про обучение, условия или состав пакета.
+
+    Args:
+        text: реплика клиента.
+
+    Returns:
+        True, если в тексте есть повод выдать информирующий блок.
+    """
+    return bool(text and _CLIENT_ASKS_INFORM.search(text))
+
+
+def answered_inform_check(
+    script: CompiledScript,
+    *,
+    status: Mapping[str, str],
+    pending_step: str | None,
+) -> bool:
+    """Клиент ответил на проверочный вопрос предыдущего информирующего блока.
+
+    Args:
+        script: скомпилированный скрипт.
+        status: статусы шагов после чекера.
+        pending_step: шаг прошлого хода (с проверочным вопросом).
+
+    Returns:
+        True, если прошлый ``inform_check`` только что закрыт.
+    """
+    if not pending_step:
+        return False
+    step = script.steps.get(pending_step)
+    if step is None or step.kind != "inform_check":
+        return False
+    return is_closed(status.get(pending_step))
+
+
+def _fresh_questions_left(
+    script: CompiledScript,
+    *,
+    status: Mapping[str, str],
+    attempts: Mapping[str, int],
+    profile: Mapping[str, str],
+) -> bool:
+    """Есть ли ещё незаданный вопрос или действие среди доступных шагов."""
+    for step in iter_available(script, status=status, profile=profile):
+        if int(attempts.get(step.id, 0)) > 0:
+            continue
+        if step.kind not in _INFORM_KINDS:
+            return True
+    return False
+
+
 def script_head(
     script: CompiledScript,
     *,
     status: Mapping[str, str],
     attempts: Mapping[str, int],
     profile: Mapping[str, str],
+    inform_reason: bool = False,
 ) -> list[Step]:
     """Шапка для генератора: все уже заданные и один новый с верхушки.
+
+    Информирующий шаг попадает в шапку как новый только по поводу: клиент
+    спросил сам, ответил на проверочный вопрос предыдущего блока, либо
+    вопросов среди доступных больше нет. Иначе ждёт, берём вопрос.
 
     Args:
         script: скомпилированный скрипт.
         status: статусы шагов.
         attempts: счётчики попыток.
         profile: собранный профиль.
+        inform_reason: внешний повод (вопрос клиента или ответ на проверку).
 
     Returns:
         Список шагов: сначала со счётчиком больше нуля, затем один с нулём.
     """
     asked: list[Step] = []
     fresh: Step | None = None
+    questions_left = _fresh_questions_left(
+        script, status=status, attempts=attempts, profile=profile
+    )
+    allow_inform = inform_reason or not questions_left
+
     for step in iter_available(script, status=status, profile=profile):
         count = int(attempts.get(step.id, 0))
         if count > 0:
             asked.append(step)
-        elif fresh is None:
-            fresh = step
+            continue
+        if fresh is not None:
+            continue
+        if step.kind in _INFORM_KINDS and not allow_inform:
+            continue
+        fresh = step
+
     if fresh is not None:
         return [*asked, fresh]
     return asked
@@ -172,6 +251,7 @@ def pick_step(
     profile: Mapping[str, str],
     resume: str | None = None,
     attempts: Mapping[str, int] | None = None,
+    inform_reason: bool = False,
 ) -> Step | None:
     """Выбирает ведущий шаг хода (первый из шапки или resume).
 
@@ -181,6 +261,7 @@ def pick_step(
         profile: собранный профиль.
         resume: шаг, на который надо вернуться после отработки вопроса.
         attempts: счётчики попыток; нужны для шапки.
+        inform_reason: повод выдать информирующий блок.
 
     Returns:
         Описание шага или None, если закрывать больше нечего.
@@ -191,7 +272,13 @@ def pick_step(
         if is_available(step, status=status, profile=profile):
             return step
 
-    head = script_head(script, status=status, attempts=counts, profile=profile)
+    head = script_head(
+        script,
+        status=status,
+        attempts=counts,
+        profile=profile,
+        inform_reason=inform_reason,
+    )
     return head[0] if head else None
 
 
@@ -202,6 +289,7 @@ def peek_next_step(
     status: Mapping[str, str],
     profile: Mapping[str, str],
     attempts: Mapping[str, int] | None = None,
+    inform_reason: bool = False,
 ) -> Step | None:
     """Какой шаг откроется, если текущий закроется прямо сейчас.
 
@@ -211,6 +299,7 @@ def peek_next_step(
         status: статусы шагов на этот ход.
         profile: собранный профиль на этот ход.
         attempts: счётчики попыток.
+        inform_reason: повод выдать информирующий блок.
 
     Returns:
         Следующий шаг или None, если после закрытия текущего открывать нечего.
@@ -228,6 +317,7 @@ def peek_next_step(
         status=preview_status,
         profile=preview_profile,
         attempts=attempts,
+        inform_reason=inform_reason,
     )
 
 

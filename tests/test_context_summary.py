@@ -15,9 +15,25 @@ def test_имя_три_случая():
 
 
 def test_заглушка_без_вызова_модели():
-    phrase = city_filler(["так, {place}… секунду, открываю по {place}"], city_name="Москва")
-    assert "Москва" in phrase
+    phrase = city_filler(["так, {place}… секунду, открываю по {place}"])
+    assert phrase is not None
+    assert "город" in phrase
     assert "поищу" not in phrase.lower()
+
+
+def test_в_заглушку_не_попадает_чужой_текст():
+    from graph.fillers import FILLER_SUBJECTS, pick_filler
+
+    phrase = pick_filler(
+        ["так, {place}… открываю по {place}"],
+        subject="город",
+    )
+    assert phrase is not None
+    assert "себя" not in phrase
+    assert "Для" not in phrase
+    assert pick_filler(["так, {place}"], subject="себя") is None
+    assert pick_filler(["так"], subject=None) is None
+    assert FILLER_SUBJECTS == frozenset({"город", "филиал", "стоимость"})
 
 
 def test_контекст_статика_один_раз_цена_фразой(fake_kb):

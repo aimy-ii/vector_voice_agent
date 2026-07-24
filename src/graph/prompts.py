@@ -41,7 +41,12 @@ _NATURALNESS = (
     "прозвучавшее в understood, даже если спрашивали не об этом.\n"
     "- Обращайся по имени и только по имени; отчество не используй никогда.\n"
     "- Не начинай со второго вступления, если перед тобой уже прозвучала "
-    "фраза-заглушка: продолжай с места, без повторного «добрый день»."
+    "фраза-заглушка: продолжай с места, без повторного «добрый день».\n"
+    "- Не оценивай выбор клиента и не восторгайся: ни «прекрасный выбор», "
+    "ни «какой удобный район», ни «отличное решение». Услышал — принял и "
+    "пошёл дальше. Короткое «понятно» или «хорошо» допустимо.\n"
+    "- Не приписывай ценность тому, о чём нет данных в контексте: про район "
+    "и прочее без фактов не говори как о хорошем."
 )
 
 
@@ -141,18 +146,25 @@ def _describe_step(
     """Собирает строки описания одного шага для промпта."""
     asked = "уже спрашивали, ответа нет" if attempts > 0 else "новый вопрос"
     lines = [f"{heading}: {step.id} ({step.kind}, {asked}).", f"Задача: {step.goal}"]
-    text = render_step_text(step, profile)
-    if text:
-        filled = fill_facts(text, facts)
-        if step.verbatim:
+    if step.verbatim:
+        # Текст дословного блока в промпт не идёт: его выталкивает писатель.
+        lines.append(
+            "После твоей реплики будет произнесён дословный блок отдельным "
+            "голосом. Его содержание тебе неизвестно — не повторяй и не "
+            "пересказывай его, не угадывай формулировки."
+        )
+        if step.check_question:
             lines.append(
-                "Этот текст произносится дословно и уже отправлен в эфир "
-                "отдельно. Не повторяй и не пересказывай его:\n" + filled
+                "В конце блока собеседнику зададут проверочный вопрос — "
+                "свой вопрос на ту же тему не дублируй."
             )
-        else:
+    else:
+        text = render_step_text(step, profile)
+        if text:
+            filled = fill_facts(text, facts)
             lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
-    if step.check_question:
-        lines.append(f"Проверочный вопрос в конце: {step.check_question}")
+        if step.check_question:
+            lines.append(f"Проверочный вопрос в конце: {step.check_question}")
     if step.options:
         lines.append(
             "Предложи выбор из вариантов, а не открытый вопрос: " + ", ".join(step.options)
@@ -253,6 +265,31 @@ def facts_block(facts: Mapping[str, Any]) -> str:
     )
 
 
+def facts_for_generator(
+    facts: Mapping[str, Any],
+    steps: Sequence[Step],
+) -> dict[str, Any]:
+    """Факты для генератора: без тех, что нужны только дословным шагам.
+
+    Args:
+        facts: факты хода.
+        steps: шапка шагов.
+
+    Returns:
+        Копия фактов без плейсхолдеров дословных блоков (например price_line).
+    """
+    payload = dict(facts)
+    # Дословные шаги факты в промпт не получают: подстановку делает писатель.
+    if any(step.verbatim for step in steps):
+        for step in steps:
+            if not step.verbatim:
+                continue
+            text = step.text or ""
+            for key in _PLACEHOLDER.findall(text):
+                payload.pop(key, None)
+    return payload
+
+
 def filler_spoken_block(spoken_filler: str | None) -> str:
     """Сообщает генератору, какая заглушка уже прозвучала.
 
@@ -351,7 +388,7 @@ def build_turn_messages(
     blocks.append(persona_block(script))
     blocks.append(profile_block(script, profile))
 
-    facts_text = facts_block(facts)
+    facts_text = facts_block(facts_for_generator(facts, head))
     if facts_text:
         blocks.append(facts_text)
 

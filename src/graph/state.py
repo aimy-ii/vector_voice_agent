@@ -57,6 +57,7 @@ class CallState(TypedDict, total=False):
         conversation_context: единый документ контекста.
         head_steps: шапка шагов этого хода.
         spoken_filler: заглушка, ушедшая в эфир до генератора.
+        last_filler_turn: номер хода, на котором звучала заглушка.
         branch_candidates: отобранные резолвером слаги филиалов.
     """
 
@@ -99,6 +100,7 @@ class CallState(TypedDict, total=False):
     spoken: list[str]
     spoken_filler: str | None
     fillers_used: list[str]
+    last_filler_turn: int
     branch_candidates: list[str]
     turn_result: dict[str, Any]
     call_finished: bool
@@ -136,6 +138,7 @@ def new_state_defaults() -> dict[str, Any]:
         "spoken": [],
         "spoken_filler": None,
         "fillers_used": [],
+        "last_filler_turn": 0,
         "branch_candidates": [],
         "turn_result": {},
         "call_finished": False,

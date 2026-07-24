@@ -384,14 +384,94 @@ async def test_заглушка_города_без_модели_и_видна_�
         }
     )
     assert state.get("spoken_filler")
-    assert (
-        "Пермь" in (state["spoken_filler"] or "")
-        or "перм" in (state["spoken_filler"] or "").lower()
-    )
+    filler = state["spoken_filler"] or ""
+    assert "город" in filler
+    assert "Пермь" not in filler
+    assert "перм" not in filler.lower()
     # Резолвер LLM не звался для точного совпадения.
     assert resolvers[0].calls == 0
     prompt = model["messages"][0].content
-    assert "уже ушла фраза" in prompt or state["spoken_filler"] in prompt
+    assert "уже ушла фраза" in prompt or filler in prompt
+
+
+async def test_заглушка_не_берёт_текст_клиента(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "В каком городе?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Для себя")],
+            "step_status": {"name": "closed", "city": "closed"},
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {"caller_name": "Мария", "city": "Пермь"},
+        }
+    )
+    # Ход без похода в справочник за городом/филиалом — заглушки нет.
+    assert not state.get("spoken_filler")
+
+
+async def test_заглушка_не_два_хода_подряд(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "profile": {"caller_name": "Мария"},
+            "turn": 1,
+            "last_filler_turn": 1,
+        }
+    )
+    # turn станет 2, last_filler_turn=1 → подряд, молчим.
+    assert not state.get("spoken_filler")
+
+
+async def test_дословный_блок_один_раз_без_пересказа(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Хорошо, сейчас расскажу.",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Расскажите про условия обучения")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state["current_step"] == "terms"
+    prompt = model["messages"][0].content
+    terms_text = "Срок обучения на категорию B"
+    assert terms_text not in prompt
+    текст = "".join(spoken)
+    assert текст.count("Как вам") <= 1
+    assert "два с половиной месяца" in текст or "Расскажу, как всё устроено" in текст
 
 
 async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(

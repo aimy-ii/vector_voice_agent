@@ -1,8 +1,8 @@
 """Фразы в эфир, пока идёт поиск города и филиала.
 
-Только из данных, вызовов модели ноль. Шаблон — реакция, а не объявление о
-поиске. Генератор видит, какая фраза прозвучала, и не начинает со второго
-вступления.
+Только из данных, вызовов модели ноль. Предмет подставляет код из закрытого
+набора: город, филиал, стоимость. Свободный текст клиента в шаблон не
+попадает никогда. Нет предмета — нет заглушки.
 """
 
 from __future__ import annotations
@@ -10,69 +10,108 @@ from __future__ import annotations
 import random
 from typing import Sequence
 
+#: Предметы, которые код вправе подставить в шаблон.
+FILLER_SUBJECTS: frozenset[str] = frozenset({"город", "филиал", "стоимость"})
+
+SUBJECT_CITY = "город"
+SUBJECT_BRANCH = "филиал"
+SUBJECT_COST = "стоимость"
+
 #: Запасные шаблоны, если в скрипте пусто. Плейсхолдер ``{place}``.
 _DEFAULT_CITY = (
-    "так, {place}… секунду, открываю по {place}",
-    "а, {place}… так, гляну по {place}",
+    "так, {place}… секунду, открываю",
+    "а, {place}… так, гляну",
     "{place}, да… минутку, открою карточку",
     "так, по {place}… секундочку",
-    "угу, {place}… сейчас открою",
+    "угу, {place}… сейчас сверю",
 )
 
 _DEFAULT_BRANCH = (
-    "так, район… секунду, гляну филиалы рядом",
-    "а, поняла… минутку, открою адреса",
-    "так, сейчас сверю с филиалами",
-    "угу… секунду, посмотрю что ближе",
-    "район, да… сейчас подберу пару адресов",
+    "так, {place}… секунду, гляну адреса",
+    "а, {place}… минутку, открою",
+    "так, по {place}… сейчас сверю",
+    "угу, {place}… секунду, посмотрю",
+    "{place}, да… сейчас подберу пару адресов",
+)
+
+_DEFAULT_COST = (
+    "так, {place}… секунду, открою",
+    "а, {place}… минутку, гляну",
+    "угу, {place}… сейчас сверю",
 )
 
 
 def pick_filler(
     templates: Sequence[str],
     *,
-    place: str | None = None,
+    subject: str | None,
     used: Sequence[str] | None = None,
     defaults: Sequence[str] = (),
-) -> str:
+) -> str | None:
     """Выбирает фразу-заглушку без вызова модели.
 
     Args:
         templates: шаблоны из данных скрипта.
-        place: город или ориентир для подстановки.
+        subject: предмет из ``FILLER_SUBJECTS``; иначе молчим.
         used: уже звучавшие фразы в этом звонке.
         defaults: запасные шаблоны.
 
     Returns:
-        Готовая фраза для эфира.
+        Готовая фраза для эфира или ``None``, если предмета нет.
     """
+    if subject not in FILLER_SUBJECTS:
+        return None
     pool = [t for t in templates if t and t.strip()] or list(defaults)
     if not pool:
-        return "так… секунду"
+        return None
     used_set = set(used or [])
     fresh = [t for t in pool if t not in used_set]
     choice = random.choice(fresh or list(pool))
-    if place and "{place}" in choice:
-        return choice.format(place=place)
-    if place and "{city}" in choice:
-        return choice.format(city=place)
+    if "{place}" in choice:
+        return choice.format(place=subject)
+    if "{city}" in choice:
+        return choice.format(city=subject)
+    # Шаблон без плейсхолдера — предмет всё равно зафиксирован кодом.
     return choice
 
 
 def city_filler(
     templates: Sequence[str],
     *,
-    city_name: str,
     used: Sequence[str] | None = None,
-) -> str:
-    """Заглушка на поиск города."""
-    return pick_filler(templates, place=city_name, used=used, defaults=_DEFAULT_CITY)
+) -> str | None:
+    """Заглушка на поиск города; предмет всегда «город»."""
+    return pick_filler(
+        templates,
+        subject=SUBJECT_CITY,
+        used=used,
+        defaults=_DEFAULT_CITY,
+    )
 
 
 def branch_filler(
     templates: Sequence[str],
     *,
     used: Sequence[str] | None = None,
-) -> str:
-    """Заглушка на поиск филиала."""
-    return pick_filler(templates, place=None, used=used, defaults=_DEFAULT_BRANCH)
+) -> str | None:
+    """Заглушка на поиск филиала; предмет всегда «филиал»."""
+    return pick_filler(
+        templates,
+        subject=SUBJECT_BRANCH,
+        used=used,
+        defaults=_DEFAULT_BRANCH,
+    )
+
+
+def cost_filler(
+    templates: Sequence[str],
+    *,
+    used: Sequence[str] | None = None,
+) -> str | None:
+    """Заглушка на поиск стоимости; предмет всегда «стоимость»."""
+    return pick_filler(
+        templates,
+        subject=SUBJECT_COST,
+        used=used,
+        defaults=_DEFAULT_COST,
+    )

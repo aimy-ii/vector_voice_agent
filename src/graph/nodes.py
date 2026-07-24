@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import logging
-import random
 from typing import Any, Mapping
 
 from langchain_core.messages import AIMessage
@@ -24,7 +23,7 @@ from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform, run_checker
 from graph.context import context_from_state, merge_static
 from graph.facts import collect_facts, needs_of
-from graph.fillers import branch_filler, city_filler
+from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
     is_acknowledgement,
     last_agent_text,
@@ -42,7 +41,13 @@ from graph.summary import build_summary
 from kb.client import vector_kb
 from script.build import CompiledScript
 from script.models import Step
-from script.planner import peek_next_step, render_step_text, script_head
+from script.planner import (
+    answered_inform_check,
+    client_asks_inform,
+    peek_next_step,
+    render_step_text,
+    script_head,
+)
 from script.price import price_line
 from script.source import registry
 from script.store import (
@@ -210,12 +215,20 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     progress = await _load_progress(state)
     profile = dict(state.get("profile") or {})
     turn = int(state.get("turn") or 0)
+    user_text = last_user_text(state.get("messages") or [])
+
+    inform_reason = client_asks_inform(user_text) or answered_inform_check(
+        script,
+        status=progress.status,
+        pending_step=state.get("pending_step") or state.get("delivered_step"),
+    )
 
     head = script_head(
         script,
         status=progress.status,
         attempts=progress.attempts,
         profile=profile,
+        inform_reason=inform_reason,
     )
     # Взяли — сразу пометили.
     for step in head:
@@ -233,7 +246,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         if any(s.id == resume.id for s in head):
             step = resume
 
-    user_text = last_user_text(state.get("messages") or [])
     skip_model = bool(step and step.verbatim and is_acknowledgement(user_text))
 
     if step is None:
@@ -259,6 +271,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
             status=progress.status,
             profile=profile,
             attempts=progress.attempts,
+            inform_reason=inform_reason,
         )
         if step is not None
         else None
@@ -292,19 +305,26 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch: dict[str, Any] = {}
     fillers_used = list(state.get("fillers_used") or [])
     spoken_filler: str | None = None
+    turn = int(state.get("turn") or 0)
+    last_filler_turn = int(state.get("last_filler_turn") or 0)
+    # Заглушка не звучит два хода подряд (нулевой ход — «ещё не было»).
+    allow_filler = settings.lookup_fillers_enabled and not (
+        last_filler_turn > 0 and last_filler_turn == turn - 1
+    )
     ctx = context_from_state(state.get("conversation_context"))
+
+    def _speak_filler(phrase: str | None) -> None:
+        nonlocal spoken_filler
+        if not phrase or spoken_filler:
+            return
+        spoken_filler = phrase
+        say(phrase + " ")
+        fillers_used.append(phrase)
 
     # Город ещё не зафиксирован — резолвер, не перечень в промпт генератора.
     if not state.get("city_slug") and not ctx.city_slug and user_text:
-        if settings.lookup_fillers_enabled:
-            hint = user_text.strip().split()[-1] if user_text.strip() else "город"
-            spoken_filler = city_filler(
-                script.params.city_fillers,
-                city_name=hint,
-                used=fillers_used,
-            )
-            say(spoken_filler + " ")
-            fillers_used.append(spoken_filler)
+        if allow_filler:
+            _speak_filler(city_filler(script.params.city_fillers, used=fillers_used))
 
         cities = await vector_kb.list_cities()
         journal.append({"call": "list_cities", "found": len(cities)})
@@ -353,10 +373,8 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         and "branch" in (step.fills or [])
         and user_text
     ):
-        if settings.lookup_fillers_enabled and not spoken_filler:
-            spoken_filler = branch_filler(script.params.branch_fillers, used=fillers_used)
-            say(spoken_filler + " ")
-            fillers_used.append(spoken_filler)
+        if allow_filler and not spoken_filler:
+            _speak_filler(branch_filler(script.params.branch_fillers, used=fillers_used))
 
         branches = await vector_kb.list_branches(city_slug)
         journal.append({"call": "list_branches", "slug": city_slug, "found": len(branches)})
@@ -396,6 +414,15 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     # Прочие needs шага — без city_choices в промпт.
     extra_needs = [n for n in needs if n != "branches" or "branch_options" not in facts]
+    need_price_lookup = (
+        "price" in extra_needs
+        and city_slug
+        and not (ctx.static_text and "Стоимость" in ctx.static_text)
+        and "price_line" not in facts
+    )
+    if need_price_lookup and allow_filler and not spoken_filler:
+        _speak_filler(cost_filler(script.params.fillers, used=fillers_used))
+
     if city_slug and extra_needs:
         more, more_journal = await collect_facts(
             vector_kb,
@@ -420,10 +447,7 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
                     price_line=more.get("price_line"),
                 )
 
-    if settings.filler_threshold_ms > 0 and script.params.fillers and not spoken_filler:
-        spoken_filler = random.choice(script.params.fillers)
-        say(spoken_filler + " ")
-        fillers_used.append(spoken_filler)
+    # Общая заглушка без предмета не звучит: предмет обязателен.
 
     stage("lookup", f"справочник: {len(journal)} обращений", "done", calls=journal[-5:])
     patch.update(
@@ -437,6 +461,8 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "spoken": list(state.get("spoken") or []) + ([spoken_filler] if spoken_filler else []),
         }
     )
+    if spoken_filler:
+        patch["last_filler_turn"] = turn
     return patch
 
 

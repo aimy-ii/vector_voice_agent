@@ -204,7 +204,8 @@ async def run_checker(
     pending = [
         step
         for step in iter_available(script, status=updated.status, profile=profile)
-        if not exhausted(step, updated.attempts, limit=limit)
+        if int(updated.attempts.get(step.id, 0)) > 0
+        and not exhausted(step, updated.attempts, limit=limit)
     ]
     if not pending or not reply.strip():
         return updated

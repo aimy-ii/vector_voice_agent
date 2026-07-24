@@ -79,9 +79,109 @@ def test_срок_ждёт_коробку(script):
 
     status["transmission"] = "closed"
     profile["transmission"] = "механика"
+    # Без повода информирующий terms ждёт — берём вопрос про формат теории.
     step = pick_step(script, status=status, profile=profile)
     assert step is not None
+    assert step.id == "theory_format"
+
+    step = pick_step(script, status=status, profile=profile, inform_reason=True)
+    assert step is not None
     assert step.id == "terms"
+
+
+def test_информирующий_без_повода_не_в_шапке(script):
+    profile = {
+        "city": "perm",
+        "caller_name": "Мария",
+        "student_is_caller": "да",
+        "experience": "впервые",
+        "transmission": "механика",
+    }
+    status = {
+        "name": "closed",
+        "city": "closed",
+        "who_studies": "closed",
+        "experience": "closed",
+        "transmission": "closed",
+    }
+    head = script_head(script, status=status, attempts={}, profile=profile)
+    assert head[0].id == "theory_format"
+    assert all(s.id != "terms" for s in head)
+
+
+def test_информирующий_по_вопросу_клиента(script):
+    from script.planner import client_asks_inform
+
+    assert client_asks_inform("А что входит в обучение?")
+    assert not client_asks_inform("Для себя")
+
+    profile = {
+        "city": "perm",
+        "caller_name": "Мария",
+        "student_is_caller": "да",
+        "experience": "впервые",
+        "transmission": "механика",
+    }
+    status = {
+        "name": "closed",
+        "city": "closed",
+        "who_studies": "closed",
+        "experience": "closed",
+        "transmission": "closed",
+    }
+    head = script_head(script, status=status, attempts={}, profile=profile, inform_reason=True)
+    assert head[0].id == "terms"
+
+
+def test_информирующий_после_проверочного_ответа(script):
+    from script.planner import answered_inform_check
+
+    profile = {
+        "city": "perm",
+        "caller_name": "Мария",
+        "student_is_caller": "да",
+        "experience": "впервые",
+        "transmission": "механика",
+        "theory_format": "очно",
+    }
+    status = {
+        "name": "closed",
+        "city": "closed",
+        "who_studies": "closed",
+        "experience": "closed",
+        "transmission": "closed",
+        "terms": "closed",
+        "theory_format": "closed",
+        "included": "closed",
+        "practice": "closed",
+    }
+    assert answered_inform_check(script, status=status, pending_step="practice")
+    # Оба свежие — без повода только вопрос; информ ждёт.
+    head_no = script_head(script, status=status, attempts={}, profile=profile)
+    assert head_no[0].id == "branch"
+    assert all(s.id != "price" for s in head_no)
+    # С поводом информ всё ещё после вопроса по приоритету, но когда вопрос
+    # уже в шапке как заданный — price входит.
+    head = script_head(
+        script,
+        status=status,
+        attempts={"branch": 1},
+        profile=profile,
+        inform_reason=True,
+    )
+    assert any(s.id == "price" for s in head)
+
+
+def test_информирующий_когда_вопросов_не_осталось(script):
+    profile = {"city": "perm", "caller_name": "Мария", "payment_pref": "целиком"}
+    status = {
+        sid: "closed"
+        for sid in script.step_order
+        if sid not in {"tax_deduction", "closing", "messenger"}
+    }
+    head = script_head(script, status=status, attempts={}, profile=profile)
+    assert head
+    assert head[0].id == "tax_deduction"
 
 
 def test_пропуск_не_ставит_статус_а_отсеивает_из_шапки(script):

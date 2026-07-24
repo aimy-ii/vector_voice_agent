@@ -157,3 +157,18 @@ async def test_порог_исчерпан_закрывает_без_модел�
     )
     assert updated.status["name"] == "closed"
     assert not any(c["step_id"] == "name" for c in client.calls)
+
+
+async def test_счётчик_ноль_модель_не_вызывается(script):
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = ScriptProgress(status={}, attempts={})
+    updated = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="Меня зовут Андрей, я из Перми")],
+        profile={},
+        turn=1,
+        client=client,
+    )
+    assert client.calls == []
+    assert updated.status.get("name") != "closed"

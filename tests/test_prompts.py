@@ -53,10 +53,35 @@ def test_профиль_разделяет_роли(script):
     assert "student_name" in block
 
 
-def test_дословный_шаг_запрещает_пересказ(script):
+def test_дословный_шаг_без_текста_в_промпте(script):
     block = step_block(script.step("practice"), {}, {})
-    assert "дословно" in block
-    assert "Не повторяй" in block
+    assert "дословный блок" in block.lower() or "дословно" in block.lower()
+    assert "Не повторяй" in block or "не пересказывай" in block.lower()
+    # Текст шага в системное сообщение не попадает.
+    assert "индивидуальному графику" not in block
+    assert script.step("practice").text not in block
+
+
+def test_цена_дословного_шага_не_в_промпте_генератора(script):
+    from graph.prompts import facts_for_generator
+
+    step = script.step("price")
+    facts = {"price_line": "Стоимость — от 43900 рублей.", "city": {"name": "Пермь"}}
+    cleaned = facts_for_generator(facts, [step])
+    assert "price_line" not in cleaned
+    block = step_block(step, {}, facts)
+    assert "от 43900" not in block
+    assert "{price_line}" not in block
+
+
+def test_промпт_запрещает_восторги_и_разрешает_короткое_подтверждение(script):
+    block = steps_block([script.step("city")], {}, {}, attempts={})
+    lowered = block.lower()
+    assert "не оценивай выбор" in lowered or "не восторгайся" in lowered
+    assert "прекрасный выбор" in lowered or "отличное решение" in lowered
+    assert "понятно" in lowered or "хорошо" in lowered
+    # Запрет именно на похвалу, не на короткое подтверждение.
+    assert "запрещ" not in lowered or "понятно" in lowered
 
 
 def test_обычный_шаг_разрешает_свои_слова(script):
@@ -116,12 +141,6 @@ def test_контекст_впереди_персонажа(script):
     )
     content = messages[0].content
     assert content.index("Статика: город Пермь") < content.index("Дарья")
-
-
-def test_цена_подставляется_в_дословный_шаг(script):
-    block = step_block(script.step("price"), {}, {"price_line": "Стоимость — от 43900 рублей."})
-    assert "от 43900 рублей" in block
-    assert "{price_line}" not in block
 
 
 def test_ни_один_goal_не_объясняет_мотивацию(raw_script):
