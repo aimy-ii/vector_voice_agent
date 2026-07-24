@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.checker import (
     CheckerVerdict,
+    close_delivered_inform,
     history_slice_for,
     run_checker,
 )
@@ -172,3 +173,26 @@ async def test_счётчик_ноль_модель_не_вызывается(sc
     )
     assert client.calls == []
     assert updated.status.get("name") != "closed"
+
+
+def test_close_delivered_inform_только_inform(script):
+    """Доставка закрывает inform; inform_check остаётся на чекере."""
+    progress = ScriptProgress(
+        status={"terms": "pending", "practice": "pending"},
+        attempts={"terms": 1, "practice": 1},
+    )
+    after_inform = close_delivered_inform(
+        script=script,
+        progress=progress,
+        pending_step="terms",
+        delivered=True,
+    )
+    assert after_inform.status["terms"] == "closed"
+
+    after_check = close_delivered_inform(
+        script=script,
+        progress=progress,
+        pending_step="practice",
+        delivered=True,
+    )
+    assert after_check.status.get("practice") != "closed"

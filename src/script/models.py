@@ -111,8 +111,6 @@ class Step(BaseModel):
     options: list[str] = Field(default_factory=list)
     #: Текст произносится дословно и моделью не переформулируется.
     verbatim: bool = False
-    #: Сколько раз можно вернуться к шагу, прежде чем считать его отказом.
-    max_attempts: int = 2
 
 
 class Help(BaseModel):

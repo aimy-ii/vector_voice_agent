@@ -79,17 +79,19 @@ def test_срок_ждёт_коробку(script):
 
     status["transmission"] = "closed"
     profile["transmission"] = "механика"
-    # Без повода информирующий terms ждёт — берём вопрос про формат теории.
+    # Формат теории ждёт закрытия terms; вопросов больше нет — terms идёт сам.
+    step = pick_step(script, status=status, profile=profile)
+    assert step is not None
+    assert step.id == "terms"
+
+    status["terms"] = "closed"
     step = pick_step(script, status=status, profile=profile)
     assert step is not None
     assert step.id == "theory_format"
 
-    step = pick_step(script, status=status, profile=profile, inform_reason=True)
-    assert step is not None
-    assert step.id == "terms"
 
-
-def test_информирующий_без_повода_не_в_шапке(script):
+def test_theory_format_ждёт_terms(script):
+    """theory_format недоступен, пока terms не закрыт, и открывается после."""
     profile = {
         "city": "perm",
         "caller_name": "Мария",
@@ -104,9 +106,35 @@ def test_информирующий_без_повода_не_в_шапке(scrip
         "experience": "closed",
         "transmission": "closed",
     }
+    assert is_available(script.step("theory_format"), status=status, profile=profile) is False
+    status["terms"] = "closed"
+    assert is_available(script.step("theory_format"), status=status, profile=profile) is True
+
+
+def test_информирующий_без_повода_не_в_шапке(script):
+    profile = {
+        "city": "perm",
+        "caller_name": "Мария",
+        "student_is_caller": "да",
+        "experience": "впервые",
+        "transmission": "механика",
+        "theory_format": "очно",
+    }
+    status = {
+        "name": "closed",
+        "city": "closed",
+        "who_studies": "closed",
+        "experience": "closed",
+        "transmission": "closed",
+        "terms": "closed",
+        "theory_format": "closed",
+        "included": "closed",
+        "practice": "closed",
+    }
+    # Есть свежий вопрос branch — информ price без повода не в шапке.
     head = script_head(script, status=status, attempts={}, profile=profile)
-    assert head[0].id == "theory_format"
-    assert all(s.id != "terms" for s in head)
+    assert head[0].id == "branch"
+    assert all(s.id != "price" for s in head)
 
 
 def test_информирующий_по_вопросу_клиента(script):
@@ -205,6 +233,17 @@ def test_счётчик_ноль_значит_не_задавали(script):
     assert exhausted(step, {"name": 1}, limit=2) is False
     assert exhausted(step, {"name": 2}, limit=2) is True
     assert next_attempt({"name": 1}, "name") == 2
+
+
+def test_exhausted_только_по_порогу_из_аргумента(script):
+    """Порог живёт в настройках; поля max_attempts у шага больше нет."""
+    from script.models import Step
+
+    step = script.step("city")
+    assert "max_attempts" not in Step.model_fields
+    assert exhausted(step, {"city": 2}, limit=2) is True
+    assert exhausted(step, {"city": 2}, limit=3) is False
+    assert exhausted(step, {"city": 3}, limit=3) is True
 
 
 def test_статусов_ровно_два():

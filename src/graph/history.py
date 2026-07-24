@@ -18,6 +18,8 @@ from typing import Iterable, Sequence
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
+from script.build import CompiledScript
+
 #: Короткие подтверждения, после которых спрашивать нечего — можно сразу
 #: выталкивать следующий блок скрипта, не тратя ход на модель.
 _ACKS: frozenset[str] = frozenset(
@@ -52,6 +54,25 @@ _ACKS: frozenset[str] = frozenset(
 
 #: Сколько слов ещё считается коротким подтверждением.
 _ACK_MAX_WORDS = 3
+
+#: Вопросительные слова и обороты: есть в реплике — генератору есть что ответить.
+_QUESTION_MARKERS: frozenset[str] = frozenset(
+    {
+        "сколько",
+        "какой",
+        "какая",
+        "какие",
+        "когда",
+        "где",
+        "как",
+        "почему",
+        "зачем",
+        "можно ли",
+        "есть ли",
+        "правда ли",
+        "а если",
+    }
+)
 
 
 def strip_system(messages: Iterable[BaseMessage]) -> list[BaseMessage]:
@@ -204,3 +225,47 @@ def find_aside(text: str, catalogue: dict[str, Sequence[str]]) -> str | None:
         if matches_triggers(text, triggers):
             return aside_id
     return None
+
+
+def _has_question_marker(text: str) -> bool:
+    """Есть ли в тексте знак вопроса или вопросительное слово из списка.
+
+    Args:
+        text: реплика клиента.
+
+    Returns:
+        True, если найден вопросительный признак.
+    """
+    if "?" in text:
+        return True
+    haystack = normalize(text)
+    if not haystack:
+        return False
+    return any(normalize(marker) in haystack for marker in _QUESTION_MARKERS)
+
+
+def has_something_to_answer(text: str, *, script: CompiledScript) -> bool:
+    """Есть ли в реплике клиента то, на что генератору надо ответить.
+
+    Ответ по существу шага («механика», «в Санкт-Петербурге») — False:
+    отвечать нечего, шаг закроет чекер. True — справка, возражение или
+    вопросительный признак.
+
+    Args:
+        text: реплика клиента.
+        script: скомпилированный скрипт (каталог справок и возражений).
+
+    Returns:
+        True, если модель должна отработать реплику до дословного блока.
+    """
+    if not text or not text.strip():
+        return False
+    if is_acknowledgement(text):
+        return False
+    catalogue: dict[str, Sequence[str]] = {
+        **{k: v.triggers for k, v in script.helps.items()},
+        **{k: v.triggers for k, v in script.objections.items()},
+    }
+    if find_aside(text, catalogue) is not None:
+        return True
+    return _has_question_marker(text)

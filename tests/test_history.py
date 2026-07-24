@@ -123,3 +123,19 @@ def test_смешанная_реплика_даёт_и_ответ_и_вопро�
     helps = {k: v.triggers for k, v in script.helps.items()}
     assert find_aside(text, helps) == "gibdd_support"
     assert is_acknowledgement(text) is False
+
+
+def test_has_something_to_answer(script):
+    """Таблица: когда генератору есть / нечего ответить."""
+    from graph.history import has_something_to_answer
+
+    for text in ("", "   ", "да, конечно", "механика", "в Санкт-Петербурге"):
+        assert has_something_to_answer(text, script=script) is False, text
+    for text in (
+        "а сколько стоит?",
+        "когда практика",
+        "дорого",
+        "подумаю",
+        "а медкомиссия нужна?",
+    ):
+        assert has_something_to_answer(text, script=script) is True, text

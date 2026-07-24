@@ -241,7 +241,10 @@ def close_delivered_inform(
     pending_step: str | None,
     delivered: bool,
 ) -> ScriptProgress:
-    """Закрывает дословный/информирующий шаг после успешной доставки.
+    """Закрывает шаг ``inform`` после успешной доставки реплики.
+
+    ``inform_check`` сюда не входит: его закрывает чекер по ответу на
+    проверочный вопрос, а не факт произнесения блока.
 
     Args:
         script: скомпилированный скрипт.
@@ -258,6 +261,6 @@ def close_delivered_inform(
     step = script.steps.get(pending_step)
     if step is None:
         return updated
-    if step.kind in ("inform", "inform_check") and int(updated.attempts.get(step.id, 0)) > 0:
+    if step.kind == "inform" and int(updated.attempts.get(step.id, 0)) > 0:
         updated.status[step.id] = "closed"
     return updated

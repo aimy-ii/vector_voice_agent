@@ -11,11 +11,15 @@
   ставит `JsonOutputParser`, который в стриминге отдаёт частичные объекты,
   и мы выталкиваем прирост текстового поля в эфир по мере генерации.
 * **Прокси включается флагом** `IS_PROXY`, а не наличием переменных.
+* **HTTP-клиент на процесс.** Создаётся лениво под текущий event loop и
+  переиспользуется: иначе каждый вызов модели — новое TCP/TLS (и SOCKS при
+  прокси), а keepalive не работает.
 """
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
@@ -46,6 +50,11 @@ _RETRYABLE = (
     httpx.RemoteProtocolError,
 )
 
+#: httpx-клиенты по id event loop: чужой цикл на воркере сервера недопустим.
+_http_clients: dict[int, httpx.AsyncClient] = {}
+#: Кэш ChatOpenAI: (id цикла, модель, температура, потолок токенов) → клиент.
+_chat_cache: dict[tuple[str, str, float, int], ChatOpenAI] = {}
+
 
 class LLMTurnFailed(RuntimeError):
     """Модель не ответила в бюджет хода — узел уходит в заглушку."""
@@ -74,22 +83,13 @@ def response_format_from(model: type[BaseModel], *, name: str) -> dict[str, Any]
     }
 
 
-@asynccontextmanager
-async def get_llm(
-    *,
-    fast: bool = False,
-    temperature: float | None = None,
-) -> AsyncIterator[ChatOpenAI]:
-    """Асинхронный клиент модели с бюджетом хода и прокси по флагу.
+def _client_kwargs() -> dict[str, Any]:
+    """Параметры httpx.AsyncClient из настроек.
 
-    Args:
-        fast: True — быстрая модель (`LLM_MODEL_FAST`), False — основная.
-        temperature: температура; None — значение из настроек.
-
-    Yields:
-        Готовый клиент `ChatOpenAI`.
+    Returns:
+        Словарь аргументов конструктора клиента.
     """
-    client_kwargs: dict[str, Any] = {
+    kwargs: dict[str, Any] = {
         "timeout": httpx.Timeout(
             connect=settings.llm_connect_timeout,
             read=settings.llm_read_timeout,
@@ -100,21 +100,84 @@ async def get_llm(
         "trust_env": False,
     }
     if settings.proxy_url:
-        client_kwargs["proxy"] = settings.proxy_url
+        kwargs["proxy"] = settings.proxy_url
+    return kwargs
 
-    async with httpx.AsyncClient(**client_kwargs) as http_client:
-        yield ChatOpenAI(
+
+def _http_client_for_loop() -> httpx.AsyncClient:
+    """Лениво создаёт или отдаёт общий httpx-клиент для текущего event loop.
+
+    Returns:
+        Живой ``httpx.AsyncClient``, привязанный к работающему циклу.
+    """
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    client = _http_clients.get(key)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(**_client_kwargs())
+        _http_clients[key] = client
+    return client
+
+
+def _close_http_clients() -> None:
+    """Закрывает процессные httpx-клиенты при выключении интерпретатора."""
+    for client in list(_http_clients.values()):
+        try:
+            if not client.is_closed:
+                # atexit синхронный: закрываем транспорт без await.
+                client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _http_clients.clear()
+    _chat_cache.clear()
+
+
+atexit.register(_close_http_clients)
+
+
+@asynccontextmanager
+async def get_llm(
+    *,
+    fast: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> AsyncIterator[ChatOpenAI]:
+    """Асинхронный клиент модели с бюджетом хода и прокси по флагу.
+
+    HTTP-клиент общий на процесс (на текущий event loop). Объекты
+    ``ChatOpenAI`` кэшируются по модели, температуре и потолку токенов.
+    Сигнатура вызова прежняя: ``async with get_llm() as llm``.
+
+    Args:
+        fast: True — быстрая модель (`LLM_MODEL_FAST`), False — основная.
+        temperature: температура; None — значение из настроек.
+        max_tokens: потолок токенов ответа; None — из настроек.
+
+    Yields:
+        Готовый клиент `ChatOpenAI`.
+    """
+    model_name = settings.fast_model if fast else settings.llm_model
+    temp = settings.llm_temperature if temperature is None else temperature
+    tokens = settings.llm_max_tokens if max_tokens is None else max_tokens
+    loop_id = id(asyncio.get_running_loop())
+    cache_key = (str(loop_id), model_name, float(temp), int(tokens))
+    chat = _chat_cache.get(cache_key)
+    if chat is None:
+        http_client = _http_client_for_loop()
+        chat = ChatOpenAI(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key or "not-needed",
-            model=settings.fast_model if fast else settings.llm_model,
-            temperature=settings.llm_temperature if temperature is None else temperature,
-            max_tokens=settings.llm_max_tokens,
+            model=model_name,
+            temperature=temp,
+            max_tokens=tokens,
             streaming=True,
             http_async_client=http_client,
             # Без этого LangChain ломает транспорт httpx при SOCKS-прокси:
             # https://github.com/langchain-ai/langchain/issues/11334
             http_socket_options=(),
         )
+        _chat_cache[cache_key] = chat
+    yield chat
 
 
 async def astream_structured(

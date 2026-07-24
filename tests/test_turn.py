@@ -433,12 +433,6 @@ async def test_заглушка_не_два_хода_подряд(
 async def test_дословный_блок_один_раз_без_пересказа(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Хорошо, сейчас расскажу.",
-    }
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Расскажите про условия обучения")],
@@ -466,12 +460,90 @@ async def test_дословный_блок_один_раз_без_переска
         }
     )
     assert state["current_step"] == "terms"
-    prompt = model["messages"][0].content
-    terms_text = "Срок обучения на категорию B"
-    assert terms_text not in prompt
+    assert state["skip_model"] is True
+    assert model["calls"] == 0
     текст = "".join(spoken)
     assert текст.count("Как вам") <= 1
     assert "два с половиной месяца" in текст or "Расскажу, как всё устроено" in текст
+
+
+async def test_plan_verbatim_без_вопроса_пропускает_модель(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Дословный шаг + реплика без вопроса/справки → skip_model, модель не зовётся."""
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="механика")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state["current_step"] == "terms"
+    assert state["skip_model"] is True
+    # terms с needs идёт через lookup, но при skip_model — сразу в verbatim.
+    assert state["route"] in ("verbatim", "lookup")
+    assert model["calls"] == 0
+
+
+async def test_plan_verbatim_с_вопросом_зовёт_модель(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Дословный шаг + вопрос → модель отвечает коротко, затем блок."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Сейчас расскажу.",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="а сколько стоит?")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state["current_step"] == "terms"
+    assert state["skip_model"] is False
+    assert model["calls"] == 1
+    assert "два с половиной месяца" in "".join(spoken) or "Расскажу" in "".join(spoken)
 
 
 async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(

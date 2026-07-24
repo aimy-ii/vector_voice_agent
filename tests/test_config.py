@@ -69,3 +69,15 @@ def test_прокси_не_собирается_из_пустых_строк():
     assert s.proxy_host is None
     assert s.proxy_port is None
     assert s.proxy_url is None
+
+
+def test_filler_threshold_ms_отсутствует():
+    assert "filler_threshold_ms" not in Settings.model_fields
+
+
+def test_lookup_fillers_выключены_по_умолчанию():
+    assert Settings.model_fields["lookup_fillers_enabled"].default is False
+
+
+def test_llm_max_tokens_short_есть():
+    assert Settings.model_fields["llm_max_tokens_short"].default == 200

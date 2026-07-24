@@ -25,7 +25,7 @@ from graph.context import context_from_state, merge_static
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
-    is_acknowledgement,
+    has_something_to_answer,
     last_agent_text,
     last_user_text,
     strip_system,
@@ -246,7 +246,9 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         if any(s.id == resume.id for s in head):
             step = resume
 
-    skip_model = bool(step and step.verbatim and is_acknowledgement(user_text))
+    skip_model = bool(
+        step and step.verbatim and not has_something_to_answer(user_text, script=script)
+    )
 
     if step is None:
         route = ROUTE_RESPOND
@@ -490,13 +492,14 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     system_len = len(messages[0].content) if messages else 0
     stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
+    max_tokens = settings.llm_max_tokens_short if any(step.verbatim for step in head) else None
 
     def _on_delta(delta: str) -> None:
         spoken.append(delta)
         say(delta)
 
     try:
-        async with get_llm() as llm:
+        async with get_llm(max_tokens=max_tokens) as llm:
             raw = await astream_structured(
                 llm,
                 messages,
