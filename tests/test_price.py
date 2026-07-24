@@ -54,7 +54,7 @@ def test_подтверждённая_сумма_звучит_как_точна�
     assert "47000" in reliable
     assert reliable != unreliable
     assert "стартовая" not in reliable.lower()
-    assert "полная стоимость" in reliable.lower()
+    assert "составляет" in reliable.lower()
 
 
 def test_оговорка_справочника_вслух_не_попадает(texts):

@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.27.0",
     "socksio>=1.0.0",
     "python-dotenv>=1.0.1",
+    "redis>=6.4.0,<8.0",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +56,7 @@ lint.ignore = ["UP006", "UP007", "UP035", "D417", "E501"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D103", "D100"]
+"tests/*" = ["D103", "D100", "D102", "D107"]
 
 [dependency-groups]
 dev = [

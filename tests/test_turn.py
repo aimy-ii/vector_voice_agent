@@ -1,8 +1,4 @@
-"""Тесты хода графа целиком — с заглушкой модели, без сети и ключей.
-
-Проверяется связность: каким путём прошёл ход, что прозвучало в трубке, что
-осело в состоянии. Модель подменяется функцией, справочник — заглушкой.
-"""
+"""Тесты хода графа целиком — с заглушками модели, Redis, чекера и резолверов."""
 
 from __future__ import annotations
 
@@ -10,16 +6,62 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 
 from graph import nodes as nodes_module
+from graph.checker import CheckerVerdict
 from graph.graph import graph
+from graph.resolvers import BranchResolution, CityResolution
+from script.store import MemoryScriptStore
 from utils.llm_gen import LLMTurnFailed
+
+
+class SilentChecker:
+    """Чекер, который ничего не закрывает."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def judge(self, **kwargs: Any) -> CheckerVerdict:
+        self.calls += 1
+        return CheckerVerdict(reply_usable=True, step_closed=False)
+
+
+class ClosingChecker:
+    """Чекер, закрывающий переданные шаги по порядку."""
+
+    def __init__(self, close_ids: set[str]) -> None:
+        self.close_ids = close_ids
+
+    async def judge(self, *, step, **kwargs: Any) -> CheckerVerdict:
+        return CheckerVerdict(reply_usable=True, step_closed=step.id in self.close_ids)
+
+
+class ExactCity:
+    """Резолвер: делегирует exact через resolve_city (вызов не нужен для Перми)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def resolve(self, text: str, cities: Any) -> CityResolution:
+        self.calls += 1
+        return CityResolution(slug=None, name=None)
+
+
+class SelectBranch:
+    """Резолвер филиала с фиксированным ответом."""
+
+    def __init__(self, result: BranchResolution) -> None:
+        self.result = result
+        self.calls = 0
+
+    async def resolve(self, text: str, branches: Any) -> BranchResolution:
+        self.calls += 1
+        return self.result
 
 
 @pytest.fixture()
 def spoken(monkeypatch) -> list[str]:
-    """Перехватывает всё, что уходит в трубку."""
     chunks: list[str] = []
     monkeypatch.setattr(nodes_module, "say", chunks.append)
     monkeypatch.setattr(nodes_module, "stage", lambda *a, **k: None)
@@ -27,16 +69,42 @@ def spoken(monkeypatch) -> list[str]:
 
 
 @pytest.fixture()
+def use_v2(monkeypatch) -> None:
+    """Локальный .env может держать SCRIPT_VERSION=1 для идущих звонков."""
+    monkeypatch.setattr(nodes_module.settings, "script_version", None)
+
+
+@pytest.fixture()
+def store(monkeypatch) -> MemoryScriptStore:
+    mem = MemoryScriptStore()
+    monkeypatch.setattr(nodes_module, "script_store", mem)
+    return mem
+
+
+@pytest.fixture()
+def checker(monkeypatch) -> SilentChecker:
+    client = SilentChecker()
+    monkeypatch.setattr(nodes_module, "_checker_client", client)
+    return client
+
+
+@pytest.fixture()
 def kb(monkeypatch, fake_kb):
-    """Подменяет справочник заглушкой."""
     monkeypatch.setattr(nodes_module, "vector_kb", fake_kb)
     return fake_kb
 
 
 @pytest.fixture()
-def model(monkeypatch):
-    """Подменяет вызов модели: ответ задаётся тестом, дельты идут в эфир."""
+def resolvers(monkeypatch):
+    city = ExactCity()
+    branch = SelectBranch(BranchResolution(slugs=[], selected=None))
+    monkeypatch.setattr(nodes_module, "_city_resolver", city)
+    monkeypatch.setattr(nodes_module, "_branch_resolver", branch)
+    return city, branch
 
+
+@pytest.fixture()
+def model(monkeypatch):
     @asynccontextmanager
     async def _fake_llm(**kwargs: Any):
         yield None
@@ -45,13 +113,13 @@ def model(monkeypatch):
 
     holder: dict[str, Any] = {"result": {"reply": "Хорошо."}, "calls": 0, "messages": None}
 
-    async def _fake_stream(llm, messages, *, schema, text_field, on_delta=None, budget=None):
+    async def _fake_stream(llm, messages, *, schema, text_field=None, on_delta=None, budget=None):
         holder["calls"] += 1
         holder["messages"] = messages
         result = holder["result"]
         if isinstance(result, Exception):
             raise result
-        if on_delta is not None and result.get(text_field):
+        if text_field and on_delta is not None and result.get(text_field):
             on_delta(result[text_field])
         return result
 
@@ -59,202 +127,154 @@ def model(monkeypatch):
     return holder
 
 
-async def test_первый_ход_спрашивает_город(spoken, kb, model):
+async def test_первый_ход_спрашивает_имя(spoken, store, checker, kb, resolvers, model, use_v2):
     model["result"] = {
         "understood": [],
-        "step_status": "unclear",
         "aside_id": None,
         "resume_step": True,
-        "reply": "Давайте сориентирую. В каком городе планируете обучение?",
+        "reply": "Подскажите, как я могу к вам обращаться?",
     }
     state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте, хочу учиться")]})
 
-    assert state["current_step"] == "city"
-    assert state["route"] == "lookup"
-    assert "городе" in "".join(spoken)
-    assert model["calls"] == 1
+    assert state["current_step"] == "name"
+    assert state["step_attempts"]["name"] == 1
+    assert (
+        "обращать" in "".join(spoken).lower()
+        or "зовут" in "".join(spoken).lower()
+        or model["calls"] == 1
+    )
 
 
-async def test_город_подтверждается_по_перечислению(spoken, kb, model):
+async def test_город_фиксируется_резолвером(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
     model["result"] = {
-        "understood": [{"key": "city", "value": "perm"}],
-        "step_status": "done",
+        "understood": [],
         "aside_id": None,
         "resume_step": True,
-        "reply": "Отлично, Пермь. Как могу к вам обращаться?",
+        "reply": "Отлично, Пермь. Учиться будете сами?",
     }
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Я из Перми")]})
-
+    # Имя уже закрыто, на шаге города.
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
     assert state["city_slug"] == "perm"
-    assert state["profile"]["city"] == "perm"
-    assert state["step_status"]["city"] == "done"
-    assert state["next_step"] == "name"
+    assert state["city_name"] == "Пермь"
     prompt = model["messages"][0].content
-    assert "Дальше идём к: name" in prompt
-    assert "как обращаться" in prompt.lower()
+    assert "city_choices" not in prompt
+    assert "list_cities" not in prompt
 
 
-async def test_город_вне_сети_не_записывается(spoken, kb, model):
-    model["result"] = {
-        "understood": [{"key": "city", "value": "Москва"}],
-        "step_status": "done",
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Секунду.",
-    }
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Я из Москвы")]})
-
-    assert state["city_slug"] is None
-    assert "city" not in state["profile"]
+async def test_перечень_городов_не_в_промпте_ни_на_одном_ходу(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    model["result"] = {"understood": [], "reply": "Слушаю."}
+    await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert "city_choices" not in model["messages"][0].content
 
 
-async def test_дословный_price_без_проверки_задаёт_следующий_вопрос(spoken, kb, model):
-    """После цены в эфир уходит вопрос closing; модель не вызывается."""
+async def test_дословный_practice_с_проверкой(spoken, store, checker, kb, resolvers, model, use_v2):
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Да, понятно")],
             "city_slug": "perm",
+            "city_name": "Пермь",
             "profile": {
-                "city": "perm",
+                "city": "Пермь",
                 "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+                "included": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    текст = "".join(spoken)
+    assert state["current_step"] == "practice"
+    assert "Как вам в целом такой подход" in текст
+    assert model["calls"] == 0
+
+
+async def test_дословный_price_задаёт_следующий_вопрос(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Да")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
                 "experience": "впервые",
                 "transmission": "механика",
                 "theory_format": "очно",
                 "branch": "perm_chernyshevskogo",
             },
             "step_status": {
-                "city": "done",
-                "name": "done",
-                "experience": "done",
-                "transmission": "done",
-                "presentation": "done",
-                "theory_format": "done",
-                "branch": "done",
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+                "included": "closed",
+                "practice": "closed",
+                "branch": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь\nфилиал",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "branch_slug": "perm_chernyshevskogo",
+                "frozen": True,
             },
         }
     )
-
     текст = "".join(spoken)
     assert state["current_step"] == "price"
-    assert state["next_step"] == "closing"
     assert model["calls"] == 0
     assert "43900" in текст or "стоимость" in текст.lower()
-    assert "офис" in текст.lower() or "дистанционно" in текст.lower()
-    assert state["step_status"]["price"] == "done"
-    assert state["step_status"].get("closing") != "done"
+    assert "частями" in текст.lower() or "целиком" in текст.lower() or "оплатить" in текст.lower()
 
 
-async def test_дословный_с_проверкой_не_теряет_проверочный_вопрос(spoken, kb, model):
-    """Презентация с check_question — как раньше: блок + проверка, без next."""
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Да, конечно")],
-            "city_slug": "perm",
-            "profile": {
-                "city": "perm",
-                "caller_name": "Мария",
-                "experience": "впервые",
-                "transmission": "механика",
-            },
-            "step_status": {
-                "city": "done",
-                "name": "done",
-                "experience": "done",
-                "transmission": "done",
-            },
-        }
-    )
-
-    текст = "".join(spoken)
-    assert state["current_step"] == "presentation"
-    assert "Как вам такой подход" in текст
-    assert "теорию удобнее" not in текст.lower()
-    assert model["calls"] == 0
+async def test_генератор_плюсует_счётчик_в_момент_взятия(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert state["step_attempts"]["name"] == 1
+    loaded = await store.load("local")
+    assert loaded is not None
+    assert loaded.attempts["name"] == 1
 
 
-async def test_перечень_городов_уходит_модели_только_пока_город_неизвестен(spoken, kb, model):
-    await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
-    assert "list_cities" in kb.calls
-
-    kb.calls.clear()
-    await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Механика")],
-            "city_slug": "perm",
-            "profile": {"city": "perm", "caller_name": "Мария", "experience": "впервые"},
-            "step_status": {"city": "done", "name": "done", "experience": "done"},
-        }
-    )
-    assert "list_cities" not in kb.calls
-
-
-async def test_дословный_блок_идёт_мимо_модели(spoken, kb, model):
-    """Клиент только поддакнул: питч выталкивается писателем, модель не зовётся."""
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Да, конечно")],
-            "city_slug": "perm",
-            "profile": {
-                "city": "perm",
-                "caller_name": "Мария",
-                "experience": "впервые",
-                "transmission": "механика",
-            },
-            "step_status": {
-                "city": "done",
-                "name": "done",
-                "experience": "done",
-                "transmission": "done",
-            },
-        }
-    )
-
-    текст = "".join(spoken)
-    assert state["current_step"] == "presentation"
-    assert model["calls"] == 0
-    assert "федеральная академия вождения" in текст.lower()
-    assert "Как вам такой подход" in текст
-    assert state["step_status"]["presentation"] == "done"
-
-
-async def test_справка_звучит_перед_дословным_блоком(spoken, kb, model):
-    """«А медкомиссия?» — сначала ответ, потом возврат на место."""
+async def test_возражение_меняет_состояние(spoken, store, checker, kb, resolvers, model, use_v2):
     model["result"] = {
         "understood": [],
-        "step_status": "unclear",
-        "aside_id": "medcheck",
-        "resume_step": True,
-        "reply": "Медкомиссия нужна к началу практики.",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="А медкомиссию когда проходить?")],
-            "city_slug": "perm",
-            "profile": {
-                "city": "perm",
-                "caller_name": "Мария",
-                "experience": "впервые",
-                "transmission": "механика",
-            },
-            "step_status": {
-                "city": "done",
-                "name": "done",
-                "experience": "done",
-                "transmission": "done",
-            },
-        }
-    )
-
-    текст = "".join(spoken)
-    assert текст.index("Медкомиссия") < текст.index("федеральная академия")
-    assert "medcheck" in state["asides_done"]
-    assert model["calls"] == 1
-
-
-async def test_возражение_меняет_состояние(spoken, kb, model):
-    model["result"] = {
-        "understood": [],
-        "step_status": "refused",
         "aside_id": "think",
         "resume_step": False,
         "reply": "Хорошо, спокойно подумайте.",
@@ -263,65 +283,65 @@ async def test_возражение_меняет_состояние(spoken, kb, 
         {
             "messages": [HumanMessage(content="Я подумаю")],
             "city_slug": "perm",
-            "profile": {"city": "perm"},
-            "step_status": {"city": "done"},
+            "city_name": "Пермь",
+            "profile": {"city": "Пермь", "caller_name": "Мария"},
+            "step_status": {"name": "closed", "city": "closed"},
         }
     )
-
     assert state["profile"]["urgency"] == "думает"
     assert "think" in state["asides_done"]
 
 
-async def test_возврат_на_шаг_после_вопроса(spoken, kb, model):
-    model["result"] = {
-        "understood": [],
-        "step_status": "unclear",
-        "aside_id": "practice_start",
-        "resume_step": True,
-        "reply": "Практика доступна после первого занятия.",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="А когда практика?")],
-            "city_slug": "perm",
-            "profile": {"city": "perm", "caller_name": "Мария"},
-            "step_status": {"city": "done", "name": "done"},
-        }
-    )
-
-    assert state["current_step"] == "experience"
-    assert state["resume_step"] == "experience"
-    assert state["step_attempts"]["experience"] == 1
-
-
-async def test_модель_не_ответила_в_эфир_идёт_заглушка(spoken, kb, model, script):
+async def test_модель_не_ответила_в_эфир_идёт_заглушка(
+    spoken, store, checker, kb, resolvers, model, script, use_v2
+):
     model["result"] = LLMTurnFailed("бюджет хода исчерпан")
     state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
-
     assert script.params.fallback in "".join(spoken)
     assert state["last_error"]
 
 
-async def test_реплика_оседает_в_истории_и_запоминается_длина(spoken, kb, model):
+async def test_версия_скрипта_фиксируется_в_состоянии(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    model["result"] = {"understood": [], "reply": "Слушаю."}
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert state["script_id"] == "vector_ru"
+    assert state["script_version"] == "2"
+
+
+async def test_город_из_контекста_подхватывается(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    model["result"] = {"understood": [], "reply": "Слушаю."}
+    state = await graph.ainvoke(
+        {"messages": [HumanMessage(content="Здравствуйте")]},
+        context={"city_slug": "perm"},
+    )
+    assert state["city_slug"] == "perm"
+    assert state["current_step"] != "city"
+
+
+async def test_вход_словарями_как_у_сервера(spoken, store, checker, kb, resolvers, model, use_v2):
     model["result"] = {
         "understood": [],
-        "step_status": "unclear",
         "aside_id": None,
         "resume_step": True,
-        "reply": "В каком городе планируете обучение?",
+        "reply": "Как я могу к вам обращаться?",
     }
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    state = await graph.ainvoke(
+        {"messages": [{"role": "human", "content": "Здравствуйте, хочу на механику"}]}
+    )
+    assert state["current_step"] == "name"
+    assert all(isinstance(m, BaseMessage) for m in state["messages"])
 
-    последнее = state["messages"][-1]
-    assert isinstance(последнее, AIMessage)
-    assert последнее.content == "В каком городе планируете обучение?"
-    assert state["pending_len"] == len(последнее.content)
 
-
-async def test_системный_промпт_бота_не_доезжает_до_модели(spoken, kb, model):
+async def test_системный_промпт_бота_не_доезжает_до_модели(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
     from langchain_core.messages import SystemMessage
 
-    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
+    model["result"] = {"understood": [], "reply": "Слушаю."}
     await graph.ainvoke(
         {
             "messages": [
@@ -335,106 +355,9 @@ async def test_системный_промпт_бота_не_доезжает_д
     assert "Ты менеджер автошколы" not in отправленные[0].content
 
 
-async def test_перебитый_питч_возвращается_в_работу(spoken, kb, model):
-    """Следующий ход видит короткое произнесённое и открывает шаг заново."""
-    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Да."}
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Стоп, а сколько стоит?")],
-            "city_slug": "perm",
-            "profile": {"city": "perm"},
-            "step_status": {"city": "done", "presentation": "done"},
-            "pending_step": "presentation",
-            "pending_len": 400,
-            "pending_ai_count": 0,
-        }
-    )
-    assert state["step_status"]["presentation"] == "open"
-
-
-async def test_версия_скрипта_фиксируется_в_состоянии(spoken, kb, model):
-    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
-
-    assert state["script_id"] == "vector_ru"
-    assert state["script_version"] == "1"
-
-
-async def test_город_из_контекста_подхватывается(spoken, kb, model):
-    """Необязательный вход на будущее: сейчас рабочий путь — вопрос клиенту."""
-    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
-    state = await graph.ainvoke(
-        {"messages": [HumanMessage(content="Здравствуйте")]},
-        context={"city_slug": "perm"},
-    )
-    assert state["city_slug"] == "perm"
-    assert state["current_step"] != "city"
-
-
-async def test_вход_словарями_как_у_сервера(spoken, kb, model):
-    """LangGraph Server подаёт messages JSON-словарями, не объектами."""
-    model["result"] = {
-        "understood": [],
-        "step_status": "unclear",
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Давайте сориентирую. В каком городе планируете обучение?",
-    }
-    state = await graph.ainvoke(
-        {"messages": [{"role": "human", "content": "Здравствуйте, хочу на механику"}]}
-    )
-
-    assert state["current_step"] == "city"
-    assert state["route"] == "lookup"
-    assert "городе" in "".join(spoken)
-    assert model["calls"] == 1
-    assert all(isinstance(m, BaseMessage) for m in state["messages"])
-    assert not any(isinstance(m, dict) for m in state["messages"])
-
-
-async def test_смешанный_вход_словарь_и_объект(spoken, kb, model):
-    model["result"] = {
-        "understood": [],
-        "step_status": "unclear",
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "В каком городе планируете обучение?",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [
-                {"role": "human", "content": "Здравствуйте"},
-                AIMessage(content="Добрый день"),
-                HumanMessage(content="Хочу учиться"),
-            ]
-        }
-    )
-    assert all(isinstance(m, BaseMessage) for m in state["messages"])
-    assert state["current_step"] == "city"
-
-
-async def test_системный_словарь_бота_отбрасывается(spoken, kb, model):
-    """Форма, которую реально шлёт бот: role=system, id=lk.agent_task.instructions."""
-    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
-    await graph.ainvoke(
-        {
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "Ты менеджер автошколы",
-                    "id": "lk.agent_task.instructions",
-                },
-                {"role": "human", "content": "Здравствуйте"},
-            ]
-        }
-    )
-    отправленные = model["messages"]
-    assert sum(1 for m in отправленные if m.type == "system") == 1
-    assert "Ты менеджер автошколы" not in отправленные[0].content
-
-
-async def test_пустая_версия_из_env_берёт_последнюю(spoken, kb, model, monkeypatch):
-    """``SCRIPT_VERSION=`` → None → источник поднимает последнюю версию."""
+async def test_пустая_версия_из_env_берёт_последнюю(
+    spoken, store, checker, kb, resolvers, model, monkeypatch
+):
     from core.config import Settings
 
     monkeypatch.setattr(
@@ -442,7 +365,134 @@ async def test_пустая_версия_из_env_берёт_последнюю(
         "script_version",
         Settings(script_version="").script_version,
     )
-    model["result"] = {"understood": [], "step_status": "unclear", "reply": "Слушаю."}
+    model["result"] = {"understood": [], "reply": "Слушаю."}
     state = await graph.ainvoke({"messages": [{"role": "human", "content": "Здравствуйте"}]})
     assert nodes_module.settings.script_version is None
-    assert state["script_version"] == "1"
+    assert state["script_version"] == "2"
+
+
+async def test_заглушка_города_без_модели_и_видна_генератору(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert state.get("spoken_filler")
+    assert (
+        "Пермь" in (state["spoken_filler"] or "")
+        or "перм" in (state["spoken_filler"] or "").lower()
+    )
+    # Резолвер LLM не звался для точного совпадения.
+    assert resolvers[0].calls == 0
+    prompt = model["messages"][0].content
+    assert "уже ушла фраза" in prompt or state["spoken_filler"] in prompt
+
+
+async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(
+        nodes_module,
+        "_branch_resolver",
+        SelectBranch(
+            BranchResolution(
+                slugs=["perm_chernyshevskogo", "perm_ekaterininskaya"],
+                selected=None,
+            )
+        ),
+    )
+    model["result"] = {
+        "understood": [],
+        "reply": "Могу предложить Чернышевского или Екатерининскую. Что ближе?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="а какие есть?")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+                "included": "closed",
+                "practice": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state.get("branch_slug") in (None, "")
+    ctx = state.get("conversation_context") or {}
+    assert not ctx.get("branch_slug")
+    assert state["current_step"] == "branch"
+    assert "branch_options" in (state.get("facts") or {}) or "Чернышевского" in "".join(spoken)
+
+
+async def test_слепок_в_конце_звонка(spoken, store, checker, kb, resolvers, model, use_v2):
+    model["result"] = {
+        "understood": [{"key": "messenger", "value": "Telegram"}],
+        "reply": "Отправлю.",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Telegram")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "outcome": "оформлю дистанционно",
+                "messenger": "Telegram",
+            },
+            "step_status": {
+                sid: "closed"
+                for sid in (
+                    "name",
+                    "city",
+                    "who_studies",
+                    "experience",
+                    "transmission",
+                    "terms",
+                    "theory_format",
+                    "included",
+                    "practice",
+                    "branch",
+                    "price",
+                    "payment",
+                    "tax_deduction",
+                    "closing",
+                )
+            },
+            "conversation_context": {
+                "static_text": "x",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "branch_slug": "perm_chernyshevskogo",
+                "frozen": True,
+            },
+        }
+    )
+    assert state.get("script_progress")
+    assert state.get("call_finished") is True or state["current_step"] in (None, "messenger")

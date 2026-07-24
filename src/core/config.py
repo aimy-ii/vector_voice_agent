@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
@@ -80,13 +80,24 @@ class Settings(BaseSettings):
     script_version: str | None = None
     #: Каталог с JSON-скриптами. Пусто — каталог `data` рядом с кодом.
     script_dir: str | None = None
+    #: Порог попыток задать шаг: исчерпан — чекер закрывает без модели.
+    step_attempt_limit: int = 2
+
+    # ─── Redis: рабочий прогресс скрипта звонка ─────────────────────────────
+    #: Адрес Redis. Совпадает с ``REDIS_URI`` сервера LangGraph.
+    redis_url: str = Field(
+        default="redis://localhost:6379",
+        validation_alias=AliasChoices("redis_url", "REDIS_URI", "redis_uri"),
+    )
+    #: TTL слепка скрипта: чуть длиннее ожидаемого звонка.
+    script_redis_ttl: int = 7200
 
     # ─── Заглушка в эфир ────────────────────────────────────────────────────
-    #: Порог в миллисекундах: если ожидаемая пауза хода больше — перед
-    #: походом за данными выталкиваем фразу-заглушку из данных скрипта.
-    #: 0 — механизм выключен. Включается настройкой по замерам на пилоте,
-    #: узел при этом не меняется.
+    #: Порог в миллисекундах для общей заглушки lookup. 0 — выключена.
+    #: Заглушки города и филиала включены отдельно и по умолчанию.
     filler_threshold_ms: int = 0
+    #: Фразы в эфир, пока идёт поиск города/филиала. По умолчанию включены.
+    lookup_fillers_enabled: bool = True
 
     # ─── Наблюдаемость ──────────────────────────────────────────────────────
     log_level: str = "INFO"

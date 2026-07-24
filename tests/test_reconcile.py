@@ -1,8 +1,4 @@
-"""Тесты сверки намеченного с произнесённым.
-
-Шаг закрывается по произнесённому, а не по сгенерированному: правду о
-перебивании знает только бот, и она приезжает в истории следующего хода.
-"""
+"""Тесты сверки намеченного с произнесённым."""
 
 from __future__ import annotations
 
@@ -39,7 +35,6 @@ def test_перебили_на_середине():
 
 
 def test_перебили_до_первого_звука():
-    """Записи в истории не появится вовсе — счётчик реплик не сдвинулся."""
     assert was_delivered(planned_len=100, spoken_len=99, ai_count_before=1, ai_count_now=1) is False
 
 
@@ -59,28 +54,28 @@ def test_порог_на_границе():
 
 def test_перебитый_шаг_возвращается_в_работу():
     state = {
-        "pending_step": "presentation",
+        "pending_step": "practice",
         "pending_len": 200,
         "pending_ai_count": 0,
-        "step_status": {"presentation": "done", "city": "done"},
+        "step_status": {"practice": "closed", "city": "closed"},
     }
     messages = [AIMessage(content="Расскажу, как проходит")]
     patch = reopen_if_interrupted(
         state=state, messages=messages, last_spoken="Расскажу, как проходит"
     )
 
-    assert patch["step_status"]["presentation"] == "open"
-    assert patch["step_status"]["city"] == "done"
+    assert patch["step_status"]["practice"] == "pending"
+    assert patch["step_status"]["city"] == "closed"
     assert patch["pending_step"] is None
 
 
 def test_дослушанный_шаг_остаётся_закрытым():
     text = "Расскажу, как проходит обучение у нас в академии подробно и по порядку"
     state = {
-        "pending_step": "presentation",
+        "pending_step": "practice",
         "pending_len": len(text),
         "pending_ai_count": 0,
-        "step_status": {"presentation": "done"},
+        "step_status": {"practice": "closed"},
     }
     patch = reopen_if_interrupted(state=state, messages=[AIMessage(content=text)], last_spoken=text)
     assert "step_status" not in patch
@@ -88,11 +83,10 @@ def test_дослушанный_шаг_остаётся_закрытым():
 
 
 def test_сверять_нечего():
-    assert reopen_if_interrupted(state={}, messages=[], last_spoken="") == {}
+    assert reopen_if_interrupted(state={}, messages=[], last_spoken="") == {"last_delivered": True}
 
 
 def test_сверка_на_истории_из_словарей():
-    """История с сервера — словари; после редьюсера reconcile видит AIMessage."""
     from graph.state import replace_messages
 
     messages = replace_messages(
@@ -100,15 +94,15 @@ def test_сверка_на_истории_из_словарей():
         [{"role": "ai", "content": "Расскажу, как проходит"}],
     )
     state = {
-        "pending_step": "presentation",
+        "pending_step": "practice",
         "pending_len": 200,
         "pending_ai_count": 0,
-        "step_status": {"presentation": "done", "city": "done"},
+        "step_status": {"practice": "closed", "city": "closed"},
     }
     patch = reopen_if_interrupted(
         state=state,
         messages=messages,
         last_spoken="Расскажу, как проходит",
     )
-    assert patch["step_status"]["presentation"] == "open"
+    assert patch["step_status"]["practice"] == "pending"
     assert count_agent_messages(messages) == 1

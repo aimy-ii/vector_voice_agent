@@ -122,21 +122,22 @@ async def astream_structured(
     messages: list[Any],
     *,
     schema: dict[str, Any],
-    text_field: str,
+    text_field: str | None = None,
     on_delta: Callable[[str], None] | None = None,
     budget: float | None = None,
 ) -> dict[str, Any]:
-    """Делает единственный вызов модели за ход и стримит прирост текста.
+    """Делает вызов модели и опционально стримит прирост текста.
 
     Пока модель генерирует JSON, парсер отдаёт частично собранные объекты.
     Из каждого берётся поле `text_field`, и в `on_delta` уходит только новый
     хвост — так реплика начинает звучать раньше, чем ответ дописан.
+    Служебные вызовы (чекер, резолверы) передают ``text_field=None``.
 
     Args:
         llm: клиент модели из `get_llm`.
         messages: сообщения запроса.
         schema: JSON-схема словарём (см. `response_format_from`).
-        text_field: имя поля с текстом реплики.
+        text_field: имя поля с текстом реплики; None — без стрима в эфир.
         on_delta: колбэк прироста текста; None — стримить не нужно.
         budget: потолок ожидания в секундах; None — из настроек.
 
@@ -156,7 +157,7 @@ async def astream_structured(
             if not isinstance(partial, dict):
                 continue
             final = partial
-            if on_delta is None:
+            if on_delta is None or not text_field:
                 continue
             value = partial.get(text_field)
             if isinstance(value, str) and len(value) > sent:

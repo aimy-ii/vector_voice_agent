@@ -1,16 +1,8 @@
 """Сверка намеченной реплики с произнесённой.
 
 Правду о перебивании знает только бот: в историю он пишет фактически
-произнесённую часть, посчитанную по темпу проигрывания. Произнесённое всегда
-префикс намеченного, поэтому недосказанное считается вычитанием. Если перебили
-до первого звука, записи в истории не появится вообще.
-
-Отсюда правило: **шаг закрывается по произнесённому, а не по сгенерированному.**
-Граф намечает реплику и запоминает её длину и число реплик бота в истории; на
-следующем ходу сравнивает — и, если нас не дослушали, возвращает шаг в работу.
-
-В состоянии при этом лежат только числа и идентификаторы, текстов нет.
-Все функции чистые и тестируются офлайн.
+произнесённую часть. Если перебили слишком рано, информирующий шаг не
+закрывается чекером на следующем ходу.
 """
 
 from __future__ import annotations
@@ -20,7 +12,6 @@ from typing import Any, Mapping, Sequence
 from langchain_core.messages import AIMessage, BaseMessage
 
 #: Какую долю намеченного надо произнести, чтобы считать шаг отработанным.
-#: Ниже порога — клиент перебил слишком рано и содержания не услышал.
 SPOKEN_ENOUGH = 0.6
 
 
@@ -72,30 +63,31 @@ def was_delivered(
     if planned_len <= 0:
         return True
     if ai_count_now <= ai_count_before:
-        # Записи не появилось: перебили до первого звука.
         return False
     return spoken_ratio(planned_len, spoken_len) >= SPOKEN_ENOUGH
 
 
-def reopen_if_interrupted(
+def delivery_patch(
     *,
     state: Mapping[str, Any],
     messages: Sequence[BaseMessage],
     last_spoken: str,
 ) -> dict[str, Any]:
-    """Возвращает шаг в работу, если прошлую реплику не дослушали.
+    """Считает, дослушали ли прошлую реплику, и чистит pending-поля.
+
+    Закрытие шага делает чекер; здесь только факт доставки.
 
     Args:
         state: состояние звонка на входе хода.
-        messages: история звонка после чистки от системных сообщений.
-        last_spoken: последняя реплика бота из истории.
+        messages: история после чистки.
+        last_spoken: последняя реплика бота.
 
     Returns:
-        Правки состояния: пустой словарь, если сверять нечего или всё в порядке.
+        Правки: ``pending_*`` и ``last_delivered``.
     """
     pending = state.get("pending_step")
     if not pending:
-        return {}
+        return {"last_delivered": True}
 
     delivered = was_delivered(
         planned_len=int(state.get("pending_len") or 0),
@@ -103,10 +95,48 @@ def reopen_if_interrupted(
         ai_count_before=int(state.get("pending_ai_count") or 0),
         ai_count_now=count_agent_messages(messages),
     )
-    if delivered:
-        return {"pending_step": None, "pending_len": 0}
+    return {
+        "pending_step": None,
+        "pending_len": 0,
+        "last_delivered": delivered,
+        "delivered_step": pending if delivered else None,
+        "undelivered_step": None if delivered else pending,
+    }
+
+
+#: Совместимое имя для старых тестов: при недоставке шаг остаётся pending.
+def reopen_if_interrupted(
+    *,
+    state: Mapping[str, Any],
+    messages: Sequence[BaseMessage],
+    last_spoken: str,
+) -> dict[str, Any]:
+    """Возвращает правки после сверки произнесённого.
+
+    Args:
+        state: состояние звонка на входе хода.
+        messages: история звонка.
+        last_spoken: последняя реплика бота из истории.
+
+    Returns:
+        Правки состояния.
+    """
+    patch = delivery_patch(state=state, messages=messages, last_spoken=last_spoken)
+    undelivered = patch.get("undelivered_step")
+    if not undelivered:
+        return {
+            k: v for k, v in patch.items() if k in {"pending_step", "pending_len", "last_delivered"}
+        }
 
     status = dict(state.get("step_status") or {})
-    if status.get(pending) == "done":
-        status[pending] = "open"
-    return {"step_status": status, "pending_step": None, "pending_len": 0}
+    # Незакрытый информативный шаг остаётся pending; closed не откатываем здесь —
+    # закрытие только у чекера. Для совместимости со старыми слепками done→pending.
+    if status.get(undelivered) in {"done", "closed"}:
+        status[undelivered] = "pending"
+        patch["step_status"] = status
+    return {
+        "pending_step": None,
+        "pending_len": 0,
+        "last_delivered": False,
+        "step_status": patch.get("step_status", status),
+    }

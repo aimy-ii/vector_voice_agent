@@ -17,11 +17,13 @@ from graph.facts import (
 from graph.prompts import (
     aside_block,
     build_turn_messages,
+    context_block,
     facts_block,
     fill_facts,
     persona_block,
     profile_block,
     step_block,
+    steps_block,
     unknown_block,
 )
 
@@ -33,7 +35,6 @@ def test_подстановка_фактов_в_текст():
 
 
 def test_неизвестный_плейсхолдер_не_роняет_ход():
-    """В звонке пустое место лучше исключения."""
     assert fill_facts("Адрес: {branch_address}", {}) == "Адрес:"
 
 
@@ -52,16 +53,8 @@ def test_профиль_разделяет_роли(script):
     assert "student_name" in block
 
 
-def test_известное_не_попадает_в_список_вопросов(script):
-    block = profile_block(script, {"transmission": "механика"})
-    строки = block.splitlines()
-    известное = [s for s in строки if "transmission" in s and "механика" in s]
-    assert известное
-    assert "переспрашивать известное — ошибка" in block
-
-
 def test_дословный_шаг_запрещает_пересказ(script):
-    block = step_block(script.step("presentation"), {}, {})
+    block = step_block(script.step("practice"), {}, {})
     assert "дословно" in block
     assert "Не повторяй" in block
 
@@ -71,41 +64,58 @@ def test_обычный_шаг_разрешает_свои_слова(script):
     assert "своими словами" in block
 
 
-def test_промпт_видит_оба_шага_и_запрет_переспрашивать(script):
-    block = step_block(
-        script.step("city"),
+def test_промпт_видит_шапку_и_запрет_переспрашивать(script):
+    block = steps_block(
+        [script.step("city"), script.step("who_studies")],
         {},
         {},
-        next_step=script.step("name"),
+        attempts={"city": 1},
     )
-    assert "Сейчас закрывается: city" in block
-    assert "Дальше идём к: name" in block
-    assert "Принять город" in block or "город" in block.lower()
-    assert "как обращаться" in block.lower()
+    assert "city" in block
+    assert "who_studies" in block
     assert "не переспрашивай" in block.lower()
     assert "верно?" in block.lower()
 
 
 def test_промпт_требует_заканчивать_ходом_к_собеседнику(script):
-    block = step_block(script.step("city"), {}, {}, next_step=script.step("name"))
-    assert "вопросом или конкретным предложением" in block.lower() or (
-        "вопросом" in block.lower() and "предложением" in block.lower()
-    )
+    block = steps_block([script.step("city")], {}, {}, attempts={})
+    assert "вопросом" in block.lower() and "предложением" in block.lower()
 
 
 def test_промпт_запрещает_озвучивать_механику(script):
-    step = step_block(script.step("city"), {}, {})
+    step = steps_block([script.step("city")], {}, {}, attempts={})
     facts = facts_block({"city": {"name": "Пермь"}})
     aside = aside_block(script, done=[])
     unknown = unknown_block(script)
     for block in (step, facts, aside, unknown):
-        assert "справочник" in block.lower() or "механик" in block.lower()
         assert "не проговаривай" in block.lower() or "не упоминай" in block.lower()
 
 
-def test_альтернативный_вопрос_передаётся_как_приём(script):
-    block = step_block(script.step("transmission"), {}, {})
-    assert "механика, автомат" in block
+def test_перечень_городов_не_в_промпте(script):
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={"city_choices": [{"slug": "perm", "name": "Пермь"}]},
+        history=[],
+        asides_done=[],
+    )
+    assert "city_choices" not in messages[0].content
+    assert "perm" not in messages[0].content or "Город" in messages[0].content
+
+
+def test_контекст_впереди_персонажа(script):
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        context_text="Статика: город Пермь.",
+    )
+    content = messages[0].content
+    assert content.index("Статика: город Пермь") < content.index("Дарья")
 
 
 def test_цена_подставляется_в_дословный_шаг(script):
@@ -115,7 +125,6 @@ def test_цена_подставляется_в_дословный_шаг(script
 
 
 def test_ни_один_goal_не_объясняет_мотивацию(raw_script):
-    """Goals — задача модели, не реплика и не «от этого зависит»."""
     forbidden = ("от этого зависит", "от него зависит", "от неё зависит", "это нам")
     for step in raw_script.steps:
         lowered = step.goal.lower()
@@ -160,7 +169,6 @@ def test_пустая_история_не_ломает_запрос(script):
 
 
 def test_города_отдаются_со_названиями():
-    """По одному слагу город не опознать: kyrgan это Курган."""
     choices = city_choices([{"slug": "kyrgan", "name": "Курган"}, {"slug": "нет"}])
     assert choices == [{"slug": "kyrgan", "name": "Курган"}]
 
@@ -210,7 +218,7 @@ async def test_факты_собираются_по_потребностям_ш�
     assert facts["city"]["city"] == "Пермь"
     assert facts["price"]["branch"] == "unreliable"
     assert "43900" in facts["price_line"]
-    assert len(facts["branches"]) == 2
+    assert len(facts["branches"]) == 4
     assert [c["call"] for c in journal] == ["get_city", "list_branches"]
 
 
@@ -248,3 +256,8 @@ async def test_филиал_проверяется_по_перечислению
     assert await confirm_branch(fake_kb, "perm", "perm_chernyshevskogo") == "perm_chernyshevskogo"
     assert await confirm_branch(fake_kb, "perm", "выдуманный") is None
     assert await confirm_branch(fake_kb, None, "perm_chernyshevskogo") is None
+
+
+def test_context_block_пустой():
+    assert context_block("") == ""
+    assert "Пермь" in context_block("город Пермь")

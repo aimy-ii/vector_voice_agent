@@ -19,9 +19,10 @@ def _mutate(raw: RawScript, **changes: object) -> RawScript:
 
 def test_базовый_скрипт_собирается(script):
     assert script.id == "vector_ru"
-    assert script.version == "1"
+    assert script.version == "2"
     assert "city" in script.steps
-    assert script.key == ("vector_ru", "1")
+    assert "practice" in script.steps
+    assert script.key == ("vector_ru", "2")
 
 
 def test_собранный_скрипт_знает_кто_заполняет_поле(script):
@@ -64,7 +65,7 @@ def test_ожидание_несуществующего_шага_ловится
 def test_дословный_блок_без_текста_ловится(raw_script):
     payload = copy.deepcopy(raw_script.model_dump())
     for step in payload["steps"]:
-        if step["id"] == "presentation":
+        if step["id"] == "practice":
             step["text"] = None
             step["branches"] = None
     with pytest.raises(ScriptError, match="Дословный шаг"):
@@ -98,7 +99,7 @@ def test_скрипт_без_аварийной_реплики_ловится(ra
 def test_проверочный_вопрос_обязателен_для_информирования_с_проверкой(raw_script):
     payload = copy.deepcopy(raw_script.model_dump())
     for step in payload["steps"]:
-        if step["id"] == "presentation":
+        if step["id"] == "practice":
             step["check_question"] = None
     with pytest.raises(ScriptError, match="проверочного вопроса"):
         build_script(RawScript.model_validate(payload))

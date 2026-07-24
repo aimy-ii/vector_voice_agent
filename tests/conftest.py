@@ -1,8 +1,7 @@
 """Общие фикстуры офлайн-тестов.
 
-Ни сети, ни ключей, ни весов: справочник и модель подменяются заглушками,
-скрипт читается из данных проекта. Логика диалога проверяется на чистых
-функциях, голосовой слой не участвует вовсе.
+Ни сети, ни ключей, ни весов: справочник, Redis, чекер и резолверы
+подменяются заглушками. Скрипт по умолчанию — v2.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from script.build import CompiledScript, build_script  # noqa: E402
 from script.models import RawScript  # noqa: E402
 from script.source import JsonScriptSource, ScriptRegistry  # noqa: E402
+from script.store import MemoryScriptStore  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -29,14 +29,26 @@ def data_dir() -> Path:
 
 @pytest.fixture(scope="session")
 def raw_script(data_dir: Path) -> RawScript:
-    """Сырой базовый скрипт из данных проекта."""
-    return JsonScriptSource(data_dir).fetch("vector_ru", None)
+    """Сырой рабочий скрипт v2."""
+    return JsonScriptSource(data_dir).fetch("vector_ru", "2")
+
+
+@pytest.fixture(scope="session")
+def raw_script_v1(data_dir: Path) -> RawScript:
+    """Сырой скрипт v1 — для проверки, что обе версии собираются."""
+    return JsonScriptSource(data_dir).fetch("vector_ru", "1")
 
 
 @pytest.fixture()
 def script(raw_script: RawScript) -> CompiledScript:
-    """Скомпилированный базовый скрипт."""
+    """Скомпилированный рабочий скрипт v2."""
     return build_script(raw_script)
+
+
+@pytest.fixture()
+def script_v1(raw_script_v1: RawScript) -> CompiledScript:
+    """Скомпилированный скрипт v1."""
+    return build_script(raw_script_v1)
 
 
 @pytest.fixture()
@@ -45,13 +57,14 @@ def registry(data_dir: Path) -> ScriptRegistry:
     return ScriptRegistry(JsonScriptSource(data_dir))
 
 
-class FakeKB:
-    """Заглушка справочника: отвечает из памяти, в сеть не ходит.
+@pytest.fixture()
+def memory_store() -> MemoryScriptStore:
+    """Заглушка Redis в памяти."""
+    return MemoryScriptStore()
 
-    Повторяет контракт клиента ровно в том объёме, который использует граф,
-    включая мягкое поведение при отсутствии данных: None и пустые списки
-    вместо исключений.
-    """
+
+class FakeKB:
+    """Заглушка справочника: отвечает из памяти, в сеть не ходит."""
 
     def __init__(
         self,
@@ -112,7 +125,11 @@ class FakeKB:
 def fake_kb() -> FakeKB:
     """Заглушка справочника с одним городом и двумя филиалами."""
     return FakeKB(
-        cities=[{"slug": "perm", "name": "Пермь"}, {"slug": "krasnoyarsk", "name": "Красноярск"}],
+        cities=[
+            {"slug": "perm", "name": "Пермь"},
+            {"slug": "krasnoyarsk", "name": "Красноярск"},
+            {"slug": "spb", "name": "Санкт-Петербург"},
+        ],
         city={
             "slug": "perm",
             "name": "Пермь",
@@ -120,6 +137,10 @@ def fake_kb() -> FakeKB:
             "categories": [{"code": "B", "duration": "2,5 месяца", "start_frequency": None}],
             "vehicles": {"manual": ["Hyundai Solaris"], "automatic": ["Kia Rio"]},
             "theory_formats": ["очно", "дистанционно"],
+            "documents": ["паспорт", "СНИЛС"],
+            "payment": {"installment": True},
+            "messengers": ["Max", "Telegram"],
+            "call_hours": "09:00-21:00",
             "price": {"amount": 43900, "is_from": True, "reliable": False, "note": "оговорка"},
         },
         branches=[
@@ -129,6 +150,8 @@ def fake_kb() -> FakeKB:
                 "address": "ул. Екатерининская, 109а",
                 "landmark": "Моби Дик",
             },
+            {"slug": "perm_lenina", "address": "ул. Ленина, 1", "landmark": None},
+            {"slug": "perm_mira", "address": "ул. Мира, 2", "landmark": "ТЦ"},
         ],
         branch={
             "slug": "perm_chernyshevskogo",
@@ -136,5 +159,6 @@ def fake_kb() -> FakeKB:
             "place_type": "учебный офис",
             "status": "работает",
             "working_hours": "ПН-ПТ 10:00-19:00",
+            "landmark": None,
         },
     )

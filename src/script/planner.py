@@ -1,13 +1,13 @@
-"""Планировщик скрипта: какой шаг сейчас открыт.
+"""Планировщик скрипта: шапка шагов для генератора.
 
 Куда идти дальше по скрипту, решает код, а не модель. Все функции здесь
-чистые: на вход скомпилированный скрипт, статусы шагов и собранный профиль,
+чистые: на вход скомпилированный скрипт, статусы шагов, счётчики и профиль,
 на выход — идентификаторы и тексты. Ни сети, ни модели, ни состояния.
 
-Порядок не задан списком, а выводится: шаг доступен, когда закрыты шаги,
-которых он ждёт, и заполнены поля профиля, которые он требует. Поэтому один
-скрипт описывает и Калининград, где имя не спросили вовсе, и Пермь, где его
-спросили вторым, и Екатеринбург, где третьим.
+Статусов два: ``pending`` (ждёт отработки) и ``closed`` (закрыт). Заданность
+говорит счётчик: ноль — не спрашивали, больше нуля — вопрос уходил в
+генерацию. Пропуск по признаку статусом не помечается: шаг просто не
+попадает в шапку при чтении.
 """
 
 from __future__ import annotations
@@ -19,14 +19,15 @@ from script.models import Step
 
 #: Статус шага в состоянии звонка.
 #:
-#: * `open` — ещё не закрыт;
-#: * `done` — закрыт;
-#: * `refused` — клиент не ответил и переспрашивать больше нельзя;
-#: * `skipped` — пропущен по признаку.
-StepStatus = Literal["open", "done", "refused", "skipped"]
+#: * ``pending`` — ждёт отработки;
+#: * ``closed`` — закрыт чекером.
+StepStatus = Literal["pending", "closed"]
 
 #: Статусы, после которых к шагу не возвращаются.
-CLOSED: frozenset[str] = frozenset({"done", "refused", "skipped"})
+CLOSED: frozenset[str] = frozenset({"closed"})
+
+#: Совместимость со старыми слепками в треде (идущие звонки на v1).
+_LEGACY_CLOSED: frozenset[str] = frozenset({"done", "refused", "skipped", "closed"})
 
 
 def is_closed(status: str | None) -> bool:
@@ -38,7 +39,7 @@ def is_closed(status: str | None) -> bool:
     Returns:
         True, если возвращаться к шагу не нужно.
     """
-    return status in CLOSED
+    return status in _LEGACY_CLOSED
 
 
 def profile_has(profile: Mapping[str, str], key: str) -> bool:
@@ -58,19 +59,14 @@ def profile_has(profile: Mapping[str, str], key: str) -> bool:
 def should_skip(step: Step, profile: Mapping[str, str]) -> bool:
     """Сработало ли условие пропуска шага.
 
-    Два основания. Первое — общее: если всё, что шаг собирает, уже известно,
-    спрашивать нечего. Профиль заполняется и до начала скрипта — из первой же
-    реплики бывают известны коробка, возраст и готовность записаться, и
-    переспрашивать это ошибка. Второе — объявленное в скрипте условие: шаг
-    умеет пропускаться по признаку, а не только закрываться, поэтому готовому
-    клиенту презентация не нужна.
+    Такой шаг не попадает в шапку: отдельного статуса «пропущен» нет.
 
     Args:
         step: описание шага.
         profile: собранный профиль.
 
     Returns:
-        True, если шаг нужно пометить пропущенным.
+        True, если шаг нужно отсеять при чтении скрипта.
     """
     if step.fills and all(profile_has(profile, key) for key in step.fills):
         return True
@@ -101,22 +97,24 @@ def is_available(
         profile: собранный профиль.
 
     Returns:
-        True, если шаг открыт и все его условия выполнены.
+        True, если шаг не закрыт и все его условия выполнены.
     """
     if is_closed(status.get(step.id)):
+        return False
+    if should_skip(step, profile):
         return False
     if not all(is_closed(status.get(dep)) for dep in step.after):
         return False
     return all(profile_has(profile, key) for key in step.requires)
 
 
-def steps_to_skip(
+def iter_available(
     script: CompiledScript,
     *,
     status: Mapping[str, str],
     profile: Mapping[str, str],
-) -> list[str]:
-    """Собирает шаги, которые прямо сейчас нужно пометить пропущенными.
+) -> list[Step]:
+    """Доступные шаги в порядке приоритета и объявления.
 
     Args:
         script: скомпилированный скрипт.
@@ -124,13 +122,47 @@ def steps_to_skip(
         profile: собранный профиль.
 
     Returns:
-        Идентификаторы шагов к пропуску.
+        Список доступных шагов с верхушки.
     """
-    return [
-        step_id
-        for step_id in script.step_order
-        if not is_closed(status.get(step_id)) and should_skip(script.step(step_id), profile)
-    ]
+    ranked: list[tuple[int, int, Step]] = []
+    for order, step_id in enumerate(script.step_order):
+        step = script.step(step_id)
+        if not is_available(step, status=status, profile=profile):
+            continue
+        ranked.append((step.priority, order, step))
+    ranked.sort(key=lambda item: item[:2])
+    return [item[2] for item in ranked]
+
+
+def script_head(
+    script: CompiledScript,
+    *,
+    status: Mapping[str, str],
+    attempts: Mapping[str, int],
+    profile: Mapping[str, str],
+) -> list[Step]:
+    """Шапка для генератора: все уже заданные и один новый с верхушки.
+
+    Args:
+        script: скомпилированный скрипт.
+        status: статусы шагов.
+        attempts: счётчики попыток.
+        profile: собранный профиль.
+
+    Returns:
+        Список шагов: сначала со счётчиком больше нуля, затем один с нулём.
+    """
+    asked: list[Step] = []
+    fresh: Step | None = None
+    for step in iter_available(script, status=status, profile=profile):
+        count = int(attempts.get(step.id, 0))
+        if count > 0:
+            asked.append(step)
+        elif fresh is None:
+            fresh = step
+    if fresh is not None:
+        return [*asked, fresh]
+    return asked
 
 
 def pick_step(
@@ -139,41 +171,28 @@ def pick_step(
     status: Mapping[str, str],
     profile: Mapping[str, str],
     resume: str | None = None,
+    attempts: Mapping[str, int] | None = None,
 ) -> Step | None:
-    """Выбирает шаг, которым бот занимается на этом ходу.
-
-    Порядок разрешения:
-
-    1. Если после справки или возражения надо вернуться на место и тот шаг всё
-       ещё доступен — возвращаемся туда.
-    2. Иначе берётся доступный шаг с наименьшим приоритетом; при равенстве —
-       тот, что объявлен раньше.
+    """Выбирает ведущий шаг хода (первый из шапки или resume).
 
     Args:
         script: скомпилированный скрипт.
         status: статусы шагов.
         profile: собранный профиль.
         resume: шаг, на который надо вернуться после отработки вопроса.
+        attempts: счётчики попыток; нужны для шапки.
 
     Returns:
         Описание шага или None, если закрывать больше нечего.
     """
+    counts = attempts or {}
     if resume and resume in script.steps:
         step = script.step(resume)
-        if is_available(step, status=status, profile=profile) and not should_skip(step, profile):
+        if is_available(step, status=status, profile=profile):
             return step
 
-    best: tuple[int, int, Step] | None = None
-    for order, step_id in enumerate(script.step_order):
-        step = script.step(step_id)
-        if not is_available(step, status=status, profile=profile):
-            continue
-        if should_skip(step, profile):
-            continue
-        rank = (step.priority, order, step)
-        if best is None or rank[:2] < best[:2]:
-            best = rank
-    return best[2] if best is not None else None
+    head = script_head(script, status=status, attempts=counts, profile=profile)
+    return head[0] if head else None
 
 
 def peek_next_step(
@@ -182,34 +201,34 @@ def peek_next_step(
     current: Step,
     status: Mapping[str, str],
     profile: Mapping[str, str],
+    attempts: Mapping[str, int] | None = None,
 ) -> Step | None:
     """Какой шаг откроется, если текущий закроется прямо сейчас.
-
-    Считается детерминированно: текущий помечается закрытым, его ``fills`` —
-    заполненными фиктивными значениями, затем прогон ``pick_step`` (с учётом
-    пропусков). Ничего нового не изобретается — переиспользуются те же правила.
 
     Args:
         script: скомпилированный скрипт.
         current: шаг, который клиент закрывает этим ответом.
         status: статусы шагов на этот ход.
         profile: собранный профиль на этот ход.
+        attempts: счётчики попыток.
 
     Returns:
         Следующий шаг или None, если после закрытия текущего открывать нечего.
     """
     preview_status = dict(status)
-    preview_status[current.id] = "done"
+    preview_status[current.id] = "closed"
 
     preview_profile = dict(profile)
     for key in current.fills:
         if not profile_has(preview_profile, key):
             preview_profile[key] = "_"
 
-    for step_id in steps_to_skip(script, status=preview_status, profile=preview_profile):
-        preview_status[step_id] = "skipped"
-
-    return pick_step(script, status=preview_status, profile=preview_profile)
+    return pick_step(
+        script,
+        status=preview_status,
+        profile=preview_profile,
+        attempts=attempts,
+    )
 
 
 def blocked_by(
@@ -220,8 +239,6 @@ def blocked_by(
     profile: Mapping[str, str],
 ) -> list[str]:
     """Объясняет, чего шагу не хватает, чтобы открыться.
-
-    Нужно для логов и тестов: «шаг филиала ждёт поле города».
 
     Args:
         script: скомпилированный скрипт.
@@ -245,9 +262,6 @@ def blocked_by(
 
 def render_step_text(step: Step, profile: Mapping[str, str]) -> str | None:
     """Собирает текст шага с учётом ветвления по значению профиля.
-
-    Формат теории даёт три разные реплики, коробка передач — разный перечень
-    машин: это один шаг с разным содержанием, а не разные шаги.
 
     Args:
         step: описание шага.
@@ -278,18 +292,43 @@ def next_attempt(attempts: Mapping[str, int], step_id: str) -> int:
     return int(attempts.get(step_id, 0)) + 1
 
 
-def exhausted(step: Step, attempts: Mapping[str, int]) -> bool:
-    """Исчерпаны ли попытки по шагу.
+def exhausted(step: Step, attempts: Mapping[str, int], *, limit: int) -> bool:
+    """Исчерпан ли порог попыток по шагу.
 
-    Предохранитель от зацикливания: клиент не всегда отвечает («потом скажу»,
-    игнорирует и спрашивает своё). Без счётчика бот переспросит второй и
-    третий раз.
+    Порог задаётся окружением, не полем шага: на формулировку счётчик не
+    влияет, закрытие делает чекер.
 
     Args:
         step: описание шага.
-        attempts: счётчики возвратов к шагам.
+        attempts: счётчики попыток.
+        limit: порог из настроек.
 
     Returns:
-        True, если шаг пора закрывать отказом.
+        True, если чекер должен закрыть шаг без вызова модели.
     """
-    return int(attempts.get(step.id, 0)) >= step.max_attempts
+    return int(attempts.get(step.id, 0)) >= limit
+
+
+def steps_to_skip(
+    script: CompiledScript,
+    *,
+    status: Mapping[str, str],
+    profile: Mapping[str, str],
+) -> list[str]:
+    """Идентификаторы шагов, отсеянных условием пропуска.
+
+    Статусом они не помечаются; функция нужна тестам и журналу.
+
+    Args:
+        script: скомпилированный скрипт.
+        status: статусы шагов.
+        profile: собранный профиль.
+
+    Returns:
+        Идентификаторы отсеянных незакрытых шагов.
+    """
+    return [
+        step_id
+        for step_id in script.step_order
+        if not is_closed(status.get(step_id)) and should_skip(script.step(step_id), profile)
+    ]

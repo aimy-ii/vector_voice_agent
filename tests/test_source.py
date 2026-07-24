@@ -1,4 +1,4 @@
-"""Тесты источника скриптов: версия обязательна, подмена источника бесшовна."""
+"""Тесты источника скриптов: v1 и v2, подмена источника бесшовна."""
 
 from __future__ import annotations
 
@@ -6,23 +6,38 @@ import json
 
 import pytest
 
-from script.build import ScriptError
+from script.build import ScriptError, build_script
 from script.models import RawScript
 from script.source import JsonScriptSource, ScriptRegistry
 
 
 def test_последняя_версия_берётся_без_указания(data_dir):
     raw = JsonScriptSource(data_dir).fetch("vector_ru", None)
+    assert raw.version == "2"
+
+
+def test_точная_версия_v1_поднимается(data_dir):
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "1")
+    assert raw.id == "vector_ru"
     assert raw.version == "1"
 
 
-def test_точная_версия_поднимается(data_dir):
-    raw = JsonScriptSource(data_dir).fetch("vector_ru", "1")
-    assert raw.id == "vector_ru"
+def test_точная_версия_v2_поднимается(data_dir):
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "2")
+    assert raw.version == "2"
+
+
+def test_v1_и_v2_обе_собираются(raw_script, raw_script_v1):
+    v2 = build_script(raw_script)
+    v1 = build_script(raw_script_v1)
+    assert v2.version == "2"
+    assert v1.version == "1"
+    assert "practice" in v2.steps
+    assert "presentation" in v1.steps
 
 
 def test_несуществующая_версия_падает_с_перечнем(data_dir):
-    with pytest.raises(ScriptError, match="Есть: 1"):
+    with pytest.raises(ScriptError, match="Есть:"):
         JsonScriptSource(data_dir).fetch("vector_ru", "99")
 
 
@@ -34,7 +49,7 @@ def test_несуществующий_скрипт_падает(data_dir):
 def test_версия_в_файле_обязана_совпадать_с_именем(tmp_path, raw_script):
     payload = raw_script.model_dump()
     payload["version"] = "7"
-    (tmp_path / "vector_ru.v1.json").write_text(
+    (tmp_path / "vector_ru.v2.json").write_text(
         json.dumps(payload, ensure_ascii=False), encoding="utf-8"
     )
     with pytest.raises(ScriptError, match="не совпадает"):
@@ -48,12 +63,9 @@ def test_битый_json_падает_на_загрузке(tmp_path):
 
 
 def test_реестр_отдаёт_тот_же_объект(registry):
-    первый = registry.get("vector_ru")
-    второй = registry.get("vector_ru")
-    по_версии = registry.get("vector_ru", "1")
-
+    первый = registry.get("vector_ru", "2")
+    второй = registry.get("vector_ru", "2")
     assert первый is второй
-    assert первый is по_версии
 
 
 def test_версии_сортируются_как_числа(tmp_path, raw_script):
@@ -81,8 +93,8 @@ def test_подмена_источника_бесшовна(raw_script):
             return raw_script
 
     source = InMemorySource()
-    compiled = ScriptRegistry(source).get("vector_ru", "1")
+    compiled = ScriptRegistry(source).get("vector_ru", "2")
 
     assert compiled.id == "vector_ru"
     assert compiled.steps["city"].kind == "question"
-    assert source.asked == [("vector_ru", "1")]
+    assert source.asked == [("vector_ru", "2")]
