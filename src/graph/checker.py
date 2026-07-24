@@ -1,8 +1,8 @@
 """Чекер шагов: единственная точка, где шаг уходит из скрипта.
 
-На этом этапе вызывается синхронно в начале хода по последней реплике
-клиента. Контракт входа не знает источника текста — переезд на куски речи
-не потребует переписывания.
+Контракт входа не знает источника текста: полная реплика основного хода
+или накопленный ``partial_reply`` служебного графа — одна и та же механика.
+Три части в промпт идут раздельно: срез истории, реплика, шаг.
 
 Закрывает по двум основаниям: ИИ видит, что шаг закрылся по диалогу; код
 видит, что счётчик исчерпан. ``inform`` чекеру не отдаём — его закрывает
@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Mapping, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -23,7 +23,8 @@ from graph.history import last_user_text
 from script.build import CompiledScript
 from script.models import Step
 from script.planner import exhausted, is_closed, iter_available, profile_has, render_step_text
-from script.store import ScriptProgress
+from script.source import registry
+from script.store import ScriptProgress, progress_from_state
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
 
 log = logging.getLogger(__name__)
@@ -163,33 +164,47 @@ def _format_history(messages: Sequence[BaseMessage]) -> str:
     return "\n".join(lines)
 
 
+def _message_text(message: BaseMessage) -> str:
+    """Текст сообщения одной строкой."""
+    return message.content if isinstance(message.content, str) else str(message.content)
+
+
 def history_slice_for(
     messages: Sequence[BaseMessage],
     *,
     steps: Sequence[Step],
     progress: ScriptProgress,
     turn: int,
+    reply: str | None = None,
 ) -> list[BaseMessage]:
     """Срез истории под проверяемые шаги.
 
     От взятия самого старого шага со счётчиком > 0; для шагов со счётчиком
     ноль — с начала звонка. Сверху — потолок по числу сообщений.
 
+    Текущая реплика (полная или накопленный partial) в срез не входит:
+    она уходит отдельным полем ``client_reply``. Из хвоста истории
+    убираем последнее human-сообщение только если его текст совпадает
+    с проверяемой репликой — иначе прошлый ответ клиента остаётся в срезе.
+
     Args:
         messages: полная история хода.
         steps: шаги, которые сейчас проверяем.
         progress: прогресс скрипта.
         turn: номер текущего хода.
+        reply: текст реплики, который уходит отдельным блоком; ``None`` —
+            срез как раньше (отрезать хвостовой human).
 
     Returns:
-        Срез сообщений без последней реплики клиента (она идёт отдельно).
+        Срез сообщений без проверяемой реплики.
     """
     if not messages:
         return []
     body = list(messages)
-    # Последняя реплика клиента уходит отдельным блоком.
     if body and body[-1].type == "human":
-        body = body[:-1]
+        last_text = _message_text(body[-1])
+        if reply is None or last_text == reply:
+            body = body[:-1]
 
     has_zero = any(int(progress.attempts.get(step.id, 0)) == 0 for step in steps)
     if has_zero:
@@ -211,33 +226,45 @@ def history_slice_for(
     return body[keep_from:]
 
 
-async def run_checker(
+def _script_from_state(state: Mapping[str, Any]) -> CompiledScript:
+    """Достаёт скрипт звонка из состояния или дефолтов настроек."""
+    return registry.get(
+        state.get("script_id") or settings.script_id,
+        state.get("script_version") or settings.script_version,
+    )
+
+
+async def check_pass(
+    state: Mapping[str, Any],
     *,
-    script: CompiledScript,
-    progress: ScriptProgress,
-    messages: Sequence[BaseMessage],
-    profile: dict[str, str],
-    turn: int,
-    client: CheckerClient | None = None,
+    reply: str,
+    judge: CheckerClient | None = None,
+    progress: ScriptProgress | None = None,
     attempt_limit: int | None = None,
 ) -> tuple[ScriptProgress, list[tuple[str, str]]]:
-    """Закрывает шаги по счётчику и по диалогу.
+    """Один проход чекера по заданному тексту реплики.
+
+    Общее ядро для синхронного узла основного хода и служебного графа.
+    Источник текста (полная реплика или накопленный partial) роли не играет.
 
     Args:
-        script: скомпилированный скрипт.
-        progress: текущий прогресс (будет изменён копией).
-        messages: история звонка.
-        profile: профиль для доступности шагов.
-        turn: номер хода.
-        client: клиент модели; пусто — боевой.
-        attempt_limit: порог попыток задать шаг; пусто — из настроек.
+        state: состояние звонка (скрипт, профиль, история, turn).
+        reply: текст реплики для анализа.
+        judge: клиент модели; пусто — боевой.
+        progress: прогресс; пусто — из зеркала состояния.
+        attempt_limit: порог попыток; пусто — из настроек.
 
     Returns:
         Обновлённый прогресс и список закрытий ``(step_id, основание)``.
     """
-    updated = ScriptProgress.from_mapping(progress.to_dict())
+    script = _script_from_state(state)
+    updated = ScriptProgress.from_mapping(
+        (progress if progress is not None else progress_from_state(state)).to_dict()
+    )
+    profile = dict(state.get("profile") or {})
+    turn = int(state.get("turn") or 0)
+    messages = list(state.get("messages") or [])
     limit = attempt_limit if attempt_limit is not None else settings.step_attempt_limit
-    reply = last_user_text(list(messages))
     closures: list[tuple[str, str]] = []
 
     # 1. Счётчик исчерпан — без модели.
@@ -272,12 +299,18 @@ async def run_checker(
     if not pending or not reply.strip():
         return updated, closures
 
-    judge = client or LlmCheckerClient()
-    history = history_slice_for(messages, steps=pending, progress=updated, turn=turn)
+    client = judge or LlmCheckerClient()
+    history = history_slice_for(
+        messages,
+        steps=pending,
+        progress=updated,
+        turn=turn,
+        reply=reply,
+    )
     history_text = _format_history(history)
 
     for step in pending:
-        verdict = await judge.judge(
+        verdict = await client.judge(
             history_slice=history_text,
             client_reply=reply,
             step=step,
@@ -295,6 +328,50 @@ async def run_checker(
         break
 
     return updated, closures
+
+
+async def run_checker(
+    *,
+    script: CompiledScript,
+    progress: ScriptProgress,
+    messages: Sequence[BaseMessage],
+    profile: dict[str, str],
+    turn: int,
+    client: CheckerClient | None = None,
+    attempt_limit: int | None = None,
+) -> tuple[ScriptProgress, list[tuple[str, str]]]:
+    """Закрывает шаги по счётчику и по диалогу.
+
+    Обёртка над ``check_pass``: текст реплики берётся из хвоста истории.
+    Сигнатура сохранена для синхронного узла и существующих тестов.
+
+    Args:
+        script: скомпилированный скрипт.
+        progress: текущий прогресс (будет изменён копией).
+        messages: история звонка.
+        profile: профиль для доступности шагов.
+        turn: номер хода.
+        client: клиент модели; пусто — боевой.
+        attempt_limit: порог попыток задать шаг; пусто — из настроек.
+
+    Returns:
+        Обновлённый прогресс и список закрытий ``(step_id, основание)``.
+    """
+    reply = last_user_text(list(messages))
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "messages": list(messages),
+        "profile": profile,
+        "turn": turn,
+    }
+    return await check_pass(
+        state,
+        reply=reply,
+        judge=client,
+        progress=progress,
+        attempt_limit=attempt_limit,
+    )
 
 
 def close_delivered_inform(

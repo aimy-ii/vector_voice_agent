@@ -59,6 +59,10 @@ class CallState(TypedDict, total=False):
         spoken_filler: заглушка, ушедшая в эфир до генератора.
         last_filler_turn: номер хода, на котором звучала заглушка.
         branch_candidates: отобранные резолвером слаги филиалов.
+        partial_reply: накопленный распознанный текст текущей реплики
+            клиента; вход служебного графа ``vector_checker``.
+        last_checked_partial: текст последнего служебного прохода чекера
+            (порог прироста между проходами).
     """
 
     messages: Annotated[list[BaseMessage], replace_messages]
@@ -107,6 +111,8 @@ class CallState(TypedDict, total=False):
     last_verbatim_step: str | None
     last_verbatim_text: str | None
     repeat_verbatim: bool
+    partial_reply: str
+    last_checked_partial: str
 
 
 def new_state_defaults() -> dict[str, Any]:
@@ -148,4 +154,6 @@ def new_state_defaults() -> dict[str, Any]:
         "last_verbatim_step": None,
         "last_verbatim_text": None,
         "repeat_verbatim": False,
+        "partial_reply": "",
+        "last_checked_partial": "",
     }

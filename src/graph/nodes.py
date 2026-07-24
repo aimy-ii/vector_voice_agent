@@ -20,7 +20,7 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from core.config import settings
-from graph.checker import CheckerClient, close_delivered_inform, run_checker
+from graph.checker import CheckerClient, check_pass, close_delivered_inform
 from graph.context import context_from_state, merge_static
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
@@ -199,7 +199,6 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
     """Синхронный чекер в начале хода: закрывает шаги по счётчику и диалогу."""
     script = _script_of(state)
     progress = await _load_progress(state)
-    profile = dict(state.get("profile") or {})
     closures: list[tuple[str, str]] = []
 
     delivered_step = state.get("delivered_step")
@@ -217,13 +216,11 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
         ):
             closures.append((delivered_step, "доставка"))
 
-    progress, checked = await run_checker(
-        script=script,
+    progress, checked = await check_pass(
+        state,
+        reply=last_user_text(state.get("messages") or []),
+        judge=_checker_client,
         progress=progress,
-        messages=state.get("messages") or [],
-        profile=profile,
-        turn=int(state.get("turn") or 0),
-        client=_checker_client,
     )
     closures.extend(checked)
     patch = await _save_progress(progress)

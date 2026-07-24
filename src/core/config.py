@@ -95,6 +95,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ─── Служебный чекер в реальном времени ─────────────────────────────────
+    #: Порог прироста накопленного текста (символы) между служебными проходами.
+    #: Меньше порога и не первый проход — модель не зовём.
+    checker_min_growth_chars: int = 10
+    #: Имя графа служебного чекера в ``langgraph.json``. Пусто → ``vector_checker``.
+    checker_graph_id: str | None = None
+    #: ``multitask_strategy`` для запусков служебного графа (клиент SDK).
+    checker_multitask_strategy: str | None = None
+    #: ``multitask_strategy`` основного хода. Перед стартом клиент отменяет
+    #: идущий служебный проход, иначе enqueue поставит основной в очередь.
+    agent_multitask_strategy: str | None = None
+
     # ─── Redis: рабочий прогресс скрипта звонка ─────────────────────────────
     #: Адрес Redis. Совпадает с ``REDIS_URI`` сервера LangGraph.
     redis_url: str = Field(
@@ -125,6 +137,9 @@ class Settings(BaseSettings):
         "script_version",
         "script_dir",
         "langsmith_project",
+        "checker_graph_id",
+        "checker_multitask_strategy",
+        "agent_multitask_strategy",
         mode="before",
     )
     @classmethod
@@ -143,6 +158,21 @@ class Settings(BaseSettings):
     def fast_model(self) -> str:
         """Модель для коротких вызовов; отдельной нет — берём основную."""
         return self.llm_model_fast or self.llm_model
+
+    @property
+    def checker_assistant_id(self) -> str:
+        """Идентификатор ассистента служебного чекера для SDK."""
+        return self.checker_graph_id or "vector_checker"
+
+    @property
+    def checker_run_strategy(self) -> str:
+        """Стратегия multitask для служебного прохода: interrupt."""
+        return self.checker_multitask_strategy or "interrupt"
+
+    @property
+    def agent_run_strategy(self) -> str:
+        """Стратегия multitask основного хода: enqueue."""
+        return self.agent_multitask_strategy or "enqueue"
 
     @property
     def script_data_dir(self) -> Path:

@@ -38,6 +38,9 @@ def test_пустые_необязательные_строки_дают_none():
         script_version="",
         script_dir="",
         langsmith_project="",
+        checker_graph_id="",
+        checker_multitask_strategy="",
+        agent_multitask_strategy="",
     )
     assert s.llm_base_url is None
     assert s.llm_api_key is None
@@ -50,6 +53,22 @@ def test_пустые_необязательные_строки_дают_none():
     assert s.script_version is None
     assert s.script_dir is None
     assert s.langsmith_project is None
+    assert s.checker_graph_id is None
+    assert s.checker_multitask_strategy is None
+    assert s.agent_multitask_strategy is None
+
+
+def test_чекер_настройки_дефолты():
+    """Порог прироста и стратегии запусков с запасными значениями."""
+    s = Settings(
+        checker_graph_id="",
+        checker_multitask_strategy="",
+        agent_multitask_strategy="",
+    )
+    assert Settings.model_fields["checker_min_growth_chars"].default == 10
+    assert s.checker_assistant_id == "vector_checker"
+    assert s.checker_run_strategy == "interrupt"
+    assert s.agent_run_strategy == "enqueue"
 
 
 def test_прокси_выключен_при_заполненных_полях():
