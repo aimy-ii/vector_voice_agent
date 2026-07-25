@@ -27,7 +27,7 @@ class ScriptProgress:
 
     Attributes:
         status: статус шага ``pending`` / ``closed``.
-        attempts: счётчик взятий шага генератором.
+        attempts: счётчик попыток задать шаг (раз ведущим в генерации).
         taken_turn: номер хода, когда шаг впервые ушёл в генерацию.
     """
 

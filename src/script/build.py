@@ -107,9 +107,6 @@ def _check_references(raw: RawScript) -> None:
         unknown_fields = set(step.fills) | set(step.requires)
         if step.branches is not None:
             unknown_fields.add(step.branches.field)
-        if step.skip_when is not None:
-            unknown_fields |= set(step.skip_when.filled)
-            unknown_fields |= set(step.skip_when.equals)
         missing = sorted(unknown_fields - fields)
         if missing:
             raise ScriptError(f"Шаг {step.id!r} ссылается на необъявленные поля профиля: {missing}")

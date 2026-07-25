@@ -43,7 +43,8 @@ def test_без_суммы_число_не_произносится(texts):
 def test_неподтверждённая_сумма_звучит_как_примерная(texts):
     line = price_line({"amount": 43900, "reliable": False}, texts)
     assert "43900" in line
-    assert "стартовая" in line.lower()
+    assert "от" in line.lower()
+    assert "зафиксируем" in line.lower()
 
 
 def test_подтверждённая_сумма_звучит_как_точная(texts):
@@ -53,8 +54,8 @@ def test_подтверждённая_сумма_звучит_как_точна�
 
     assert "47000" in reliable
     assert reliable != unreliable
-    assert "стартовая" not in reliable.lower()
-    assert "составляет" in reliable.lower()
+    assert "от" not in reliable.lower().split("рублей")[0]
+    assert "на тысячу" in reliable.lower()
 
 
 def test_оговорка_справочника_вслух_не_попадает(texts):

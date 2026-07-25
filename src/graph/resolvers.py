@@ -160,6 +160,7 @@ class LlmCityResolver:
                     [SystemMessage(content=system), HumanMessage(content=human)],
                     schema=schema,
                     text_field=None,
+                    purpose="город",
                 )
             return _validate_city(CityResolution.model_validate(raw), cities)
         except (LLMTurnFailed, Exception) as exc:  # noqa: BLE001
@@ -201,6 +202,7 @@ class LlmBranchResolver:
                     [SystemMessage(content=system), HumanMessage(content=human)],
                     schema=schema,
                     text_field=None,
+                    purpose="филиал",
                 )
             return _validate_branches(BranchResolution.model_validate(raw), branches)
         except (LLMTurnFailed, Exception) as exc:  # noqa: BLE001

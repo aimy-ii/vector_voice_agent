@@ -53,6 +53,21 @@ _ACKS: frozenset[str] = frozenset(
 #: Сколько слов ещё считается коротким подтверждением.
 _ACK_MAX_WORDS = 3
 
+#: Просьба повторить последний дословный блок — без модели.
+_REPEAT_MARKERS: frozenset[str] = frozenset(
+    {
+        "повтори",
+        "повторите",
+        "перефразируй",
+        "перефразируйте",
+        "не понял",
+        "не поняла",
+        "ещё раз",
+        "что вы сказали",
+        "что вы говорите",
+    }
+)
+
 
 def strip_system(messages: Iterable[BaseMessage]) -> list[BaseMessage]:
     """Убирает системные сообщения, пришедшие от бота.
@@ -204,3 +219,33 @@ def find_aside(text: str, catalogue: dict[str, Sequence[str]]) -> str | None:
         if matches_triggers(text, triggers):
             return aside_id
     return None
+
+
+def _nothing_to_say(text: str) -> bool:
+    """Реплике нечего адресовать модели: пусто или голое подтверждение.
+
+    Единственное основание не звать генератора на дословном ходу. Никакого
+    разбора смысла: заговорил человек по существу — отвечаем живой репликой.
+
+    Args:
+        text: реплика клиента.
+
+    Returns:
+        True, если ход можно вести дословным блоком без модели.
+    """
+    return not text.strip() or is_acknowledgement(text)
+
+
+def is_repeat_request(text: str) -> bool:
+    """Просьба повторить последнюю реплику — повтор блока без модели.
+
+    Args:
+        text: реплика клиента.
+
+    Returns:
+        True, если сработал признак повтора.
+    """
+    haystack = normalize(text)
+    return any(
+        re.search(rf"(?:^|\s){re.escape(normalize(m))}(?:\s|$)", haystack) for m in _REPEAT_MARKERS
+    )

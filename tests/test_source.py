@@ -98,3 +98,17 @@ def test_подмена_источника_бесшовна(raw_script):
     assert compiled.id == "vector_ru"
     assert compiled.steps["city"].kind == "question"
     assert source.asked == [("vector_ru", "2")]
+
+
+def test_v2_без_max_attempts_и_v1_с_лишним_полем(data_dir, raw_script_v1):
+    """v2 грузится без max_attempts; лишнее поле в v1 pydantic игнорирует."""
+    from script.models import Step
+
+    assert "max_attempts" not in Step.model_fields
+    v2 = JsonScriptSource(data_dir).fetch("vector_ru", "2")
+    city = next(s for s in v2.steps if s.id == "city")
+    assert not hasattr(city, "max_attempts") or "max_attempts" not in city.model_dump()
+    # v1 в JSON ещё содержит max_attempts — загрузка не падает.
+    assert raw_script_v1.version == "1"
+    compiled = build_script(raw_script_v1)
+    assert compiled.version == "1"

@@ -1,8 +1,10 @@
 """Сборка запроса к генератору на один ход.
 
 Порядок блоков: стабильное в начало одним куском, меняющееся хвостом —
-провайдер кэширует общий префикс. Статика контекста стабильна весь разговор,
-значит идёт впереди. Перечень городов в промпт не попадает никогда.
+провайдер кэширует общий префикс. Персона, правила, запрет механики,
+естественность и unknown стабильны весь звонок; статика контекста — после
+фиксации города и филиала; профиль, факты, шапка и справки меняются каждый
+ход. Перечень городов в промпт не попадает никогда.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from typing import Any, Mapping, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from graph.context import DYN_MISSING
 from graph.names import given_name
 from script.build import CompiledScript
 from script.models import Step
@@ -23,31 +26,15 @@ HISTORY_TURNS = 8
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 
-#: Запрет озвучивать служебную механику — общий для всех блоков промпта.
+#: Запрет озвучивать служебную механику — ровно одно вхождение в персоне.
 _NO_MECHANICS = (
     "Не проговаривай вслух внутреннюю механику: ни «уточню детали», ни «это "
     "поможет подобрать», ни упоминаний поиска, базы, справочника, шагов, "
     "полей и системы. Собеседник разговаривает с менеджером, а не с программой."
 )
 
-_NATURALNESS = (
-    "Естественность:\n"
-    "- Реплика заканчивается ходом к собеседнику — вопросом или конкретным "
-    "предложением. Исключение — только прощание.\n"
-    "- Не переспрашивай и не подтверждай переспросом уже отвеченное. "
-    "Никаких «ваш город Санкт-Петербург, верно?».\n"
-    "- Побочные вопросы — норма: ответь и технично вернись к этапу.\n"
-    "- Одна реплика клиента может закрыть несколько шагов — зафиксируй всё "
-    "прозвучавшее в understood, даже если спрашивали не об этом.\n"
-    "- Обращайся по имени и только по имени; отчество не используй никогда.\n"
-    "- Не начинай со второго вступления, если перед тобой уже прозвучала "
-    "фраза-заглушка: продолжай с места, без повторного «добрый день».\n"
-    "- Не оценивай выбор клиента и не восторгайся: ни «прекрасный выбор», "
-    "ни «какой удобный район», ни «отличное решение». Услышал — принял и "
-    "пошёл дальше. Короткое «понятно» или «хорошо» допустимо.\n"
-    "- Не приписывай ценность тому, о чём нет данных в контексте: про район "
-    "и прочее без фактов не говори как о хорошем."
-)
+#: Пометка к тексту-образцу шага с флагом verbatim.
+_SAMPLE_PREFIX = "Сформулируй в этом ключе, цифры не меняй:"
 
 
 def fill_facts(text: str, facts: Mapping[str, Any]) -> str:
@@ -66,6 +53,63 @@ def fill_facts(text: str, facts: Mapping[str, Any]) -> str:
         return "" if value is None else str(value)
 
     return _PLACEHOLDER.sub(_replace, text).strip()
+
+
+def naturalness_block(*, ask_for_move: bool) -> str:
+    """Собирает блок естественности реплики.
+
+    Args:
+        ask_for_move: True — требовать заканчивать вопросом или предложением
+            (в шапке есть незакрытый вопрос). False — этот пункт не включать.
+
+    Returns:
+        Текстовый блок для системного сообщения.
+    """
+    lines = ["Естественность:"]
+    if ask_for_move:
+        lines.append(
+            "- Реплика заканчивается ходом к собеседнику — вопросом или конкретным "
+            "предложением. Исключение — только прощание."
+        )
+    lines.extend(
+        [
+            "- Говори в режиме живого телефонного разговора, а не рекламного "
+            "объявления. Один твой ответ — максимум 2–3 коротких предложения. "
+            "Не вываливай всё сразу: скажи главное, детали — если человек спросит. "
+            "Никаких списков через запятую на всю строку, никакой «миссии компании». "
+            "Плохо: «В стоимость входит теория, практика с мастером, автомобиль, "
+            "автодром, документы, топливо, внутренние экзамены и организация "
+            "ГИБДД…». Хорошо: «Обучение под ключ — всё включено, доплат нет. "
+            "Рассказать, что входит?».",
+            "- Не переспрашивай и не подтверждай переспросом уже отвеченное. "
+            "Никаких «ваш город Санкт-Петербург, верно?».",
+            "- Побочные вопросы — норма: ответь и технично вернись к этапу.",
+            "- Одна реплика клиента может закрыть несколько шагов — зафиксируй всё "
+            "прозвучавшее в understood, даже если спрашивали не об этом.",
+            "- Обращайся по имени и только по имени; отчество не используй никогда.",
+            "- Не начинай со второго вступления, если перед тобой уже прозвучала "
+            "фраза-заглушка: продолжай с места, без повторного «добрый день».",
+            "- НЕ оценивай и НЕ комментируй выбор клиента и его данные. Не хвали "
+            "выбор («хороший выбор», «отличный вариант»), не оценивай возраст, "
+            "опыт, город, коробку («возраст подходит», «отличная категория»). "
+            "Просто прими сказанное и иди дальше. Клиент не спрашивал твоего "
+            "одобрения. Плохо: «Механика — хороший выбор!», «Ваш возраст "
+            "подходит». Хорошо: молча учесть и задать следующий вопрос.",
+            "- Тем более не давай оценок, которые могут быть неверными "
+            "(например, что механика проще для новичка — это не так). Не "
+            "рассуждай о сложности/лёгкости выбора вообще.",
+            "- Не приписывай ценность тому, о чём нет данных в контексте: про район "
+            "и прочее без фактов не говори как о хорошем.",
+            "- После того как что-то рассказал, мягко проверь, что клиент "
+            "нормально это воспринял — живым коротким вопросом СВОИМИ словами, "
+            "каждый раз по-разному. Не зачитывай одну и ту же дежурную фразу. "
+            "Смысл проверки дан как образец — передай его естественно, а не "
+            "дословно. Плохо (канцелярская пластинка): «Как вам в целом такой "
+            "подход к обучению?». Хорошо (живо, по-разному): «Такой график "
+            "удобен?» / «Звучит нормально?» / «Как вам?» / «Подходит так?».",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def persona_block(script: CompiledScript) -> str:
@@ -113,7 +157,6 @@ def profile_block(script: CompiledScript, profile: Mapping[str, str]) -> str:
     if unknown:
         parts.append("\nЧего ещё не знаем (переспрашивать известное — ошибка):")
         parts.append("\n".join(unknown))
-    parts.append(_NO_MECHANICS)
     return "\n".join(parts)
 
 
@@ -131,7 +174,7 @@ def context_block(context_text: str) -> str:
         return ""
     return (
         "Контекст разговора (справочный материал целиком; список филиалов и "
-        f"перечень городов сюда не входят):\n{text}\n{_NO_MECHANICS}"
+        f"перечень городов сюда не входят):\n{text}"
     )
 
 
@@ -143,28 +186,34 @@ def _describe_step(
     heading: str,
     attempts: int = 0,
 ) -> list[str]:
-    """Собирает строки описания одного шага для промпта."""
+    """Собирает строки описания одного шага для промпта.
+
+    Args:
+        step: шаг скрипта.
+        profile: профиль для ветвления текста.
+        facts: факты хода для подстановки.
+        heading: заголовок строки («Шаг»).
+        attempts: сколько раз шаг уже брали.
+
+    Returns:
+        Список строк описания.
+    """
     asked = "уже спрашивали, ответа нет" if attempts > 0 else "новый вопрос"
     lines = [f"{heading}: {step.id} ({step.kind}, {asked}).", f"Задача: {step.goal}"]
-    if step.verbatim:
-        # Текст дословного блока в промпт не идёт: его выталкивает писатель.
+    text = render_step_text(step, profile)
+    if text:
+        filled = fill_facts(text, facts)
+        if filled:
+            if step.verbatim:
+                lines.append(f"{_SAMPLE_PREFIX}\n{filled}")
+            else:
+                lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
+    if step.check_question:
         lines.append(
-            "После твоей реплики будет произнесён дословный блок отдельным "
-            "голосом. Его содержание тебе неизвестно — не повторяй и не "
-            "пересказывай его, не угадывай формулировки."
+            "Образец смысла проверки (обязателен в конце реплики; сформулируй "
+            "своими словами, живо и коротко, не зачитывай дословно):\n"
+            f"«{step.check_question}»"
         )
-        if step.check_question:
-            lines.append(
-                "В конце блока собеседнику зададут проверочный вопрос — "
-                "свой вопрос на ту же тему не дублируй."
-            )
-    else:
-        text = render_step_text(step, profile)
-        if text:
-            filled = fill_facts(text, facts)
-            lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
-        if step.check_question:
-            lines.append(f"Проверочный вопрос в конце: {step.check_question}")
     if step.options:
         lines.append(
             "Предложи выбор из вариантов, а не открытый вопрос: " + ", ".join(step.options)
@@ -195,8 +244,9 @@ def steps_block(
     if not steps:
         return (
             "Все шаги скрипта закрыты. Отвечай на вопросы собеседника и мягко "
-            f"подводи разговор к завершению.\n{_NO_MECHANICS}\n{_NATURALNESS}"
+            "подводи разговор к завершению."
         )
+
     lines = [
         "Шапка скрипта на этот ход. Новый вопрос — только один; уже "
         "спрашивавшиеся отрабатывай, когда уместно по разговору, не затыкай "
@@ -213,9 +263,6 @@ def steps_block(
                 attempts=int(attempts.get(step.id, 0)),
             )
         )
-    lines.append("")
-    lines.append(_NATURALNESS)
-    lines.append(_NO_MECHANICS)
     return "\n".join(lines)
 
 
@@ -227,7 +274,18 @@ def step_block(
     next_step: Step | None = None,
     attempts: Mapping[str, int] | None = None,
 ) -> str:
-    """Совместимая обёртка: текущий и следующий как шапка из одного-двух шагов."""
+    """Совместимая обёртка: текущий и следующий как шапка из одного-двух шагов.
+
+    Args:
+        step: ведущий шаг.
+        profile: профиль.
+        facts: факты хода.
+        next_step: следующий шаг или None.
+        attempts: счётчики попыток.
+
+    Returns:
+        Текстовый блок шапки.
+    """
     counts = attempts or {}
     bundle = [step]
     if next_step is not None:
@@ -261,33 +319,8 @@ def facts_block(facts: Mapping[str, Any]) -> str:
     body = json.dumps(payload, ensure_ascii=False, indent=1)
     return (
         "Факты этого хода, которыми можно оперировать. Называть можно только "
-        f"их; чего здесь нет — того не выдумывай:\n{body}\n{_NO_MECHANICS}"
+        f"их; чего здесь нет — того не выдумывай:\n{body}"
     )
-
-
-def facts_for_generator(
-    facts: Mapping[str, Any],
-    steps: Sequence[Step],
-) -> dict[str, Any]:
-    """Факты для генератора: без тех, что нужны только дословным шагам.
-
-    Args:
-        facts: факты хода.
-        steps: шапка шагов.
-
-    Returns:
-        Копия фактов без плейсхолдеров дословных блоков (например price_line).
-    """
-    payload = dict(facts)
-    # Дословные шаги факты в промпт не получают: подстановку делает писатель.
-    if any(step.verbatim for step in steps):
-        for step in steps:
-            if not step.verbatim:
-                continue
-            text = step.text or ""
-            for key in _PLACEHOLDER.findall(text):
-                payload.pop(key, None)
-    return payload
 
 
 def filler_spoken_block(spoken_filler: str | None) -> str:
@@ -304,33 +337,66 @@ def filler_spoken_block(spoken_filler: str | None) -> str:
         return ""
     return (
         f"Перед тобой в эфир уже ушла фраза: «{text}». "
-        "Не начинай со второго вступления и не повторяй её.\n"
-        f"{_NO_MECHANICS}"
+        "Не начинай со второго вступления и не повторяй её."
     )
 
 
-def aside_block(script: CompiledScript, done: Sequence[str]) -> str:
-    """Перечисляет справки и возражения для `aside_id`."""
-    lines = ["Перечень посторонних вопросов и возражений (для поля aside_id):"]
-    for help_id, item in script.helps.items():
-        mark = " — уже отвечали" if help_id in done else ""
-        lines.append(
-            f"- {help_id}: справка о том, что {item.triggers[0] if item.triggers else help_id}{mark}"
+def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
+    """Инструкция генератору по статусу динамики контекста.
+
+    Args:
+        status: ``dynamic_status`` из контекста.
+        searching_retry: повторный заход при «в поиске» после заглушки.
+
+    Returns:
+        Текстовый блок или пустая строка.
+    """
+    if status == DYN_MISSING:
+        return (
+            "По нужному факту в данных ничего нет. Тактично скажи, что этого "
+            "нет, и веди разговор дальше — не выдумывай."
         )
+    if searching_retry:
+        return (
+            "Поиск по факту ещё не завершён, пауза-заглушка уже звучала. "
+            "На контекст по этому вопросу не опирайся — ответь технично и "
+            "веди разговор дальше."
+        )
+    return ""
+
+
+def aside_block(script: CompiledScript, done: Sequence[str]) -> str:
+    """Перечисляет возражения для `aside_id`.
+
+    Справки в перечень не входят — их отдаёт контекстер в динамику контекста.
+
+    Args:
+        script: скомпилированный скрипт.
+        done: уже отработанные возражения.
+
+    Returns:
+        Текстовый блок перечня возражений.
+    """
+    lines = ["Перечень возражений (для поля aside_id):"]
     for objection_id, item in script.objections.items():
         mark = " — уже отвечали" if objection_id in done else ""
         lines.append(f"- {objection_id}: возражение{mark}")
     lines.append("Ничего похожего в реплике нет — оставь aside_id пустым.")
-    lines.append(_NO_MECHANICS)
     return "\n".join(lines)
 
 
 def unknown_block(script: CompiledScript) -> str:
-    """Что делать, когда ответа нет ни в скрипте, ни в справочнике."""
+    """Что делать, когда ответа нет ни в скрипте, ни в справочнике.
+
+    Args:
+        script: скомпилированный скрипт.
+
+    Returns:
+        Текстовый блок с формулировкой unknown.
+    """
     return (
         "Если точного ответа нет — не придумывай. "
-        f"Скажи примерно так и веди разговор дальше: «{script.params.unknown}»\n"
-        f"{_NO_MECHANICS}"
+        f"Скажи примерно так и веди разговор дальше: «{script.params.unknown}»"
     )
 
 
@@ -347,11 +413,14 @@ def build_turn_messages(
     context_text: str = "",
     spoken_filler: str | None = None,
     attempts: Mapping[str, int] | None = None,
+    dynamic_status: str = "",
+    searching_retry: bool = False,
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к генератору.
 
-    Порядок: статика контекста → персона → профиль → факты хода → шапка →
-    заглушка → справки → unknown → инструкция схемы → хвост истории.
+    Порядок: персона + естественность + unknown → статика контекста →
+    профиль → факты хода → шапка → возражения → заглушка → инструкция схемы →
+    хвост истории.
 
     Args:
         script: скомпилированный скрипт.
@@ -360,11 +429,13 @@ def build_turn_messages(
         profile: собранный профиль.
         facts: факты хода.
         history: история звонка без системных сообщений.
-        asides_done: отработанные справки и возражения.
+        asides_done: отработанные возражения.
         next_step: следующий шаг (совместимость).
         context_text: документ контекста.
         spoken_filler: фраза-заглушка, уже ушедшая в эфир.
         attempts: счётчики попыток.
+        dynamic_status: статус динамики контекста.
+        searching_retry: повторный «в поиске» после заглушки.
 
     Returns:
         Список сообщений: одно системное и хвост истории.
@@ -380,24 +451,30 @@ def build_turn_messages(
     else:
         head = []
 
-    # Стабильное в начало: контекст (статика) + персона.
-    blocks: list[str] = []
-    ctx = context_block(context_text)
-    if ctx:
-        blocks.append(ctx)
-    blocks.append(persona_block(script))
+    ask_for_move = bool(head)
+    blocks: list[str] = [
+        persona_block(script),
+        naturalness_block(ask_for_move=ask_for_move),
+        unknown_block(script),
+    ]
+    status_note = dynamic_status_block(status=dynamic_status, searching_retry=searching_retry)
+    if status_note:
+        blocks.append(status_note)
+    if context_text and not searching_retry:
+        ctx = context_block(context_text)
+        if ctx:
+            blocks.append(ctx)
     blocks.append(profile_block(script, profile))
 
-    facts_text = facts_block(facts_for_generator(facts, head))
+    facts_text = facts_block(facts)
     if facts_text:
         blocks.append(facts_text)
 
     blocks.append(steps_block(head, profile, facts, attempts=counts))
+    blocks.append(aside_block(script, asides_done))
     filler = filler_spoken_block(spoken_filler)
     if filler:
         blocks.append(filler)
-    blocks.append(aside_block(script, asides_done))
-    blocks.append(unknown_block(script))
     blocks.append(
         "Верни ответ строго по схеме. В поле reply — только то, что звучит "
         "вслух: живой разговорный русский, без списков и канцелярита."

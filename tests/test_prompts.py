@@ -15,16 +15,17 @@ from graph.facts import (
     needs_of,
 )
 from graph.prompts import (
+    _NO_MECHANICS,
     aside_block,
     build_turn_messages,
     context_block,
     facts_block,
     fill_facts,
+    naturalness_block,
     persona_block,
     profile_block,
     step_block,
     steps_block,
-    unknown_block,
 )
 
 
@@ -53,35 +54,86 @@ def test_профиль_разделяет_роли(script):
     assert "student_name" in block
 
 
-def test_дословный_шаг_без_текста_в_промпте(script):
-    block = step_block(script.step("practice"), {}, {})
-    assert "дословный блок" in block.lower() or "дословно" in block.lower()
-    assert "Не повторяй" in block or "не пересказывай" in block.lower()
-    # Текст шага в системное сообщение не попадает.
-    assert "индивидуальному графику" not in block
-    assert script.step("practice").text not in block
+def test_шаг_с_образцом_попадает_в_промпт(script):
+    """Текст verbatim-шага — образец с пометкой, не готовая реплика мимо модели."""
+    from graph.prompts import _SAMPLE_PREFIX
+
+    step = script.step("practice")
+    messages = build_turn_messages(
+        script=script,
+        steps=[step],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert _SAMPLE_PREFIX in content
+    filled = step.text or ""
+    assert filled in content
+    assert "Опорная формулировка (можно сказать своими словами)" not in content
+    assert "подводи разговор к завершению" not in content.lower()
 
 
-def test_цена_дословного_шага_не_в_промпте_генератора(script):
-    from graph.prompts import facts_for_generator
+def test_цена_образца_и_факт_в_промпте_генератора(script):
+    """Факт price_line и образец шага price уходят модели вместе."""
+    from graph.prompts import _SAMPLE_PREFIX
 
     step = script.step("price")
     facts = {"price_line": "Стоимость — от 43900 рублей.", "city": {"name": "Пермь"}}
-    cleaned = facts_for_generator(facts, [step])
-    assert "price_line" not in cleaned
-    block = step_block(step, {}, facts)
-    assert "от 43900" not in block
-    assert "{price_line}" not in block
+    messages = build_turn_messages(
+        script=script,
+        steps=[step],
+        profile={},
+        facts=facts,
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "price_line" in content or "43900" in content
+    assert _SAMPLE_PREFIX in content
+    assert "от 43900" in content
+    assert step.goal in content
 
 
 def test_промпт_запрещает_восторги_и_разрешает_короткое_подтверждение(script):
-    block = steps_block([script.step("city")], {}, {}, attempts={})
+    block = naturalness_block(ask_for_move=True)
     lowered = block.lower()
-    assert "не оценивай выбор" in lowered or "не восторгайся" in lowered
-    assert "прекрасный выбор" in lowered or "отличное решение" in lowered
-    assert "понятно" in lowered or "хорошо" in lowered
-    # Запрет именно на похвалу, не на короткое подтверждение.
-    assert "запрещ" not in lowered or "понятно" in lowered
+    assert "не оценивай" in lowered and "выбор клиента" in lowered
+    assert "хороший выбор" in lowered
+    assert "возраст подходит" in lowered
+    assert "сложности" in lowered or "лёгкости" in lowered
+    assert "молча учесть" in lowered
+
+
+def test_промпт_требует_живой_проверочный_вопрос(script):
+    """check_question — образец смысла; правило требует живую формулировку."""
+    step = script.step("practice")
+    assert step.check_question
+    block = steps_block([step], {}, {}, attempts={})
+    assert "Образец смысла проверки" in block
+    assert step.check_question in block
+    assert f"«{step.check_question}»" in block
+    assert "не зачитывай дословно" in block.lower()
+    natural = naturalness_block(ask_for_move=True).lower()
+    assert "своими словами" in natural
+    assert "каждый раз по-разному" in natural
+    assert "канцелярская пластинка" in natural
+    assert "задай его целиком" not in natural
+    assert "не сокращай" not in natural
+    messages = build_turn_messages(
+        script=script,
+        steps=[step],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert step.check_question in content
+    assert "не зачитывай" in content.lower()
+    assert "не сокращай" not in content.lower()
+    assert "задай целиком" not in content.lower()
 
 
 def test_обычный_шаг_разрешает_свои_слова(script):
@@ -98,22 +150,103 @@ def test_промпт_видит_шапку_и_запрет_переспраши
     )
     assert "city" in block
     assert "who_studies" in block
-    assert "не переспрашивай" in block.lower()
-    assert "верно?" in block.lower()
+    natural = naturalness_block(ask_for_move=True)
+    assert "не переспрашивай" in natural.lower()
+    assert "верно?" in natural.lower()
 
 
 def test_промпт_требует_заканчивать_ходом_к_собеседнику(script):
-    block = steps_block([script.step("city")], {}, {}, attempts={})
+    block = naturalness_block(ask_for_move=True)
     assert "вопросом" in block.lower() and "предложением" in block.lower()
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "ходом к собеседнику" in messages[0].content.lower()
+
+
+def test_шапка_с_образцом_тоже_требует_хода_к_собеседнику(script):
+    """Незакрытый вопрос в шапке — ask_for_move и для шага с образцом."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("terms")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "ходом к собеседнику" in content
+    assert "сформулируй в этом ключе" in content
+
+
+def test_шапка_с_висящими_и_образцом_одним_промптом(script):
+    """Несколько шагов в шапке + образец — всё в одном системном сообщении."""
+    from graph.prompts import _SAMPLE_PREFIX
+
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city"), script.step("terms")],
+        profile={},
+        facts={"price_line": "срок два месяца"},
+        history=[],
+        asides_done=[],
+        attempts={"city": 1},
+    )
+    content = messages[0].content
+    assert "city" in content
+    assert "terms" in content
+    assert _SAMPLE_PREFIX in content
+    assert "Шапка скрипта" in content
+    assert content.count("Шаг:") >= 2
+
+
+def test_шапка_пуста_текст_завершения(script):
+    messages = build_turn_messages(
+        script=script, step=None, profile={}, facts={}, history=[], asides_done=[]
+    )
+    assert "подводи разговор к завершению" in messages[0].content.lower()
+
+
+def test_запрет_механики_ровно_один_раз(script):
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={"caller_name": "Мария"},
+        facts={"city": {"name": "Пермь"}},
+        history=[],
+        asides_done=[],
+        spoken_filler="Секунду, гляну.",
+        context_text="Город: Пермь",
+    )
+    content = messages[0].content
+    assert content.count(_NO_MECHANICS) == 1
+
+
+def test_порядок_блоков_персона_профиль_шапка(script):
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    persona_i = content.index("Дарья")
+    profile_i = content.index("Что уже известно")
+    steps_i = content.index("Шапка скрипта")
+    assert persona_i < profile_i < steps_i
 
 
 def test_промпт_запрещает_озвучивать_механику(script):
-    step = steps_block([script.step("city")], {}, {}, attempts={})
-    facts = facts_block({"city": {"name": "Пермь"}})
-    aside = aside_block(script, done=[])
-    unknown = unknown_block(script)
-    for block in (step, facts, aside, unknown):
-        assert "не проговаривай" in block.lower() or "не упоминай" in block.lower()
+    block = persona_block(script)
+    assert "не проговаривай" in block.lower()
+    assert _NO_MECHANICS in block
 
 
 def test_перечень_городов_не_в_промпте(script):
@@ -129,7 +262,7 @@ def test_перечень_городов_не_в_промпте(script):
     assert "perm" not in messages[0].content or "Город" in messages[0].content
 
 
-def test_контекст_впереди_персонажа(script):
+def test_персона_впереди_контекста(script):
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name")],
@@ -140,7 +273,7 @@ def test_контекст_впереди_персонажа(script):
         context_text="Статика: город Пермь.",
     )
     content = messages[0].content
-    assert content.index("Статика: город Пермь") < content.index("Дарья")
+    assert content.index("Дарья") < content.index("Статика: город Пермь")
 
 
 def test_ни_один_goal_не_объясняет_мотивацию(raw_script):
@@ -157,11 +290,31 @@ def test_пустые_факты_не_засоряют_промпт():
     assert "Пермь" in facts_block({"city": {"name": "Пермь"}})
 
 
-def test_перечень_справок_уходит_модели(script):
-    block = aside_block(script, done=["medcheck"])
-    assert "medcheck" in block
-    assert "уже отвечали" in block
+def test_перечень_возражений_без_справок(script):
+    block = aside_block(script, done=["think"])
     assert "think" in block
+    assert "уже отвечали" in block
+    assert "medcheck" not in block
+    assert "справка" not in block.lower()
+    for help_id in script.helps:
+        assert help_id not in block
+
+
+def test_справка_доходит_через_динамику_контекста(script):
+    med = script.helps["medcheck"].text
+    messages = build_turn_messages(
+        script=script,
+        step=script.step("name"),
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        context_text=f"Город: Пермь\n\n{med}",
+        dynamic_status="готово",
+    )
+    content = messages[0].content
+    assert med in content
+    assert "medcheck" not in aside_block(script, done=[])
 
 
 def test_запрос_к_модели_содержит_системный_блок_и_хвост(script):

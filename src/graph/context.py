@@ -1,8 +1,8 @@
 """Контекст разговора: один накопительный документ.
 
 Статика кладётся один раз и до конца разговора не меняется — её нельзя резать.
-Динамика — место под следующий этап; сейчас пустая. В промпт документ
-подшивается целиком.
+Динамика наполняется контекстером и едет со статусом; генератор статус читает.
+В промпт документ подшивается целиком.
 """
 
 from __future__ import annotations
@@ -11,6 +11,15 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel
 
+#: Динамика не нужна по этой реплике.
+DYN_NONE = "не требуется"
+#: Ответ уже в статике или накопленном — можно генерить.
+DYN_READY = "готово"
+#: Идёт поиск; генератор отдаёт заглушку (один заход).
+DYN_SEARCHING = "в поиске"
+#: Поиск завершился без результата.
+DYN_MISSING = "не нашлось"
+
 
 class ConversationContext(BaseModel):
     """Единый контекст разговора.
@@ -18,6 +27,9 @@ class ConversationContext(BaseModel):
     Attributes:
         static_text: запечённая статика города и филиала.
         dynamic_text: динамическая часть (пока пусто — следующий этап).
+        dynamic_status: статус динамики; ставит контекстер, читает генератор.
+        situation_slug: слаг ситуации для словаря заглушек при «в поиске».
+        filler_spoken: заглушка по этому слагу уже произнесена (один заход).
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
@@ -26,6 +38,9 @@ class ConversationContext(BaseModel):
 
     static_text: str = ""
     dynamic_text: str = ""
+    dynamic_status: str = DYN_NONE
+    situation_slug: str | None = None
+    filler_spoken: bool = False
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -205,6 +220,9 @@ class ContextState(BaseModel):
 
     static_text: str = ""
     dynamic_text: str = ""
+    dynamic_status: str = DYN_NONE
+    situation_slug: str | None = None
+    filler_spoken: bool = False
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None

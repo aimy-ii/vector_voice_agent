@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     #: Потолок токенов ответа. Реплика в звонке короткая, длинный ответ — это
     #: молчание в трубке, поэтому лимит намеренно жёсткий.
     llm_max_tokens: int = 700
+    #: Короткий потолок для реакции перед дословным блоком (одно-два предложения).
+    llm_max_tokens_short: int = 200
 
     # ─── Бюджет хода ────────────────────────────────────────────────────────
     #: Сколько секунд ждём соединения с провайдером модели.
@@ -80,8 +82,40 @@ class Settings(BaseSettings):
     script_version: str | None = None
     #: Каталог с JSON-скриптами. Пусто — каталог `data` рядом с кодом.
     script_dir: str | None = None
-    #: Порог попыток задать шаг: исчерпан — чекер закрывает без модели.
-    step_attempt_limit: int = 2
+    #: Порог попыток задать шаг: сколько раз ведущий шаг уходит в генерацию
+    #: без ответа клиента, прежде чем чекер закроет его. Счётчик растёт только
+    #: у ведущего шага хода, не у висящих в шапке.
+    step_attempt_limit: int = Field(
+        default=2,
+        validation_alias=AliasChoices(
+            "step_attempt_limit",
+            "STEP_ATTEMPT_LIMIT",
+            "step_patience_limit",
+            "STEP_PATIENCE_LIMIT",
+        ),
+    )
+    #: Сколько висящих шагов в шапке, при котором новый шаг с верхушки
+    #: больше не добавляется — генератор дорабатывает висящее.
+    pending_steps_soft_cap: int = Field(
+        default=4,
+        validation_alias=AliasChoices("pending_steps_soft_cap", "PENDING_STEPS_SOFT_CAP"),
+        description=(
+            "Сколько висящих шагов в шапке, при котором новый шаг с верхушки "
+            "больше не добавляется — генератор дорабатывает висящее."
+        ),
+    )
+
+    # ─── Служебный чекер в реальном времени ─────────────────────────────────
+    #: Порог прироста накопленного текста (символы) между служебными проходами.
+    #: Меньше порога и не первый проход — модель не зовём.
+    checker_min_growth_chars: int = 10
+    #: Имя графа служебного чекера в ``langgraph.json``. Пусто → ``vector_checker``.
+    checker_graph_id: str | None = None
+    #: ``multitask_strategy`` для запусков служебного графа (клиент SDK).
+    checker_multitask_strategy: str | None = None
+    #: ``multitask_strategy`` основного хода. Перед стартом клиент отменяет
+    #: идущий служебный проход, иначе enqueue поставит основной в очередь.
+    agent_multitask_strategy: str | None = None
 
     # ─── Redis: рабочий прогресс скрипта звонка ─────────────────────────────
     #: Адрес Redis. Совпадает с ``REDIS_URI`` сервера LangGraph.
@@ -93,11 +127,9 @@ class Settings(BaseSettings):
     script_redis_ttl: int = 7200
 
     # ─── Заглушка в эфир ────────────────────────────────────────────────────
-    #: Порог в миллисекундах для общей заглушки lookup. 0 — выключена.
-    #: Заглушки города и филиала включены отдельно и по умолчанию.
-    filler_threshold_ms: int = 0
-    #: Фразы в эфир, пока идёт поиск города/филиала. По умолчанию включены.
-    lookup_fillers_enabled: bool = True
+    #: Фразы в эфир, пока идёт поиск города/филиала. По умолчанию выключены:
+    #: формулировки ещё сырые (именительный падеж, не вовремя).
+    lookup_fillers_enabled: bool = False
 
     # ─── Наблюдаемость ──────────────────────────────────────────────────────
     log_level: str = "INFO"
@@ -115,6 +147,9 @@ class Settings(BaseSettings):
         "script_version",
         "script_dir",
         "langsmith_project",
+        "checker_graph_id",
+        "checker_multitask_strategy",
+        "agent_multitask_strategy",
         mode="before",
     )
     @classmethod
@@ -133,6 +168,21 @@ class Settings(BaseSettings):
     def fast_model(self) -> str:
         """Модель для коротких вызовов; отдельной нет — берём основную."""
         return self.llm_model_fast or self.llm_model
+
+    @property
+    def checker_assistant_id(self) -> str:
+        """Идентификатор ассистента служебного чекера для SDK."""
+        return self.checker_graph_id or "vector_checker"
+
+    @property
+    def checker_run_strategy(self) -> str:
+        """Стратегия multitask для служебного прохода: interrupt."""
+        return self.checker_multitask_strategy or "interrupt"
+
+    @property
+    def agent_run_strategy(self) -> str:
+        """Стратегия multitask основного хода: enqueue."""
+        return self.agent_multitask_strategy or "enqueue"
 
     @property
     def script_data_dir(self) -> Path:

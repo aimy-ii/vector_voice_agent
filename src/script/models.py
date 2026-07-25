@@ -69,19 +69,6 @@ class StepBranches(BaseModel):
     default: str | None = None
 
 
-class SkipWhen(BaseModel):
-    """Условие пропуска шага.
-
-    Шаг должен уметь пропускаться по признаку, а не только закрываться:
-    готовому клиенту презентация не нужна.
-    """
-
-    #: Пропустить, если все перечисленные поля профиля уже заполнены.
-    filled: list[str] = Field(default_factory=list)
-    #: Пропустить, если поле профиля равно одному из значений.
-    equals: dict[str, list[str]] = Field(default_factory=dict)
-
-
 class Step(BaseModel):
     """Один шаг скрипта."""
 
@@ -95,7 +82,6 @@ class Step(BaseModel):
     requires: list[str] = Field(default_factory=list)
     #: Какие шаги обязаны быть закрыты до этого.
     after: list[str] = Field(default_factory=list)
-    skip_when: SkipWhen | None = None
     #: Что принести из справочника перед вызовом модели.
     needs: list[NeedKind] = Field(default_factory=list)
 
@@ -109,10 +95,8 @@ class Step(BaseModel):
     check_question: str | None = None
     #: Альтернативный вопрос как приём: «механика или автомат?».
     options: list[str] = Field(default_factory=list)
-    #: Текст произносится дословно и моделью не переформулируется.
+    #: Шаг несёт готовый текст-образец реплики; подаётся модели как пример формулировки.
     verbatim: bool = False
-    #: Сколько раз можно вернуться к шагу, прежде чем считать его отказом.
-    max_attempts: int = 2
 
 
 class Help(BaseModel):

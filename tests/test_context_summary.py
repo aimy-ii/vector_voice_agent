@@ -2,10 +2,30 @@
 
 from __future__ import annotations
 
-from graph.context import ConversationContext, format_city_static, merge_static
+from graph.context import (
+    DYN_MISSING,
+    DYN_NONE,
+    DYN_READY,
+    DYN_SEARCHING,
+    ConversationContext,
+    format_city_static,
+    merge_static,
+)
 from graph.fillers import city_filler
 from graph.names import given_name
 from graph.summary import build_summary
+
+
+def test_статусы_динамики_константы_и_дефолт():
+    assert DYN_NONE == "не требуется"
+    assert DYN_READY == "готово"
+    assert DYN_SEARCHING == "в поиске"
+    assert DYN_MISSING == "не нашлось"
+    ctx = ConversationContext()
+    assert ctx.dynamic_status == DYN_NONE
+    assert ctx.situation_slug is None
+    assert ctx.filler_spoken is False
+    assert ctx.render() == ""
 
 
 def test_имя_три_случая():

@@ -123,3 +123,22 @@ def test_смешанная_реплика_даёт_и_ответ_и_вопро�
     helps = {k: v.triggers for k, v in script.helps.items()}
     assert find_aside(text, helps) == "gibdd_support"
     assert is_acknowledgement(text) is False
+
+
+def test_nothing_to_say():
+    """Пусто / голое подтверждение — без модели; по существу — к модели."""
+    from graph.history import _nothing_to_say
+
+    for text in ("", "   ", "да, конечно", "угу"):
+        assert _nothing_to_say(text) is True, text
+    for text in ("на механике", "расскажите про автомат", "а сколько стоит"):
+        assert _nothing_to_say(text) is False, text
+
+
+def test_is_repeat_request():
+    from graph.history import is_repeat_request
+
+    for text in ("повторите", "не понял", "ещё раз, пожалуйста"):
+        assert is_repeat_request(text) is True, text
+    for text in ("да просто хочу на механике", "мне всё как раз подходит", "на механике"):
+        assert is_repeat_request(text) is False, text

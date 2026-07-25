@@ -1,17 +1,19 @@
 """Чекер шагов: единственная точка, где шаг уходит из скрипта.
 
-На этом этапе вызывается синхронно в начале хода по последней реплике
-клиента. Контракт входа не знает источника текста — переезд на куски речи
-не потребует переписывания.
+Контракт входа не знает источника текста: полная реплика основного хода
+или накопленный ``partial_reply`` служебного графа — одна и та же механика.
+Три части в промпт идут раздельно: срез истории, реплика, шаг.
 
 Закрывает по двум основаниям: ИИ видит, что шаг закрылся по диалогу; код
-видит, что счётчик исчерпан. Модель не ответила — пропускаем и идём дальше.
+видит, что счётчик исчерпан. ``inform`` чекеру не отдаём — его закрывает
+``close_delivered_inform`` по факту доставки. Модель не ответила —
+пропускаем и идём дальше.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -20,14 +22,23 @@ from core.config import settings
 from graph.history import last_user_text
 from script.build import CompiledScript
 from script.models import Step
-from script.planner import exhausted, iter_available, render_step_text
-from script.store import ScriptProgress
+from script.planner import exhausted, is_closed, iter_available, profile_has, render_step_text
+from script.source import registry
+from script.store import ScriptProgress, progress_from_state
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
 
 log = logging.getLogger(__name__)
 
 #: Потолок ходов в срезе истории для уже заданных шагов.
 HISTORY_TURN_CAP = 12
+
+#: Критерий закрытия по виду шага — и в промпт, и в код.
+_KIND_CRITERIA: dict[str, str] = {
+    "question": "клиент ответил по существу вопроса шага",
+    "inform": "содержание дошло до клиента",
+    "inform_check": "клиент ответил на проверочный вопрос",
+    "action": "результат виден в диалоге: время встречи, анкета, удержанное место",
+}
 
 
 class CheckerVerdict(BaseModel):
@@ -43,8 +54,7 @@ class CheckerVerdict(BaseModel):
     )
     step_closed: bool = Field(
         description=(
-            "Закрывается ли шаг: по диалогу видно, что задача шага решена. "
-            "«Потом скажу» — ответ есть, шаг не закрыт."
+            "Закрывается ли шаг по критерию своего вида. «Потом скажу» — ответ есть, шаг не закрыт."
         ),
     )
 
@@ -63,6 +73,26 @@ class CheckerClient(Protocol):
         """Оценивает один шаг. None — модель не ответила."""
 
 
+def closure_criterion(step: Step) -> str:
+    """Человекочитаемый критерий закрытия для вида шага."""
+    return _KIND_CRITERIA.get(step.kind, "задача шага решена")
+
+
+def accept_model_closure(
+    step: Step,
+    *,
+    profile: Mapping[str, str],
+) -> bool:
+    """Можно ли принять вердикт модели о закрытии.
+
+    ``question`` с непустым ``fills`` не закрываем, пока ни одно из его
+    полей профиля не заполнилось — модели в этом случае не верим.
+    """
+    if step.kind == "question" and step.fills:
+        return any(profile_has(profile, key) for key in step.fills)
+    return True
+
+
 class LlmCheckerClient:
     """Чекер на быстрой модели с короткой схемой."""
 
@@ -75,23 +105,36 @@ class LlmCheckerClient:
         step_text: str | None,
     ) -> CheckerVerdict | None:
         """Вызывает модель; при сбое возвращает None."""
+        criterion = closure_criterion(step)
         system = (
             "Ты проверяешь, закрылся ли шаг скрипта телефонного разговора.\n"
             "Тебе даны ТРИ РАЗДЕЛЬНЫХ блока: срез истории, реплика клиента и шаг.\n"
             "Не склеивай их мысленно как один текст: реплика — отдельный блок.\n"
             "Ответь только по схеме: reply_usable и step_closed.\n"
-            "step_closed=true только если задача шага решена. "
-            "«Потом скажу», уклонение, шутка — step_closed=false.\n"
+            "step_closed=true только если выполнен критерий закрытия для вида шага.\n"
+            "Критерии по виду:\n"
+            "- question — клиент ответил по существу вопроса шага;\n"
+            "- inform — содержание дошло до клиента;\n"
+            "- inform_check — клиент ответил на проверочный вопрос;\n"
+            "- action — результат виден в диалоге: время встречи, анкета,"
+            " удержанное место.\n"
+            "«Потом скажу», уклонение, шутка, ответ не по теме шага —"
+            " step_closed=false.\n"
             "Идентификатор шага не возвращай."
         )
-        human = (
-            f"### Срез истории\n{history_slice or '(пусто)'}\n\n"
-            f"### Реплика клиента\n{client_reply or '(пусто)'}\n\n"
-            f"### Шаг\n"
-            f"id (служебно, не возвращай): {step.id}\n"
-            f"Задача: {step.goal}\n"
-            f"Формулировка: {step_text or step.text or '—'}"
-        )
+        human_parts = [
+            f"### Срез истории\n{history_slice or '(пусто)'}",
+            f"### Реплика клиента\n{client_reply or '(пусто)'}",
+            "### Шаг",
+            f"id (служебно, не возвращай): {step.id}",
+            f"Вид: {step.kind}",
+            f"Критерий закрытия: {criterion}",
+            f"Задача: {step.goal}",
+            f"Формулировка: {step_text or step.text or '—'}",
+        ]
+        if step.kind == "inform_check" and step.check_question:
+            human_parts.append(f"Проверочный вопрос: {step.check_question}")
+        human = "\n".join(human_parts)
         schema = response_format_from(CheckerVerdict, name="vector_checker")
         try:
             async with get_llm(fast=True, temperature=0.0) as llm:
@@ -100,6 +143,7 @@ class LlmCheckerClient:
                     [SystemMessage(content=system), HumanMessage(content=human)],
                     schema=schema,
                     text_field=None,
+                    purpose="чекер",
                 )
             return CheckerVerdict.model_validate(raw)
         except LLMTurnFailed as exc:
@@ -120,33 +164,47 @@ def _format_history(messages: Sequence[BaseMessage]) -> str:
     return "\n".join(lines)
 
 
+def _message_text(message: BaseMessage) -> str:
+    """Текст сообщения одной строкой."""
+    return message.content if isinstance(message.content, str) else str(message.content)
+
+
 def history_slice_for(
     messages: Sequence[BaseMessage],
     *,
     steps: Sequence[Step],
     progress: ScriptProgress,
     turn: int,
+    reply: str | None = None,
 ) -> list[BaseMessage]:
     """Срез истории под проверяемые шаги.
 
     От взятия самого старого шага со счётчиком > 0; для шагов со счётчиком
     ноль — с начала звонка. Сверху — потолок по числу сообщений.
 
+    Текущая реплика (полная или накопленный partial) в срез не входит:
+    она уходит отдельным полем ``client_reply``. Из хвоста истории
+    убираем последнее human-сообщение только если его текст совпадает
+    с проверяемой репликой — иначе прошлый ответ клиента остаётся в срезе.
+
     Args:
         messages: полная история хода.
         steps: шаги, которые сейчас проверяем.
         progress: прогресс скрипта.
         turn: номер текущего хода.
+        reply: текст реплики, который уходит отдельным блоком; ``None`` —
+            срез как раньше (отрезать хвостовой human).
 
     Returns:
-        Срез сообщений без последней реплики клиента (она идёт отдельно).
+        Срез сообщений без проверяемой реплики.
     """
     if not messages:
         return []
     body = list(messages)
-    # Последняя реплика клиента уходит отдельным блоком.
     if body and body[-1].type == "human":
-        body = body[:-1]
+        last_text = _message_text(body[-1])
+        if reply is None or last_text == reply:
+            body = body[:-1]
 
     has_zero = any(int(progress.attempts.get(step.id, 0)) == 0 for step in steps)
     if has_zero:
@@ -168,54 +226,91 @@ def history_slice_for(
     return body[keep_from:]
 
 
-async def run_checker(
+def _script_from_state(state: Mapping[str, Any]) -> CompiledScript:
+    """Достаёт скрипт звонка из состояния или дефолтов настроек."""
+    return registry.get(
+        state.get("script_id") or settings.script_id,
+        state.get("script_version") or settings.script_version,
+    )
+
+
+async def check_pass(
+    state: Mapping[str, Any],
     *,
-    script: CompiledScript,
-    progress: ScriptProgress,
-    messages: Sequence[BaseMessage],
-    profile: dict[str, str],
-    turn: int,
-    client: CheckerClient | None = None,
+    reply: str,
+    judge: CheckerClient | None = None,
+    progress: ScriptProgress | None = None,
     attempt_limit: int | None = None,
-) -> ScriptProgress:
-    """Закрывает шаги по счётчику и по диалогу.
+) -> tuple[ScriptProgress, list[tuple[str, str]]]:
+    """Один проход чекера по заданному тексту реплики.
+
+    Общее ядро для синхронного узла основного хода и служебного графа.
+    Источник текста (полная реплика или накопленный partial) роли не играет.
 
     Args:
-        script: скомпилированный скрипт.
-        progress: текущий прогресс (будет изменён копией).
-        messages: история звонка.
-        profile: профиль для доступности шагов.
-        turn: номер хода.
-        client: клиент модели; пусто — боевой.
+        state: состояние звонка (скрипт, профиль, история, turn).
+        reply: текст реплики для анализа.
+        judge: клиент модели; пусто — боевой.
+        progress: прогресс; пусто — из зеркала состояния.
         attempt_limit: порог попыток; пусто — из настроек.
 
     Returns:
-        Обновлённый прогресс.
+        Обновлённый прогресс и список закрытий ``(step_id, основание)``.
     """
-    updated = ScriptProgress.from_mapping(progress.to_dict())
+    script = _script_from_state(state)
+    updated = ScriptProgress.from_mapping(
+        (progress if progress is not None else progress_from_state(state)).to_dict()
+    )
+    profile = dict(state.get("profile") or {})
+    turn = int(state.get("turn") or 0)
+    messages = list(state.get("messages") or [])
     limit = attempt_limit if attempt_limit is not None else settings.step_attempt_limit
-    reply = last_user_text(list(messages))
+    closures: list[tuple[str, str]] = []
 
     # 1. Счётчик исчерпан — без модели.
     for step in iter_available(script, status=updated.status, profile=profile):
         if exhausted(step, updated.attempts, limit=limit):
             updated.status[step.id] = "closed"
+            closures.append((step.id, "счётчик"))
 
+    # 1b. question: fills уже в профиле (с прошлого commit) — закрываем кодом,
+    # иначе after-зависимости не откроются.
+    for step_id in script.step_order:
+        step = script.step(step_id)
+        if is_closed(updated.status.get(step.id)):
+            continue
+        if (
+            step.kind == "question"
+            and step.fills
+            and int(updated.attempts.get(step.id, 0)) > 0
+            and any(profile_has(profile, key) for key in step.fills)
+        ):
+            updated.status[step.id] = "closed"
+            closures.append((step.id, "диалог"))
+
+    # inform закрывает код по доставке — в pending чекера не отдаём.
     pending = [
         step
         for step in iter_available(script, status=updated.status, profile=profile)
         if int(updated.attempts.get(step.id, 0)) > 0
         and not exhausted(step, updated.attempts, limit=limit)
+        and step.kind != "inform"
     ]
     if not pending or not reply.strip():
-        return updated
+        return updated, closures
 
-    judge = client or LlmCheckerClient()
-    history = history_slice_for(messages, steps=pending, progress=updated, turn=turn)
+    client = judge or LlmCheckerClient()
+    history = history_slice_for(
+        messages,
+        steps=pending,
+        progress=updated,
+        turn=turn,
+        reply=reply,
+    )
     history_text = _format_history(history)
 
     for step in pending:
-        verdict = await judge.judge(
+        verdict = await client.judge(
             history_slice=history_text,
             client_reply=reply,
             step=step,
@@ -226,12 +321,57 @@ async def run_checker(
             break
         if not verdict.reply_usable:
             break
-        if verdict.step_closed:
+        if verdict.step_closed and accept_model_closure(step, profile=profile):
             updated.status[step.id] = "closed"
+            closures.append((step.id, "диалог"))
             continue
         break
 
-    return updated
+    return updated, closures
+
+
+async def run_checker(
+    *,
+    script: CompiledScript,
+    progress: ScriptProgress,
+    messages: Sequence[BaseMessage],
+    profile: dict[str, str],
+    turn: int,
+    client: CheckerClient | None = None,
+    attempt_limit: int | None = None,
+) -> tuple[ScriptProgress, list[tuple[str, str]]]:
+    """Закрывает шаги по счётчику и по диалогу.
+
+    Обёртка над ``check_pass``: текст реплики берётся из хвоста истории.
+    Сигнатура сохранена для синхронного узла и существующих тестов.
+
+    Args:
+        script: скомпилированный скрипт.
+        progress: текущий прогресс (будет изменён копией).
+        messages: история звонка.
+        profile: профиль для доступности шагов.
+        turn: номер хода.
+        client: клиент модели; пусто — боевой.
+        attempt_limit: порог попыток задать шаг; пусто — из настроек.
+
+    Returns:
+        Обновлённый прогресс и список закрытий ``(step_id, основание)``.
+    """
+    reply = last_user_text(list(messages))
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "messages": list(messages),
+        "profile": profile,
+        "turn": turn,
+    }
+    return await check_pass(
+        state,
+        reply=reply,
+        judge=client,
+        progress=progress,
+        attempt_limit=attempt_limit,
+    )
 
 
 def close_delivered_inform(
@@ -241,7 +381,10 @@ def close_delivered_inform(
     pending_step: str | None,
     delivered: bool,
 ) -> ScriptProgress:
-    """Закрывает дословный/информирующий шаг после успешной доставки.
+    """Закрывает шаг ``inform`` после успешной доставки реплики.
+
+    ``inform_check`` сюда не входит: его закрывает чекер по ответу на
+    проверочный вопрос, а не факт произнесения блока.
 
     Args:
         script: скомпилированный скрипт.
@@ -258,6 +401,6 @@ def close_delivered_inform(
     step = script.steps.get(pending_step)
     if step is None:
         return updated
-    if step.kind in ("inform", "inform_check") and int(updated.attempts.get(step.id, 0)) > 0:
+    if step.kind == "inform" and int(updated.attempts.get(step.id, 0)) > 0:
         updated.status[step.id] = "closed"
     return updated

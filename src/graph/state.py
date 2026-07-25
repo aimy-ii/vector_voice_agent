@@ -49,7 +49,7 @@ class CallState(TypedDict, total=False):
         messages: история звонка на этот ход (редьюсер на замену).
         script_id / script_version: закреплённый скрипт звонка.
         step_status: pending / closed по шагам (зеркало Redis).
-        step_attempts: счётчик взятий генератором.
+        step_attempts: счётчик попыток задать шаг (сколько раз был ведущим).
         step_taken_turn: ход первого взятия шага.
         script_progress: слепок прогресса (на конец звонка — на постоянку).
         profile: собранный профиль.
@@ -59,6 +59,10 @@ class CallState(TypedDict, total=False):
         spoken_filler: заглушка, ушедшая в эфир до генератора.
         last_filler_turn: номер хода, на котором звучала заглушка.
         branch_candidates: отобранные резолвером слаги филиалов.
+        partial_reply: накопленный распознанный текст текущей реплики
+            клиента; вход служебного графа ``vector_checker``.
+        last_checked_partial: текст последнего служебного прохода чекера
+            (порог прироста между проходами).
     """
 
     messages: Annotated[list[BaseMessage], replace_messages]
@@ -96,7 +100,6 @@ class CallState(TypedDict, total=False):
 
     facts: dict[str, Any]
     route: str | None
-    skip_model: bool
     spoken: list[str]
     spoken_filler: str | None
     fillers_used: list[str]
@@ -104,6 +107,8 @@ class CallState(TypedDict, total=False):
     branch_candidates: list[str]
     turn_result: dict[str, Any]
     call_finished: bool
+    partial_reply: str
+    last_checked_partial: str
 
 
 def new_state_defaults() -> dict[str, Any]:
@@ -134,7 +139,6 @@ def new_state_defaults() -> dict[str, Any]:
         "delivered_step": None,
         "facts": {},
         "route": None,
-        "skip_model": False,
         "spoken": [],
         "spoken_filler": None,
         "fillers_used": [],
@@ -142,4 +146,6 @@ def new_state_defaults() -> dict[str, Any]:
         "branch_candidates": [],
         "turn_result": {},
         "call_finished": False,
+        "partial_reply": "",
+        "last_checked_partial": "",
     }
