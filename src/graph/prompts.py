@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from graph.context import DYN_MISSING
 from graph.names import given_name
 from script.build import CompiledScript
 from script.models import Step
@@ -323,6 +324,30 @@ def filler_spoken_block(spoken_filler: str | None) -> str:
     )
 
 
+def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
+    """Инструкция генератору по статусу динамики контекста.
+
+    Args:
+        status: ``dynamic_status`` из контекста.
+        searching_retry: повторный заход при «в поиске» после заглушки.
+
+    Returns:
+        Текстовый блок или пустая строка.
+    """
+    if status == DYN_MISSING:
+        return (
+            "По нужному факту в данных ничего нет. Тактично скажи, что этого "
+            "нет, и веди разговор дальше — не выдумывай."
+        )
+    if searching_retry:
+        return (
+            "Поиск по факту ещё не завершён, пауза-заглушка уже звучала. "
+            "На контекст по этому вопросу не опирайся — ответь технично и "
+            "веди разговор дальше."
+        )
+    return ""
+
+
 def aside_block(script: CompiledScript, done: Sequence[str]) -> str:
     """Перечисляет справки и возражения для `aside_id`.
 
@@ -374,6 +399,8 @@ def build_turn_messages(
     context_text: str = "",
     spoken_filler: str | None = None,
     attempts: Mapping[str, int] | None = None,
+    dynamic_status: str = "",
+    searching_retry: bool = False,
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к генератору.
 
@@ -393,6 +420,8 @@ def build_turn_messages(
         context_text: документ контекста.
         spoken_filler: фраза-заглушка, уже ушедшая в эфир.
         attempts: счётчики попыток.
+        dynamic_status: статус динамики контекста.
+        searching_retry: повторный «в поиске» после заглушки.
 
     Returns:
         Список сообщений: одно системное и хвост истории.
@@ -414,9 +443,13 @@ def build_turn_messages(
         naturalness_block(ask_for_move=ask_for_move),
         unknown_block(script),
     ]
-    ctx = context_block(context_text)
-    if ctx:
-        blocks.append(ctx)
+    status_note = dynamic_status_block(status=dynamic_status, searching_retry=searching_retry)
+    if status_note:
+        blocks.append(status_note)
+    if context_text and not searching_retry:
+        ctx = context_block(context_text)
+        if ctx:
+            blocks.append(ctx)
     blocks.append(profile_block(script, profile))
 
     facts_text = facts_block(facts)

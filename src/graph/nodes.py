@@ -20,7 +20,11 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import CheckerClient, check_pass, close_delivered_inform
-from graph.context import context_from_state, merge_static
+from graph.context import (
+    DYN_SEARCHING,
+    context_from_state,
+    merge_static,
+)
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
@@ -40,6 +44,7 @@ from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import BranchResolver, CityResolver, resolve_branch, resolve_city
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
+from graph.situations import pick_filler
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from kb.client import vector_kb
@@ -524,6 +529,17 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     facts.pop("city_choices", None)
     spoken: list[str] = []
     ctx = context_from_state(state.get("conversation_context"))
+    fillers_used = list(state.get("fillers_used") or [])
+    spoken_filler: str | None = state.get("spoken_filler")
+    # Повторный «в поиске» после заглушки — на контекст не опираемся.
+    searching_retry = ctx.dynamic_status == DYN_SEARCHING and ctx.filler_spoken
+    if ctx.dynamic_status == DYN_SEARCHING and not ctx.filler_spoken:
+        phrase = pick_filler(ctx.situation_slug, spoken=fillers_used)
+        say(phrase + " ")
+        spoken.append(phrase)
+        fillers_used.append(phrase)
+        spoken_filler = phrase
+        ctx = ctx.model_copy(update={"filler_spoken": True})
 
     messages = build_turn_messages(
         script=script,
@@ -532,9 +548,11 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         facts=facts,
         history=state.get("messages") or [],
         asides_done=list(state.get("asides_done") or []),
-        context_text=ctx.render(),
-        spoken_filler=state.get("spoken_filler"),
+        context_text="" if searching_retry else ctx.render(),
+        spoken_filler=spoken_filler,
         attempts=state.get("step_attempts") or {},
+        dynamic_status=ctx.dynamic_status,
+        searching_retry=searching_retry,
     )
     system_len = len(messages[0].content) if messages else 0
     stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)
@@ -564,6 +582,9 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             "turn_result": {},
             "spoken": list(state.get("spoken") or []) + spoken,
             "last_error": str(exc),
+            "conversation_context": ctx.model_dump(),
+            "spoken_filler": spoken_filler,
+            "fillers_used": fillers_used,
         }
 
     result = _safe_result(raw)
@@ -571,6 +592,9 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     return {
         "turn_result": result.model_dump(),
         "spoken": list(state.get("spoken") or []) + spoken,
+        "conversation_context": ctx.model_dump(),
+        "spoken_filler": spoken_filler,
+        "fillers_used": fillers_used,
     }
 
 

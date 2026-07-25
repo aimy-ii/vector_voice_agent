@@ -41,6 +41,7 @@ packages = ["core", "utils", "kb", "script", "graph"]
 
 [tool.setuptools.package-data]
 "script" = ["data/*.json"]
+"graph" = ["data/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
