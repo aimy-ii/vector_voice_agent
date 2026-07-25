@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from graph.facts import (
     branch_choices,
@@ -150,9 +150,44 @@ def test_промпт_видит_шапку_и_запрет_переспраши
     )
     assert "city" in block
     assert "who_studies" in block
+    assert "незакрытые" in block.lower() or "незакрытая" in block.lower()
+    assert "уже спрашивали, ответа нет" in block
     natural = naturalness_block(ask_for_move=True)
     assert "не переспрашивай" in natural.lower()
     assert "верно?" in natural.lower()
+
+
+def test_промпт_держит_границы_шага_и_незакрытый_вопрос(script):
+    """Модель не забегает вперёд и возвращается к незакрытому после побочного."""
+    natural = naturalness_block(ask_for_move=True).lower()
+    assert "только те вопросы" in natural
+    assert "не придумывай" in natural
+    assert "не забегай" in natural
+    assert "заодно" in natural
+    assert "до конца" in natural
+    assert "вернись" in natural
+    assert "незакрытое" in natural or "незакрытый вопрос" in natural
+    assert "повторите" in natural
+    assert "побочные вопросы — норма" not in natural
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[
+            AIMessage(content="Как вас зовут?"),
+            HumanMessage(content="повторите, я не услышал"),
+        ],
+        asides_done=[],
+        attempts={"name": 1},
+    )
+    content = messages[0].content
+    assert "только те вопросы" in content.lower()
+    assert "незакрытый вопрос не исчезает" in content.lower()
+    assert "name" in content
+    assert "уже спрашивали, ответа нет" in content
+    assert messages[-1].content == "повторите, я не услышал"
+    assert messages[-2].content == "Как вас зовут?"
 
 
 def test_промпт_требует_заканчивать_ходом_к_собеседнику(script):
