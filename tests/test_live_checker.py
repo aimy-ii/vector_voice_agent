@@ -169,10 +169,10 @@ async def test_служебный_ниже_порога_модель_не_зов
         def __init__(self) -> None:
             self.saved = False
 
-        async def load(self, thread_id: str):
+        async def load(self, call_id: str):
             return progress
 
-        async def save(self, thread_id: str, prog):
+        async def save(self, call_id: str, prog):
             self.saved = True
             return True
 

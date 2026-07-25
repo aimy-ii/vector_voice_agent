@@ -13,7 +13,7 @@ from script.store import (
 
 
 @pytest.mark.asyncio
-async def test_скрипт_пишется_и_читается_по_треду(memory_store: MemoryScriptStore):
+async def test_скрипт_пишется_и_читается_по_звонку(memory_store: MemoryScriptStore):
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})
     assert await memory_store.save("t1", progress) is True
     loaded = await memory_store.load("t1")

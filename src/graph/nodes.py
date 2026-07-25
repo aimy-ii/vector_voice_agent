@@ -89,6 +89,27 @@ def _thread_id() -> str:
         return "local"
 
 
+def _call_id() -> str:
+    """Идентификатор звонка для ключа скрипта в кеше.
+
+    Берёт непустой ``call_id`` из конфига; иначе ``thread_id`` без суффикса
+    лайв-треда. Без конфига — ``local``.
+    """
+    try:
+        config = get_config()
+        configurable = config.get("configurable") or {}
+        call_id = configurable.get("call_id")
+        if call_id:
+            return str(call_id)
+        thread_id = str(configurable.get("thread_id") or "local")
+        suffix = settings.live_thread_suffix
+        if suffix and thread_id.endswith(suffix):
+            return thread_id[: -len(suffix)]
+        return thread_id
+    except Exception:  # noqa: BLE001
+        return "local"
+
+
 def _script_of(state: CallState) -> CompiledScript:
     """Достаёт скомпилированный скрипт звонка из реестра."""
     return registry.get(
@@ -117,7 +138,7 @@ def _head_steps(state: CallState) -> list[Step]:
 
 async def _load_progress(state: CallState) -> ScriptProgress:
     """Читает прогресс из Redis; при промахе — из состояния треда."""
-    stored = await script_store.load(_thread_id())
+    stored = await script_store.load(_call_id())
     if stored is not None:
         return stored
     return progress_from_state(state)
@@ -125,7 +146,7 @@ async def _load_progress(state: CallState) -> ScriptProgress:
 
 async def _save_progress(progress: ScriptProgress, *, persist_state: bool = True) -> dict[str, Any]:
     """Пишет прогресс в Redis и возвращает правки состояния."""
-    await script_store.save(_thread_id(), progress)
+    await script_store.save(_call_id(), progress)
     return progress_to_state(progress) if persist_state else {}
 
 

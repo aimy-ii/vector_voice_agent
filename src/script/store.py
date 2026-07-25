@@ -72,10 +72,10 @@ class ScriptProgress:
 class ScriptStore(Protocol):
     """Контракт хранилища прогресса скрипта."""
 
-    async def load(self, thread_id: str) -> ScriptProgress | None:
-        """Читает прогресс по треду или None при промахе."""
+    async def load(self, call_id: str) -> ScriptProgress | None:
+        """Читает прогресс по идентификатору звонка или None при промахе."""
 
-    async def save(self, thread_id: str, progress: ScriptProgress) -> bool:
+    async def save(self, call_id: str, progress: ScriptProgress) -> bool:
         """Пишет прогресс. True — записали, False — Redis недоступен."""
 
 
@@ -87,20 +87,20 @@ class MemoryScriptStore:
         self._data: dict[str, ScriptProgress] = {}
         self.fail: bool = False
 
-    async def load(self, thread_id: str) -> ScriptProgress | None:
+    async def load(self, call_id: str) -> ScriptProgress | None:
         """Читает прогресс или None при промахе/сбое."""
         if self.fail:
             return None
-        progress = self._data.get(thread_id)
+        progress = self._data.get(call_id)
         if progress is None:
             return None
         return ScriptProgress.from_mapping(progress.to_dict())
 
-    async def save(self, thread_id: str, progress: ScriptProgress) -> bool:
+    async def save(self, call_id: str, progress: ScriptProgress) -> bool:
         """Пишет прогресс; при ``fail`` притворяется, что Redis недоступен."""
         if self.fail:
             return False
-        self._data[thread_id] = ScriptProgress.from_mapping(progress.to_dict())
+        self._data[call_id] = ScriptProgress.from_mapping(progress.to_dict())
         return True
 
 
@@ -118,9 +118,9 @@ class RedisScriptStore:
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.script_redis_ttl
         self._client: Any = None
 
-    def _key(self, thread_id: str) -> str:
-        """Ключ прогресса по треду."""
-        return f"{KEY_PREFIX}{thread_id}"
+    def _key(self, call_id: str) -> str:
+        """Ключ прогресса по идентификатору звонка."""
+        return f"{KEY_PREFIX}{call_id}"
 
     async def _get_client(self) -> Any:
         """Лениво открывает async-клиент Redis."""
@@ -130,11 +130,11 @@ class RedisScriptStore:
             self._client = Redis.from_url(self._url, decode_responses=True)
         return self._client
 
-    async def load(self, thread_id: str) -> ScriptProgress | None:
+    async def load(self, call_id: str) -> ScriptProgress | None:
         """Читает прогресс; при любой ошибке — None, ход не роняем."""
         try:
             client = await self._get_client()
-            raw = await client.get(self._key(thread_id))
+            raw = await client.get(self._key(call_id))
         except Exception as exc:  # noqa: BLE001
             log.warning("Redis недоступен при чтении скрипта: %s", exc)
             return None
@@ -146,12 +146,12 @@ class RedisScriptStore:
             log.warning("Битый слепок скрипта в Redis: %s", exc)
             return None
 
-    async def save(self, thread_id: str, progress: ScriptProgress) -> bool:
+    async def save(self, call_id: str, progress: ScriptProgress) -> bool:
         """Пишет прогресс с TTL; при ошибке возвращает False."""
         try:
             client = await self._get_client()
             await client.set(
-                self._key(thread_id),
+                self._key(call_id),
                 json.dumps(progress.to_dict(), ensure_ascii=False),
                 ex=self._ttl,
             )

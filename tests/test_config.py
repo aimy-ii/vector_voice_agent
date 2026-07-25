@@ -71,6 +71,11 @@ def test_чекер_настройки_дефолты():
     assert s.agent_run_strategy == "enqueue"
 
 
+def test_live_thread_suffix_дефолт():
+    """Суффикс лайв-треда по умолчанию — ``-live``."""
+    assert Settings.model_fields["live_thread_suffix"].default == "-live"
+
+
 def test_прокси_выключен_при_заполненных_полях():
     """``is_proxy=false`` — URL не собирается, даже если PROXY_* заданы."""
     s = Settings(
