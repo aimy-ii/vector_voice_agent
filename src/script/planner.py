@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Literal, Mapping
 
 from script.build import CompiledScript
@@ -31,44 +30,6 @@ _LEGACY_CLOSED: frozenset[str] = frozenset({"done", "refused", "skipped", "close
 
 #: Виды шагов, которые рассказывают, а не спрашивают.
 _INFORM_KINDS: frozenset[str] = frozenset({"inform", "inform_check"})
-
-#: Признаки: клиент сам спросил про обучение / условия / состав пакета.
-_INFORM_ASK_MARKERS: frozenset[str] = frozenset(
-    {
-        "обучение",
-        "обучения",
-        "обучении",
-        "условия",
-        "что входит",
-        "стоимость",
-        "сколько стоит",
-        "срок",
-        "как проходит",
-        "теория",
-        "теорию",
-        "практика",
-        "практику",
-        "практики",
-        "пакет",
-        "под ключ",
-        "что включено",
-        "что включены",
-    }
-)
-
-
-def _normalize_reply(text: str) -> str:
-    """Нормализует реплику для сравнения с признаками.
-
-    Args:
-        text: исходный текст.
-
-    Returns:
-        Нижний регистр, «ё»→«е», без знаков, пробелы схлопнуты.
-    """
-    lowered = text.strip().lower().replace("ё", "е")
-    without_marks = re.sub(r"[^\w\s]+", " ", lowered, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", without_marks).strip()
 
 
 def is_closed(status: str | None) -> bool:
@@ -144,27 +105,6 @@ def iter_available(
         ranked.append((step.priority, order, step))
     ranked.sort(key=lambda item: item[:2])
     return [item[2] for item in ranked]
-
-
-def client_asks_inform(text: str) -> bool:
-    """Клиент сам спросил про обучение, условия или состав пакета.
-
-    Детерминированный признак из набора — не разбор смысла моделью.
-    Сравнение на границах слов, как у просьбы повторить.
-
-    Args:
-        text: реплика клиента.
-
-    Returns:
-        True, если сработал признак повода для информирующего блока.
-    """
-    haystack = _normalize_reply(text)
-    if not haystack:
-        return False
-    return any(
-        re.search(rf"(?:^|\s){re.escape(marker)}(?:\s|$)", haystack)
-        for marker in _INFORM_ASK_MARKERS
-    )
 
 
 def answered_inform_check(

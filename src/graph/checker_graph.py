@@ -1,10 +1,8 @@
 r"""Служебный граф чекера в реальном времени.
 
-Вторая точка входа на том же состоянии и треде, что основной ход.
-Принимает накопленный распознанный текст (``partial_reply``), гоняет
-``check_pass``, затем ``run_contexter`` — чтобы к моменту основного хода
-справка/статус уже были в контексте. В ``messages`` не пишет, реплик
-в эфир не выдаёт.
+Лайв-канал: закрывает шаги, дозаполняет базовый профиль, греет контекст
+под предстоящий шаг. В ``messages`` не пишет, реплик в эфир не выдаёт.
+Прогрев не на пути хода генератора — ошибка только в лог.
 
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
@@ -19,6 +17,7 @@ r"""Служебный граф чекера в реальном времени.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from langgraph.graph import StateGraph
@@ -26,13 +25,26 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
-from graph.context import context_from_state
+from graph.context import context_from_state, merge_static
 from graph.contexter import run_contexter
-from graph.nodes import _checker_client, _load_progress, _save_progress
+from graph.facts import needs_of
+from graph.nodes import (
+    _checker_client,
+    _load_progress,
+    _merge_profile,
+    _save_progress,
+)
+from graph.profile_fill import fill_basic_profile
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
+from kb.client import vector_kb
+from script.planner import peek_next_step, pick_step
+from script.price import price_line
 from script.source import registry
+from script.store import PROGRESS_FIELDS_CHECKER
+
+log = logging.getLogger(__name__)
 
 
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
@@ -59,12 +71,86 @@ def _script_of(state: CallState):
     )
 
 
+async def _warmup_next_step(
+    state: CallState,
+    *,
+    progress,
+    profile: dict[str, str],
+    ctx,
+    asks_inform: bool,
+) -> Any:
+    """Прогревает мету города / филиалы / цену под предстоящий шаг.
+
+    Ошибки только в лог — ход лайв-канала не роняют.
+    """
+    script = _script_of(state)
+    current_id = state.get("current_step")
+    current = script.steps.get(current_id) if current_id else None
+    try:
+        if current is None:
+            nxt = pick_step(
+                script,
+                status=progress.status,
+                profile=profile,
+                attempts=progress.attempts,
+                inform_reason=asks_inform,
+                pending_soft_cap=settings.pending_steps_soft_cap,
+            )
+        else:
+            nxt = peek_next_step(
+                script,
+                current=current,
+                status=progress.status,
+                profile=profile,
+                attempts=progress.attempts,
+                inform_reason=asks_inform,
+                pending_soft_cap=settings.pending_steps_soft_cap,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Прогрев: peek_next_step не удался: %s", exc)
+        return ctx
+    if nxt is None:
+        return ctx
+
+    needs = set(needs_of(nxt))
+    city_slug = state.get("city_slug") or ctx.city_slug or None
+    # Город из профиля ещё без слага — мета не греется, это ок.
+    if not city_slug:
+        return ctx
+
+    try:
+        want_city = ("city_meta" in needs or "price" in needs) and not ctx.city_slug
+        want_price = "price" in needs
+        want_branches = "branches" in needs
+        if want_city or want_price or not ctx.city_faq:
+            city_meta = await vector_kb.get_city(city_slug)
+            if city_meta:
+                city_name = (
+                    state.get("city_name") or profile.get("city") or ctx.city_name or city_slug
+                )
+                price_phrase = None
+                if want_price and city_meta.get("price") is not None:
+                    price_phrase = price_line(city_meta.get("price"), script.params.price)
+                ctx = merge_static(
+                    ctx,
+                    city_slug=city_slug,
+                    city_name=str(city_name),
+                    city_meta=city_meta,
+                    price_line=price_phrase,
+                )
+        if want_branches:
+            await vector_kb.list_branches(city_slug)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Прогрев под шаг %s не удался: %s", nxt.id, exc)
+    return ctx
+
+
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Один служебный проход чекера и контекстера по ``partial_reply``.
 
     При приросте меньше порога (и не первый проход) тихо выходит без
-    вызова модели. Иначе зовёт ``check_pass``, затем ``run_contexter``,
-    сохраняет прогресс и обновлённый контекст.
+    вызова модели. Иначе дозаполняет профиль, зовёт ``check_pass``,
+    ``run_contexter`` и прогрев под предстоящий шаг.
     """
     reply = str(state.get("partial_reply") or "")
     previous = str(state.get("last_checked_partial") or "")
@@ -84,14 +170,25 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         return {}
 
     progress = await _load_progress(state)
-    progress, closures = await check_pass(
-        state,
+    profile = _merge_profile(state, progress)
+
+    # Фон: базовые поля из уже сказанного — до check_pass, чтобы fills закрылись.
+    filled = fill_basic_profile(reply, profile)
+    if filled:
+        profile = {**profile, **filled}
+        progress.profile = {**progress.profile, **filled}
+
+    state_for_check: dict[str, Any] = {**state, "profile": profile}
+    progress, closures, asks_inform = await check_pass(
+        state_for_check,
         reply=reply,
         judge=_checker_client,
         progress=progress,
     )
-    patch = await _save_progress(progress)
+    patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
     patch["last_checked_partial"] = reply
+    patch["client_asks_inform"] = asks_inform
+    patch["profile"] = profile
 
     # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
     script = _script_of(state)
@@ -101,6 +198,15 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         reply=reply,
         tools=build_context_tools(script),
         objections=script.objections,
+    )
+
+    # Прогрев под предстоящий шаг — не на пути хода, ошибки только в лог.
+    ctx = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=asks_inform,
     )
     patch["conversation_context"] = ctx.model_dump()
 

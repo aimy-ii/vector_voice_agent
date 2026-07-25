@@ -57,6 +57,13 @@ class CheckerVerdict(BaseModel):
             "Закрывается ли шаг по критерию своего вида. «Потом скажу» — ответ есть, шаг не закрыт."
         ),
     )
+    client_asks_inform: bool = Field(
+        default=False,
+        description=(
+            "Просит ли клиент рассказать про обучение, условия, стоимость, "
+            "состав пакета или как проходит учёба — то есть нужен информирующий блок."
+        ),
+    )
 
 
 class CheckerClient(Protocol):
@@ -110,7 +117,7 @@ class LlmCheckerClient:
             "Ты проверяешь, закрылся ли шаг скрипта телефонного разговора.\n"
             "Тебе даны ТРИ РАЗДЕЛЬНЫХ блока: срез истории, реплика клиента и шаг.\n"
             "Не склеивай их мысленно как один текст: реплика — отдельный блок.\n"
-            "Ответь только по схеме: reply_usable и step_closed.\n"
+            "Ответь только по схеме: reply_usable, step_closed и client_asks_inform.\n"
             "step_closed=true только если выполнен критерий закрытия для вида шага.\n"
             "Критерии по виду:\n"
             "- question — клиент ответил по существу вопроса шага;\n"
@@ -120,6 +127,8 @@ class LlmCheckerClient:
             " удержанное место.\n"
             "«Потом скажу», уклонение, шутка, ответ не по теме шага —"
             " step_closed=false.\n"
+            "client_asks_inform=true, если клиент просит рассказать про обучение,"
+            " условия, стоимость, сроки, теорию/практику или состав пакета.\n"
             "Идентификатор шага не возвращай."
         )
         human_parts = [
@@ -241,11 +250,15 @@ async def check_pass(
     judge: CheckerClient | None = None,
     progress: ScriptProgress | None = None,
     attempt_limit: int | None = None,
-) -> tuple[ScriptProgress, list[tuple[str, str]]]:
+) -> tuple[ScriptProgress, list[tuple[str, str]], bool]:
     """Один проход чекера по заданному тексту реплики.
 
     Общее ядро для синхронного узла основного хода и служебного графа.
     Источник текста (полная реплика или накопленный partial) роли не играет.
+
+    Порядок: сначала модельный проход (и закрытие по fills), затем
+    счётчиковое закрытие — чтобы шаг на последней попытке закрылся
+    основанием «диалог», а не «счётчик».
 
     Args:
         state: состояние звонка (скрипт, профиль, история, turn).
@@ -255,26 +268,25 @@ async def check_pass(
         attempt_limit: порог попыток; пусто — из настроек.
 
     Returns:
-        Обновлённый прогресс и список закрытий ``(step_id, основание)``.
+        Обновлённый прогресс, список закрытий ``(step_id, основание)``
+        и признак «клиент просит рассказать про обучение».
     """
     script = _script_from_state(state)
     updated = ScriptProgress.from_mapping(
         (progress if progress is not None else progress_from_state(state)).to_dict()
     )
     profile = dict(state.get("profile") or {})
+    # Профиль из кеша прогресса — для закрытия по fills.
+    for key, value in updated.profile.items():
+        if value and key not in profile:
+            profile[key] = value
     turn = int(state.get("turn") or 0)
     messages = list(state.get("messages") or [])
     limit = attempt_limit if attempt_limit is not None else settings.step_attempt_limit
     closures: list[tuple[str, str]] = []
+    asks_inform = False
 
-    # 1. Счётчик исчерпан — без модели.
-    for step in iter_available(script, status=updated.status, profile=profile):
-        if exhausted(step, updated.attempts, limit=limit):
-            updated.status[step.id] = "closed"
-            closures.append((step.id, "счётчик"))
-
-    # 1b. question: fills уже в профиле (с прошлого commit) — закрываем кодом,
-    # иначе after-зависимости не откроются.
+    # 1. question: fills уже в профиле — закрываем кодом до модели.
     for step_id in script.step_order:
         step = script.step(step_id)
         if is_closed(updated.status.get(step.id)):
@@ -289,45 +301,50 @@ async def check_pass(
             closures.append((step.id, "диалог"))
 
     # inform закрывает код по доставке — в pending чекера не отдаём.
+    # Включаем и шаги на пороге счётчика: модель смотрит раньше счётчика.
     pending = [
         step
         for step in iter_available(script, status=updated.status, profile=profile)
-        if int(updated.attempts.get(step.id, 0)) > 0
-        and not exhausted(step, updated.attempts, limit=limit)
-        and step.kind != "inform"
+        if int(updated.attempts.get(step.id, 0)) > 0 and step.kind != "inform"
     ]
-    if not pending or not reply.strip():
-        return updated, closures
-
-    client = judge or LlmCheckerClient()
-    history = history_slice_for(
-        messages,
-        steps=pending,
-        progress=updated,
-        turn=turn,
-        reply=reply,
-    )
-    history_text = _format_history(history)
-
-    for step in pending:
-        verdict = await client.judge(
-            history_slice=history_text,
-            client_reply=reply,
-            step=step,
-            step_text=render_step_text(step, profile),
+    if pending and reply.strip():
+        client = judge or LlmCheckerClient()
+        history = history_slice_for(
+            messages,
+            steps=pending,
+            progress=updated,
+            turn=turn,
+            reply=reply,
         )
-        if verdict is None:
-            # Модель не ответила — шаги не трогаем, ход продолжается.
-            break
-        if not verdict.reply_usable:
-            break
-        if verdict.step_closed and accept_model_closure(step, profile=profile):
-            updated.status[step.id] = "closed"
-            closures.append((step.id, "диалог"))
-            continue
-        break
+        history_text = _format_history(history)
 
-    return updated, closures
+        for step in pending:
+            verdict = await client.judge(
+                history_slice=history_text,
+                client_reply=reply,
+                step=step,
+                step_text=render_step_text(step, profile),
+            )
+            if verdict is None:
+                # Модель не ответила — шаги не трогаем, ход продолжается.
+                break
+            if verdict.client_asks_inform:
+                asks_inform = True
+            if not verdict.reply_usable:
+                break
+            if verdict.step_closed and accept_model_closure(step, profile=profile):
+                updated.status[step.id] = "closed"
+                closures.append((step.id, "диалог"))
+                continue
+            break
+
+    # 2. Счётчик — после модели, только ещё открытые.
+    for step in iter_available(script, status=updated.status, profile=profile):
+        if exhausted(step, updated.attempts, limit=limit):
+            updated.status[step.id] = "closed"
+            closures.append((step.id, "счётчик"))
+
+    return updated, closures, asks_inform
 
 
 async def run_checker(
@@ -365,13 +382,14 @@ async def run_checker(
         "profile": profile,
         "turn": turn,
     }
-    return await check_pass(
+    updated, closures, _asks = await check_pass(
         state,
         reply=reply,
         judge=client,
         progress=progress,
         attempt_limit=attempt_limit,
     )
+    return updated, closures
 
 
 def close_delivered_inform(

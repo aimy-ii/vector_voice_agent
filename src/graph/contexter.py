@@ -1,58 +1,24 @@
 """Контекстер: наполняет динамику контекста и ставит ей статус.
 
 Единственный писатель динамической части. Статику не трогает — её пишет
-``lookup_node``. Источники ответа — реестр ``ContextTool`` (сегодня справки
-из скрипта, завтра вектор/карты). Интерфейс наружу не меняется.
+``lookup_node``. Источники ответа — реестр ``ContextTool``. Интерфейс
+наружу не меняется.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Mapping, Sequence
 
 from graph.context import (
     DYN_MISSING,
+    DYN_NEED_CITY,
     DYN_NONE,
     DYN_READY,
     ConversationContext,
 )
 from graph.history import find_aside
-from graph.tools_registry import ContextTool
+from graph.tools_registry import NEED_CITY_SIGNAL, ContextTool
 from script.models import Objection
-
-#: Признаки вопроса / запроса факта в реплике.
-_QUESTION_MARKERS = re.compile(
-    r"(?i)(\?|сколько|как\s|где\s|какой|какая|какие|что\s|есть\sли|"
-    r"подскаж|расскаж|уточн|интересует|нужн)"
-)
-
-#: Слова короче этого не считаем значимыми для пересечения со статикой.
-_MIN_TOKEN = 4
-
-
-def _looks_like_fact_request(reply: str) -> bool:
-    """Грубая эвристика: реплика похожа на запрос факта."""
-    text = (reply or "").strip()
-    if not text:
-        return False
-    return bool(_QUESTION_MARKERS.search(text))
-
-
-def _tokens(text: str) -> set[str]:
-    """Значимые токены для пересечения со статикой."""
-    return {t for t in re.findall(r"[а-яёa-z0-9]+", text.lower()) if len(t) >= _MIN_TOKEN}
-
-
-def _answer_already_in_context(reply: str, context: ConversationContext) -> bool:
-    """Ответ на реплику уже есть в статике или накопленной динамике."""
-    haystack = f"{context.static_text}\n{context.dynamic_text}".strip().lower()
-    if not haystack:
-        return False
-    reply_tokens = _tokens(reply)
-    if not reply_tokens:
-        return False
-    known = _tokens(haystack)
-    return bool(reply_tokens & known)
 
 
 def _triggers_catalogue(
@@ -80,14 +46,21 @@ def _mark_ready(context: ConversationContext) -> None:
 
 
 def _mark_missing(context: ConversationContext) -> None:
-    """Статус «не нашлось»: вопрос был, ответа нет."""
+    """Статус «не нашлось»: инструмент сходил и ничего не нашёл."""
     context.dynamic_status = DYN_MISSING
     context.situation_slug = None
     context.filler_spoken = False
 
 
+def _mark_need_city(context: ConversationContext) -> None:
+    """Статус «нужен город»: без города клиента ответить нельзя."""
+    context.dynamic_status = DYN_NEED_CITY
+    context.situation_slug = None
+    context.filler_spoken = False
+
+
 def _mark_none(context: ConversationContext) -> None:
-    """Статус «не требуется»: вопрос не справочный / возражение."""
+    """Статус «не требуется»: реестр ничего не дал / возражение."""
     context.dynamic_status = DYN_NONE
     context.situation_slug = None
 
@@ -103,8 +76,9 @@ async def run_contexter(
 
     Единственный писатель динамической части. Перебирает реестр
     инструментов по порядку: первый подходящий отвечает. Возражения не
-    трогает — это тактика генератора. Решает: нужного нет — «не нашлось»;
-    ответ уже в статике/накопленном — «готово» сразу.
+    трогает — это тактика генератора. Если никто не ответил — «не
+    требуется» (генератор опирается на статику). «Не нашлось» — только
+    когда инструмент подошёл и вернул пустую строку.
 
     Args:
         context: текущий контекст разговора.
@@ -122,11 +96,14 @@ async def run_contexter(
         _mark_none(updated)
         return updated
 
-    # Реестр: первый инструмент с не-None даёт ответ (или пусто → «не нашлось»).
+    # Реестр: первый инструмент с не-None даёт ответ (или пусто / нужен город).
     for tool in tools:
         found = await tool.try_answer(reply, updated)
         if found is None:
             continue
+        if found == NEED_CITY_SIGNAL:
+            _mark_need_city(updated)
+            return updated
         if found.strip():
             _append_dynamic(updated, found)
             _mark_ready(updated)
@@ -135,14 +112,6 @@ async def run_contexter(
             _mark_missing(updated)
         return updated
 
-    if not _looks_like_fact_request(reply):
-        _mark_none(updated)
-        return updated
-
-    if _answer_already_in_context(reply, updated):
-        _mark_ready(updated)
-        return updated
-
-    # Справочный вопрос есть, но никто из реестра не ответил.
-    _mark_missing(updated)
+    # Ни один инструмент не подошёл — статика уже в промпте, статус не нужен.
+    _mark_none(updated)
     return updated

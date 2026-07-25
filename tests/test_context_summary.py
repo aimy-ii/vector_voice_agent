@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from graph.context import (
     DYN_MISSING,
+    DYN_NEED_CITY,
     DYN_NONE,
     DYN_READY,
     DYN_SEARCHING,
@@ -21,6 +22,7 @@ def test_статусы_динамики_константы_и_дефолт():
     assert DYN_READY == "готово"
     assert DYN_SEARCHING == "в поиске"
     assert DYN_MISSING == "не нашлось"
+    assert DYN_NEED_CITY == "нужен город"
     ctx = ConversationContext()
     assert ctx.dynamic_status == DYN_NONE
     assert ctx.situation_slug is None
@@ -77,12 +79,56 @@ def test_контекст_статика_один_раз_цена_фразой(f
     assert "от 43900" in text
     assert "amount" not in text
     assert "Список филиалов" in text
+    assert "есть рассрочка" in text.lower() or "рассроч" in text.lower()
 
     ctx = ConversationContext()
     ctx = merge_static(ctx, city_slug="perm", city_name="Пермь", city_meta=city, price_line="фраза")
     again = merge_static(ctx, city_slug="spb", city_name="Питер", city_meta=city)
     assert again.city_slug == "perm"
     assert again.city_name == "Пермь"
+
+
+def test_format_city_static_без_рекламы_словарей_и_ключей():
+    city = {
+        "slug": "perm",
+        "name": "Пермь",
+        "categories": [{"code": "B", "duration": "2,5 месяца"}],
+        "vehicles": {"manual": ["Solaris"], "automatic": []},
+        "theory_formats": [
+            {
+                "name": "онлайн",
+                "description": "Изучай теорию в удобное время! Отменяй занятие без штрафа!",
+            },
+            {"name": "очно", "description": "Приходи в класс!"},
+        ],
+        "documents": [
+            {"name": "паспорт", "stage": "для старта"},
+            {"name": "СНИЛС", "stage": "для договора"},
+        ],
+        "payment": {
+            "installment_no_overpay": True,
+            "matcap": True,
+            "installment": False,
+        },
+        "messengers": ["Telegram"],
+    }
+    text = format_city_static(
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta=city,
+        price_line="Стоимость обучения — от 43900 рублей.",
+    )
+    assert "онлайн" in text
+    assert "очно" in text
+    assert "Изучай" not in text
+    assert "Отменяй" not in text
+    assert "Приходи" not in text
+    assert "паспорт" in text and "СНИЛС" in text
+    assert "{'name'" not in text
+    assert "stage" not in text
+    assert "installment_no_overpay" not in text
+    assert "без переплаты" in text.lower()
+    assert "от 43900" in text
 
 
 def test_мета_филиала_после_выбора():

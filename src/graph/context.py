@@ -7,9 +7,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 #: Динамика не нужна по этой реплике.
 DYN_NONE = "не требуется"
@@ -19,6 +19,22 @@ DYN_READY = "готово"
 DYN_SEARCHING = "в поиске"
 #: Поиск завершился без результата.
 DYN_MISSING = "не нашлось"
+#: Инструмент подошёл, но без города клиента ответить нельзя.
+DYN_NEED_CITY = "нужен город"
+
+#: Условия оплаты: английский ключ → русская формулировка.
+_PAYMENT_LABELS: dict[str, str] = {
+    "installment": "есть рассрочка",
+    "installment_no_overpay": "рассрочка без переплаты",
+    "installment_with_overpay": "рассрочка с переплатой",
+    "matcap": "можно материнским капиталом",
+    "maternal_capital": "можно материнским капиталом",
+    "cash": "наличные",
+    "card": "карта",
+    "transfer": "перевод",
+    "credit": "кредит",
+    "tax_deduction": "можно оформить налоговый вычет",
+}
 
 
 class ConversationContext(BaseModel):
@@ -33,6 +49,7 @@ class ConversationContext(BaseModel):
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
+        city_faq: FAQ меты города (вопрос → ответ) для ``FaqTool``.
         frozen: статика уже зафиксирована и не пересобирается.
     """
 
@@ -44,6 +61,7 @@ class ConversationContext(BaseModel):
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
+    city_faq: list[dict[str, str]] = Field(default_factory=list)
     frozen: bool = False
 
     def render(self) -> str:
@@ -73,6 +91,125 @@ def _line(label: str, value: Any) -> str | None:
     if not text.strip():
         return None
     return f"{label}: {text}"
+
+
+def _theory_format_names(raw: Any) -> list[str]:
+    """Достаёт только названия форматов теории, без рекламных абзацев."""
+    names: list[str] = []
+    if isinstance(raw, Mapping):
+        for key, value in raw.items():
+            if isinstance(value, Mapping):
+                name = value.get("name") or value.get("title") or key
+            elif isinstance(value, str) and len(value) < 40 and "\n" not in value:
+                name = value
+            else:
+                name = key
+            text = str(name).strip()
+            if text:
+                names.append(text)
+        return names
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for item in raw:
+            if isinstance(item, Mapping):
+                name = item.get("name") or item.get("title") or item.get("format")
+                if name:
+                    names.append(str(name).strip())
+            elif isinstance(item, str):
+                # Рекламный абзац — длинный текст с призывами; название короткое.
+                text = item.strip()
+                if text and len(text) <= 40 and "\n" not in text:
+                    names.append(text)
+    return [n for n in names if n]
+
+
+def _document_names(raw: Any) -> list[str]:
+    """Достаёт названия документов через запятую."""
+    names: list[str] = []
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for item in raw:
+            if isinstance(item, Mapping):
+                name = item.get("name") or item.get("title") or item.get("doc")
+                if name:
+                    names.append(str(name).strip())
+            elif item:
+                names.append(str(item).strip())
+    elif isinstance(raw, Mapping):
+        for key, value in raw.items():
+            if isinstance(value, Mapping):
+                name = value.get("name") or key
+            else:
+                name = key if value else None
+            if name:
+                names.append(str(name).strip())
+    elif isinstance(raw, str) and raw.strip():
+        names.append(raw.strip())
+    return [n for n in names if n]
+
+
+def _payment_phrases(payment: Mapping[str, Any]) -> list[str]:
+    """Переводит условия оплаты в русские формулировки."""
+    phrases: list[str] = []
+    for key, value in payment.items():
+        if value in (None, "", False, [], {}):
+            continue
+        label = _PAYMENT_LABELS.get(str(key))
+        if label is None:
+            # Неизвестный ключ — не пускаем английский в промпт.
+            if isinstance(value, str) and value.strip():
+                phrases.append(value.strip())
+            continue
+        if value is True:
+            phrases.append(label)
+        elif isinstance(value, str) and value.strip():
+            phrases.append(f"{label}: {value.strip()}")
+        else:
+            phrases.append(label)
+    return phrases
+
+
+def normalize_city_faq(raw: Any) -> list[dict[str, str]]:
+    """Приводит FAQ меты города к списку ``{question, answer}``.
+
+    Args:
+        raw: поле ``faq`` из меты города.
+
+    Returns:
+        Список пар вопрос/ответ; пустой, если FAQ нет.
+    """
+    items: list[dict[str, str]] = []
+    if not raw:
+        return items
+    if isinstance(raw, Mapping):
+        for question, answer in raw.items():
+            q = str(question).strip()
+            a = "" if answer is None else str(answer).strip()
+            if q:
+                items.append({"question": q, "answer": a})
+        return items
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for entry in raw:
+            if not isinstance(entry, Mapping):
+                continue
+            q = (
+                entry.get("question")
+                or entry.get("q")
+                or entry.get("вопрос")
+                or entry.get("title")
+                or ""
+            )
+            a = (
+                entry.get("answer")
+                or entry.get("a")
+                or entry.get("ответ")
+                or entry.get("text")
+                or ""
+            )
+            q_text = str(q).strip()
+            if q_text:
+                items.append(
+                    {"question": q_text, "answer": str(a).strip() if a is not None else ""}
+                )
+    return items
 
 
 def format_city_static(
@@ -123,19 +260,21 @@ def format_city_static(
         if vehicles.get("fleet_age"):
             fleet.append(f"возраст парка: {vehicles['fleet_age']}")
         lines.append("Автопарк: " + "; ".join(fleet) + ".")
-    for label, key in (
-        ("Форматы теории", "theory_formats"),
-        ("Документы", "documents"),
-        ("Мессенджеры", "messengers"),
-    ):
-        row = _line(label, city_meta.get(key))
-        if row:
-            lines.append(row + ".")
+    theory_names = _theory_format_names(city_meta.get("theory_formats"))
+    if theory_names:
+        lines.append("Форматы теории: " + ", ".join(theory_names) + ".")
+    doc_names = _document_names(city_meta.get("documents"))
+    if doc_names:
+        lines.append("Документы: " + ", ".join(doc_names) + ".")
+    messengers = city_meta.get("messengers")
+    row = _line("Мессенджеры", messengers)
+    if row:
+        lines.append(row + ".")
     payment = city_meta.get("payment") or {}
-    if payment:
-        row = _line("Оплата", payment)
-        if row:
-            lines.append(row + ".")
+    if isinstance(payment, Mapping) and payment:
+        phrases = _payment_phrases(payment)
+        if phrases:
+            lines.append("Оплата: " + "; ".join(phrases) + ".")
     if city_meta.get("call_hours"):
         lines.append(f"Часы колл-центра: {city_meta['call_hours']}.")
     contacts = city_meta.get("contacts") or city_meta.get("phones") or {}
@@ -207,6 +346,7 @@ def merge_static(
             city_meta=city_meta,
             price_line=price_line,
         )
+        updated.city_faq = normalize_city_faq(city_meta.get("faq"))
     if branch_slug and branch_meta is not None and updated.city_slug and not updated.branch_slug:
         updated.branch_slug = branch_slug
         branch_block = format_branch_static(branch_meta, branch_slug=branch_slug)
@@ -226,6 +366,7 @@ class ContextState(BaseModel):
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
+    city_faq: list[dict[str, str]] = Field(default_factory=list)
     frozen: bool = False
 
     def to_context(self) -> ConversationContext:

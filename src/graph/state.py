@@ -76,6 +76,7 @@ class CallState(TypedDict, total=False):
     script_progress: dict[str, Any]
 
     profile: dict[str, str]
+    client_asks_inform: bool
     city_slug: str | None
     city_name: str | None
     branch_slug: str | None
@@ -119,6 +120,7 @@ def new_state_defaults() -> dict[str, Any]:
         "step_taken_turn": {},
         "script_progress": {},
         "profile": {},
+        "client_asks_inform": False,
         "city_slug": None,
         "city_name": None,
         "branch_slug": None,

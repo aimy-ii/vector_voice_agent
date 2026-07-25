@@ -85,7 +85,7 @@ async def test_check_pass_одинаков_для_полной_и_partial(script
     else:
         state = _state(script, partial=text, progress=progress)
 
-    updated, closures = await check_pass(
+    updated, closures, _asks = await check_pass(
         state,
         reply=text,
         judge=client,
@@ -201,7 +201,7 @@ async def test_служебный_с_приростом_как_синхронн�
     profile = {"caller_name": "Андрей"}
     progress = _name_progress()
 
-    live_updated, live_closures = await check_pass(
+    live_updated, live_closures, _asks = await check_pass(
         _state(script, partial=text, progress=progress, profile=profile),
         reply=text,
         judge=FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)]),
@@ -232,7 +232,7 @@ async def test_закрытия_служебного_видны_в_шапке(sc
         taken_turn={"name": 1},
     )
     profile = {"caller_name": "Андрей"}
-    updated, _ = await check_pass(
+    updated, _, _asks = await check_pass(
         _state(script, partial="Меня зовут Андрей", progress=progress, profile=profile),
         reply="Меня зовут Андрей",
         judge=FakeChecker([]),
@@ -257,31 +257,37 @@ async def test_первый_проход_не_режется_порогом():
 
 async def test_live_check_с_приростом_зовёт_чекер_и_пишет_last_checked(script):
     """Достаточный прирост: чекер отрабатывает, last_checked_partial обновляется."""
-    text = "Меня зовут Андрей"
+    # Текст без имени — иначе фон закроет name по fills без модели.
+    text = "пока ещё думаю над ответом длинный"
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = _name_progress()
     state = _state(
         script,
         partial=text,
         progress=progress,
-        last_checked="Меня",  # прирост >> 10
+        last_checked="пока",  # прирост >> 10
     )
 
     async def fake_load(_state):
         return progress
 
-    async def fake_save(prog, *, persist_state=True):
+    async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
 
     with (
         patch("graph.checker_graph._checker_client", client),
         patch("graph.checker_graph._load_progress", side_effect=fake_load),
         patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert client.calls
@@ -307,7 +313,7 @@ async def test_live_check_контекстер_кладёт_справку_в_к
     async def fake_load(_state):
         return progress
 
-    async def fake_save(prog, *, persist_state=True):
+    async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
 
     with (

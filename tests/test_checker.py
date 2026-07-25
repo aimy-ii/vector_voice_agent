@@ -145,7 +145,8 @@ async def test_модель_не_ответила_шаги_не_тронуты(s
     assert updated.status.get("name") == "pending"
 
 
-async def test_порог_исчерпан_закрывает_без_модели(script):
+async def test_порог_исчерпан_после_модели_закрывает_счётчиком(script):
+    """На пороге модель смотрит первой; не закрыла — закрываем счётчиком."""
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
     updated, closures = await run_checker(
@@ -159,7 +160,8 @@ async def test_порог_исчерпан_закрывает_без_модел�
     )
     assert updated.status["name"] == "closed"
     assert ("name", "счётчик") in closures
-    assert not any(c["step_id"] == "name" for c in client.calls)
+    assert len(client.calls) == 1
+    assert client.calls[0]["step_id"] == "name"
 
 
 async def test_закрытие_по_счётчику_по_заданным_не_по_ходам(script):
@@ -177,8 +179,8 @@ async def test_закрытие_по_счётчику_по_заданным_не
         attempt_limit=2,
     )
     assert updated.status["name"] == "closed"
-    assert closures == [("name", "счётчик")]
-    assert client.calls == []
+    assert ("name", "счётчик") in closures
+    assert len(client.calls) == 1
 
     # При том же turn=5, но попыток меньше порога — не закрываем по счётчику.
     progress2 = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})

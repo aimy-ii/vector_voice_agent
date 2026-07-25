@@ -154,11 +154,7 @@ def test_информирующий_без_повода_не_в_шапке(scrip
 
 
 def test_информирующий_по_вопросу_клиента(script):
-    from script.planner import client_asks_inform
-
-    assert client_asks_inform("А что входит в обучение?")
-    assert not client_asks_inform("Для себя")
-
+    """Повод inform_reason приходит снаружи (из чекера), не из списка слов."""
     profile = {
         "city": "perm",
         "caller_name": "Мария",

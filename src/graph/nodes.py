@@ -54,14 +54,16 @@ from script.build import CompiledScript
 from script.models import Step
 from script.planner import (
     answered_inform_check,
-    client_asks_inform,
     peek_next_step,
     script_head,
 )
 from script.price import price_line
 from script.source import registry
 from script.store import (
+    PROGRESS_FIELDS_CHECKER,
+    PROGRESS_FIELDS_GENERATOR,
     ScriptProgress,
+    merge_progress_fields,
     progress_from_state,
     progress_to_state,
     script_store,
@@ -144,10 +146,42 @@ async def _load_progress(state: CallState) -> ScriptProgress:
     return progress_from_state(state)
 
 
-async def _save_progress(progress: ScriptProgress, *, persist_state: bool = True) -> dict[str, Any]:
-    """Пишет прогресс в Redis и возвращает правки состояния."""
-    await script_store.save(_call_id(), progress)
-    return progress_to_state(progress) if persist_state else {}
+async def _save_progress(
+    progress: ScriptProgress,
+    *,
+    persist_state: bool = True,
+    fields: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Пишет прогресс в Redis и возвращает правки состояния.
+
+    Args:
+        progress: локальный прогресс канала.
+        persist_state: класть ли зеркало прогресса в правки состояния.
+        fields: набор полей для точечной записи. ``None`` — прежнее
+            поведение: сохранить объект целиком без слияния.
+
+    Returns:
+        Правки ``CallState`` с зеркалом прогресса (если ``persist_state``).
+    """
+    to_save = progress
+    if fields is not None:
+        cached = await script_store.load(_call_id())
+        # Промах кеша: базой берём локальный прогресс (из state), иначе
+        # точечная запись на пустой объект затрёт чужие поля.
+        base = cached if cached is not None else progress
+        to_save = merge_progress_fields(base, progress, fields)
+    await script_store.save(_call_id(), to_save)
+    return progress_to_state(to_save) if persist_state else {}
+
+
+def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]:
+    """Сливает профиль состояния с профилем из кеша прогресса."""
+    merged = dict(state.get("profile") or {})
+    for key, value in progress.profile.items():
+        text = str(value).strip()
+        if text and key not in merged:
+            merged[key] = text
+    return merged
 
 
 def call_summary(state: CallState) -> dict[str, Any]:
@@ -222,6 +256,7 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
     """Синхронный чекер в начале хода: закрывает шаги по счётчику и диалогу."""
     script = _script_of(state)
     progress = await _load_progress(state)
+    profile = _merge_profile(state, progress)
     closures: list[tuple[str, str]] = []
 
     delivered_step = state.get("delivered_step")
@@ -239,14 +274,20 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
         ):
             closures.append((delivered_step, "доставка"))
 
-    progress, checked = await check_pass(
-        state,
+    # Профиль из кеша должен быть виден check_pass (закрытие по fills).
+    state_for_check: dict[str, Any] = {**state, "profile": profile}
+    progress, checked, asks_inform = await check_pass(
+        state_for_check,
         reply=last_user_text(state.get("messages") or []),
         judge=_checker_client,
         progress=progress,
     )
     closures.extend(checked)
-    patch = await _save_progress(progress)
+    patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
+    if progress.profile:
+        profile = {**profile, **progress.profile}
+    patch["profile"] = profile
+    patch["client_asks_inform"] = asks_inform
     stage("check", format_check_done(closures), "done")
     return patch
 
@@ -255,11 +296,10 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     """Берёт шапку, плюсует счётчик ведущему шагу, выбирает маршрут."""
     script = _script_of(state)
     progress = await _load_progress(state)
-    profile = dict(state.get("profile") or {})
+    profile = _merge_profile(state, progress)
     turn = int(state.get("turn") or 0)
-    user_text = last_user_text(state.get("messages") or [])
 
-    inform_reason = client_asks_inform(user_text) or answered_inform_check(
+    inform_reason = bool(state.get("client_asks_inform")) or answered_inform_check(
         script,
         status=progress.status,
         pending_step=state.get("pending_step") or state.get("delivered_step"),
@@ -288,7 +328,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
             progress.taken_turn[step.id] = turn
         progress.status.setdefault(step.id, "pending")
 
-    progress_patch = await _save_progress(progress)
+    progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
 
     if step is None:
         route = ROUTE_RESPOND
@@ -334,6 +374,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     )
     return {
         **progress_patch,
+        "profile": profile,
         "current_step": step.id if step is not None else None,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
@@ -707,7 +748,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     )
     finished = not remaining and (bool(profile.get("outcome")) or all_closed or step is None)
 
-    progress_patch = await _save_progress(progress)
+    progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
     if finished:
         progress_patch["script_progress"] = progress.to_dict()
         progress_patch["call_finished"] = True

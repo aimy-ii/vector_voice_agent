@@ -16,7 +16,7 @@ from typing import Any, Mapping, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.config import settings
-from graph.context import DYN_MISSING
+from graph.context import DYN_MISSING, DYN_NEED_CITY
 from graph.names import given_name
 from script.build import CompiledScript
 from script.models import Step
@@ -415,6 +415,13 @@ def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
         return (
             "По нужному факту в данных ничего нет. Тактично сказать, что этого "
             "нет, и вести разговор дальше — не выдумывать."
+        )
+    if status == DYN_NEED_CITY:
+        return (
+            "Чтобы ответить по сути, нужен город обучения. Прямо в ответе "
+            "попросить назвать город и кратко объяснить зачем — например: "
+            "«чтобы назвать стоимость, подскажите, в каком городе будете "
+            "учиться». Не говорить «не знаю» и не выдумывать цифры и факты."
         )
     if searching_retry:
         return (

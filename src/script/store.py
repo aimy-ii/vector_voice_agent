@@ -21,6 +21,14 @@ log = logging.getLogger(__name__)
 KEY_PREFIX = "vector:script:"
 
 
+#: Поля прогресса, которые пишет канал генератора.
+PROGRESS_FIELDS_GENERATOR: frozenset[str] = frozenset({"attempts", "taken_turn"})
+#: Поля прогресса, которые пишет канал чекера.
+PROGRESS_FIELDS_CHECKER: frozenset[str] = frozenset({"status", "profile"})
+#: Все поля прогресса (полная запись без слияния).
+PROGRESS_FIELDS_ALL: frozenset[str] = frozenset({"status", "attempts", "taken_turn", "profile"})
+
+
 @dataclass
 class ScriptProgress:
     """Прогресс скрипта одного звонка.
@@ -29,11 +37,13 @@ class ScriptProgress:
         status: статус шага ``pending`` / ``closed``.
         attempts: счётчик попыток задать шаг (раз ведущим в генерации).
         taken_turn: номер хода, когда шаг впервые ушёл в генерацию.
+        profile: базовые поля профиля, накопленные чекером в кеше.
     """
 
     status: dict[str, str] = field(default_factory=dict)
     attempts: dict[str, int] = field(default_factory=dict)
     taken_turn: dict[str, int] = field(default_factory=dict)
+    profile: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Сериализует прогресс в словарь."""
@@ -59,6 +69,7 @@ class ScriptProgress:
                 normalized[key] = "closed"
             else:
                 normalized[key] = "pending"
+        profile_raw = data.get("profile") or {}
         return cls(
             status=normalized,
             attempts={
@@ -66,7 +77,42 @@ class ScriptProgress:
                 for k, v in dict(data.get("attempts") or data.get("step_attempts") or {}).items()
             },
             taken_turn={str(k): int(v) for k, v in dict(data.get("taken_turn") or {}).items()},
+            profile={
+                str(k): str(v)
+                for k, v in dict(profile_raw).items()
+                if v is not None and str(v).strip()
+            },
         )
+
+
+def merge_progress_fields(
+    base: ScriptProgress,
+    overlay: ScriptProgress,
+    fields: frozenset[str],
+) -> ScriptProgress:
+    """Накладывает выбранные поля ``overlay`` на копию ``base``.
+
+    Args:
+        base: прогресс из кеша (актуальный).
+        overlay: локальные правки канала.
+        fields: какие поля накладывать.
+
+    Returns:
+        Новый прогресс со слиянием на уровне ключей словарей.
+    """
+    merged = ScriptProgress.from_mapping(base.to_dict())
+    if "status" in fields:
+        merged.status = {**merged.status, **overlay.status}
+    if "attempts" in fields:
+        merged.attempts = {**merged.attempts, **overlay.attempts}
+    if "taken_turn" in fields:
+        merged.taken_turn = {**merged.taken_turn, **overlay.taken_turn}
+    if "profile" in fields:
+        for key, value in overlay.profile.items():
+            text = str(value).strip()
+            if text:
+                merged.profile[key] = text
+    return merged
 
 
 class ScriptStore(Protocol):
@@ -184,6 +230,7 @@ def progress_from_state(state: Mapping[str, Any]) -> ScriptProgress:
             "status": state.get("step_status") or {},
             "attempts": state.get("step_attempts") or {},
             "taken_turn": state.get("step_taken_turn") or {},
+            "profile": state.get("profile") or {},
         }
     )
 
@@ -195,7 +242,8 @@ def progress_to_state(progress: ScriptProgress) -> dict[str, Any]:
         progress: текущий прогресс.
 
     Returns:
-        Правки для ``CallState``.
+        Правки для ``CallState``. Профиль сюда не кладём — его сливают
+        вызывающие узлы, чтобы не затереть поля, которых нет в кеше.
     """
     payload = progress.to_dict()
     return {
