@@ -28,7 +28,6 @@ from core.config import settings
 from graph.checker import check_pass
 from graph.context import context_from_state
 from graph.contexter import run_contexter
-from graph.log_fmt import format_check_done
 from graph.nodes import _checker_client, _load_progress, _save_progress
 from graph.progress import stage
 from graph.state import CallContext, CallState
@@ -69,12 +68,19 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     """
     reply = str(state.get("partial_reply") or "")
     previous = str(state.get("last_checked_partial") or "")
-    if growth_below_threshold(
-        reply,
-        previous,
-        min_growth=settings.checker_min_growth_chars,
-    ):
-        stage("live_check", "прирост ниже порога — пропуск", "done")
+    growth = len(reply) - len(previous)
+    min_growth = settings.checker_min_growth_chars
+    stage(
+        "live-check",
+        f"накоплено {len(reply)} симв., прирост с прошлого прохода {growth} симв.",
+        "start",
+    )
+    if growth_below_threshold(reply, previous, min_growth=min_growth):
+        stage(
+            "live-check",
+            f"прирост {growth} < порога {min_growth}, пропуск",
+            "skip",
+        )
         return {}
 
     progress = await _load_progress(state)
@@ -98,7 +104,15 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     )
     patch["conversation_context"] = ctx.model_dump()
 
-    stage("live_check", format_check_done(closures), "done")
+    if closures:
+        checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)
+    else:
+        checker_text = "ничего"
+    stage(
+        "live-check",
+        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}",
+        "done",
+    )
     return patch
 
 
