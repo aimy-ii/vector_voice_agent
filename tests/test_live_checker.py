@@ -280,8 +280,48 @@ async def test_live_check_с_приростом_зовёт_чекер_и_пиш�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert client.calls
     assert client.calls[0]["client_reply"] == text
+    assert patch_out.get("last_checked_partial") == text
+
+
+async def test_live_check_контекстер_кладёт_справку_в_контекст(script):
+    """После чекера контекстер печёт справку в conversation_context."""
+    from graph.context import DYN_READY
+
+    text = "а когда медкомиссию проходить?"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        last_checked="",
+    )
+    state["conversation_context"] = {"static_text": "Город: Пермь"}
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True):
+        return progress_to_state(prog)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    ctx = patch_out.get("conversation_context") or {}
+    assert ctx.get("dynamic_status") == DYN_READY
+    assert script.helps["medcheck"].text in ctx.get("dynamic_text", "")
     assert patch_out.get("last_checked_partial") == text

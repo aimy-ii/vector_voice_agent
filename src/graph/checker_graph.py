@@ -2,8 +2,9 @@ r"""Служебный граф чекера в реальном времени.
 
 Вторая точка входа на том же состоянии и треде, что основной ход.
 Принимает накопленный распознанный текст (``partial_reply``), гоняет
-``check_pass``, пишет обратно только статусы/счётчики закрытых шагов.
-В ``messages`` не пишет, реплик в эфир не выдаёт.
+``check_pass``, затем ``run_contexter`` — чтобы к моменту основного хода
+справка/статус уже были в контексте. В ``messages`` не пишет, реплик
+в эфир не выдаёт.
 
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
@@ -25,10 +26,14 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
+from graph.context import context_from_state
+from graph.contexter import run_contexter
 from graph.log_fmt import format_check_done
 from graph.nodes import _checker_client, _load_progress, _save_progress
 from graph.progress import stage
 from graph.state import CallContext, CallState
+from graph.tools_registry import build_context_tools
+from script.source import registry
 
 
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
@@ -47,11 +52,20 @@ def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> boo
     return len(reply) - len(previous) < min_growth
 
 
+def _script_of(state: CallState):
+    """Скомпилированный скрипт из реестра по полям состояния."""
+    return registry.get(
+        state.get("script_id") or settings.script_id,
+        state.get("script_version") or settings.script_version,
+    )
+
+
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Один служебный проход чекера по ``partial_reply``.
+    """Один служебный проход чекера и контекстера по ``partial_reply``.
 
     При приросте меньше порога (и не первый проход) тихо выходит без
-    вызова модели. Иначе зовёт ``check_pass`` и сохраняет прогресс.
+    вызова модели. Иначе зовёт ``check_pass``, затем ``run_contexter``,
+    сохраняет прогресс и обновлённый контекст.
     """
     reply = str(state.get("partial_reply") or "")
     previous = str(state.get("last_checked_partial") or "")
@@ -72,6 +86,18 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     )
     patch = await _save_progress(progress)
     patch["last_checked_partial"] = reply
+
+    # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
+    script = _script_of(state)
+    ctx = context_from_state(state.get("conversation_context"))
+    ctx = await run_contexter(
+        ctx,
+        reply=reply,
+        tools=build_context_tools(script),
+        objections=script.objections,
+    )
+    patch["conversation_context"] = ctx.model_dump()
+
     stage("live_check", format_check_done(closures), "done")
     return patch
 

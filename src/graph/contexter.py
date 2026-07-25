@@ -1,14 +1,14 @@
 """Контекстер: наполняет динамику контекста и ставит ей статус.
 
 Единственный писатель динамической части. Статику не трогает — её пишет
-``lookup_node``. Справки берёт из ``helps`` скрипта; реальный поиск
-подключается позже через ``ContexterTools``. Интерфейс наружу не меняется.
+``lookup_node``. Источники ответа — реестр ``ContextTool`` (сегодня справки
+из скрипта, завтра вектор/карты). Интерфейс наружу не меняется.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Mapping, Protocol, Sequence
+from typing import Mapping, Sequence
 
 from graph.context import (
     DYN_MISSING,
@@ -17,7 +17,8 @@ from graph.context import (
     ConversationContext,
 )
 from graph.history import find_aside
-from script.models import Help, Objection
+from graph.tools_registry import ContextTool
+from script.models import Objection
 
 #: Признаки вопроса / запроса факта в реплике.
 _QUESTION_MARKERS = re.compile(
@@ -27,26 +28,6 @@ _QUESTION_MARKERS = re.compile(
 
 #: Слова короче этого не считаем значимыми для пересечения со статикой.
 _MIN_TOKEN = 4
-
-
-class ContexterTools(Protocol):
-    """Инструменты контекстера.
-
-    Точка замены: сегодня заглушки/справочник, завтра вектор, полнотекст,
-    карты. Интерфейс стабилен.
-    """
-
-    async def search(self, query: str) -> str | None:
-        """Ищет ответ по запросу; ``None`` — ничего не найдено."""
-        ...
-
-
-class NullContexterTools:
-    """Боевая заглушка: поиска нет, всегда ``None``."""
-
-    async def search(self, query: str) -> str | None:
-        """Поиск не подключён — всегда промах."""
-        return None
 
 
 def _looks_like_fact_request(reply: str) -> bool:
@@ -75,7 +56,7 @@ def _answer_already_in_context(reply: str, context: ConversationContext) -> bool
 
 
 def _triggers_catalogue(
-    items: Mapping[str, Help] | Mapping[str, Objection],
+    items: Mapping[str, Objection],
 ) -> dict[str, Sequence[str]]:
     """Идентификатор → признаки срабатывания."""
     return {item_id: item.triggers for item_id, item in items.items()}
@@ -92,26 +73,43 @@ def _append_dynamic(context: ConversationContext, text: str) -> None:
     context.dynamic_text = dynamic
 
 
+def _mark_ready(context: ConversationContext) -> None:
+    """Статус «готово»: генератор может опираться на контекст."""
+    context.dynamic_status = DYN_READY
+    context.situation_slug = None
+
+
+def _mark_missing(context: ConversationContext) -> None:
+    """Статус «не нашлось»: вопрос был, ответа нет."""
+    context.dynamic_status = DYN_MISSING
+    context.situation_slug = None
+    context.filler_spoken = False
+
+
+def _mark_none(context: ConversationContext) -> None:
+    """Статус «не требуется»: вопрос не справочный / возражение."""
+    context.dynamic_status = DYN_NONE
+    context.situation_slug = None
+
+
 async def run_contexter(
     context: ConversationContext,
     *,
     reply: str,
-    tools: ContexterTools,
-    helps: Mapping[str, Help] | None = None,
+    tools: Sequence[ContextTool],
     objections: Mapping[str, Objection] | None = None,
 ) -> ConversationContext:
     """Наполняет динамику контекста и ставит ей статус.
 
-    Единственный писатель динамической части. Справки — из ``helps`` скрипта
-    (по ``find_aside`` / триггерам). Возражения не трогает — это тактика
-    генератора. Решает: нужного нет — «не нашлось»; ответ уже в
-    статике/накопленном — «готово» сразу; нашлось через поиск — «готово».
+    Единственный писатель динамической части. Перебирает реестр
+    инструментов по порядку: первый подходящий отвечает. Возражения не
+    трогает — это тактика генератора. Решает: нужного нет — «не нашлось»;
+    ответ уже в статике/накопленном — «готово» сразу.
 
     Args:
         context: текущий контекст разговора.
         reply: реплика клиента на этот ход.
-        tools: набор инструментов поиска.
-        helps: справки скрипта; ``None`` — не сверять.
+        tools: реестр инструментов (порядок = приоритет).
         objections: возражения скрипта; при совпадении статус «не требуется».
 
     Returns:
@@ -121,46 +119,30 @@ async def run_contexter(
 
     # Возражения — тактика разговора в скрипте, контекстер не обрабатывает.
     if objections and find_aside(reply, _triggers_catalogue(objections)):
-        updated.dynamic_status = DYN_NONE
-        updated.situation_slug = None
+        _mark_none(updated)
         return updated
 
-    # Справки из статичного списка helps — источник до появления реального поиска.
-    if helps:
-        help_id = find_aside(reply, _triggers_catalogue(helps))
-        if help_id is not None:
-            item = helps.get(help_id)
-            text = (item.text if item else "").strip()
-            if text:
-                _append_dynamic(updated, text)
-                updated.dynamic_status = DYN_READY
-                updated.situation_slug = None
-                updated.filler_spoken = False
-            else:
-                updated.dynamic_status = DYN_MISSING
-                updated.situation_slug = None
-            return updated
+    # Реестр: первый инструмент с не-None даёт ответ (или пусто → «не нашлось»).
+    for tool in tools:
+        found = await tool.try_answer(reply, updated)
+        if found is None:
+            continue
+        if found.strip():
+            _append_dynamic(updated, found)
+            _mark_ready(updated)
+            updated.filler_spoken = False
+        else:
+            _mark_missing(updated)
+        return updated
 
     if not _looks_like_fact_request(reply):
-        updated.dynamic_status = DYN_NONE
-        updated.situation_slug = None
+        _mark_none(updated)
         return updated
 
     if _answer_already_in_context(reply, updated):
-        updated.dynamic_status = DYN_READY
-        updated.situation_slug = None
+        _mark_ready(updated)
         return updated
 
-    found = await tools.search(reply.strip())
-    if found:
-        _append_dynamic(updated, found)
-        updated.dynamic_status = DYN_READY
-        updated.situation_slug = None
-        updated.filler_spoken = False
-    else:
-        # Справочный вопрос есть, но ни в helps, ни в поиске — «не нашлось».
-        updated.dynamic_status = DYN_MISSING
-        updated.situation_slug = None
-        updated.filler_spoken = False
-
+    # Справочный вопрос есть, но никто из реестра не ответил.
+    _mark_missing(updated)
     return updated

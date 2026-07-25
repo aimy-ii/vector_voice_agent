@@ -25,7 +25,7 @@ from graph.context import (
     context_from_state,
     merge_static,
 )
-from graph.contexter import NullContexterTools, run_contexter
+from graph.contexter import run_contexter
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
@@ -48,6 +48,7 @@ from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.situations import pick_filler
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
+from graph.tools_registry import build_context_tools
 from kb.client import vector_kb
 from script.build import CompiledScript
 from script.models import Step
@@ -504,6 +505,14 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     # Общая заглушка без предмета не звучит: предмет обязателен.
 
+    # Контекстер и на маршруте lookup: справка может прийти вместе с городом.
+    ctx = await run_contexter(
+        ctx,
+        reply=user_text,
+        tools=build_context_tools(script),
+        objections=script.objections,
+    )
+
     stage("lookup", format_lookup_done(turn_calls), "done", calls=turn_calls)
     patch.update(
         {
@@ -531,12 +540,11 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     spoken: list[str] = []
     ctx = context_from_state(state.get("conversation_context"))
     user_text = last_user_text(state.get("messages") or [])
-    # Контекстер в ходу: справки из helps → динамика до генерации.
+    # Контекстер в ходу: реестр инструментов → динамика до генерации.
     ctx = await run_contexter(
         ctx,
         reply=user_text,
-        tools=NullContexterTools(),
-        helps=script.helps,
+        tools=build_context_tools(script),
         objections=script.objections,
     )
     fillers_used = list(state.get("fillers_used") or [])

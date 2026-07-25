@@ -202,3 +202,37 @@ async def test_контекстер_до_respond_кладёт_справку_в_
     prompt = model["messages"][0].content
     assert med in prompt
     assert model["calls"] == 1
+
+
+async def test_контекстер_на_lookup_кладёт_справку_в_динамику(
+    spoken, store, use_v2, script, monkeypatch
+):
+    """На маршруте lookup контекстер тоже наполняет динамику до respond."""
+    from tests.conftest import FakeKB
+
+    med = script.helps["medcheck"].text
+    fake = FakeKB(cities=[], city=None, branches=[], branch=None)
+    monkeypatch.setattr(nodes_module, "vector_kb", fake)
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="а когда медкомиссию проходить?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "price",
+        "head_steps": ["price"],
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "branch_slug": "perm_chernyshevskogo",
+        "profile": {"city": "Пермь", "branch": "perm_chernyshevskogo"},
+        "conversation_context": {
+            "static_text": "Город: Пермь\nСтоимость обучения — от 43900 рублей.",
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "frozen": True,
+        },
+    }
+    out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
+    ctx = out["conversation_context"]
+    assert ctx["dynamic_status"] == DYN_READY
+    assert med in ctx["dynamic_text"]
