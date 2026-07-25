@@ -1,24 +1,23 @@
 """Контекстер: наполняет динамику контекста и ставит ей статус.
 
 Единственный писатель динамической части. Статику не трогает — её пишет
-``lookup_node``. Реальный поиск подключается позже через ``ContexterTools``;
-интерфейс наружу при этом не меняется.
+``lookup_node``. Справки берёт из ``helps`` скрипта; реальный поиск
+подключается позже через ``ContexterTools``. Интерфейс наружу не меняется.
 """
 
 from __future__ import annotations
 
 import re
-from typing import Protocol
+from typing import Mapping, Protocol, Sequence
 
 from graph.context import (
+    DYN_MISSING,
     DYN_NONE,
     DYN_READY,
-    DYN_SEARCHING,
     ConversationContext,
 )
-
-#: Слаг ситуации по умолчанию, пока точный разбор не подключён.
-DEFAULT_SITUATION = "default"
+from graph.history import find_aside
+from script.models import Help, Objection
 
 #: Признаки вопроса / запроса факта в реплике.
 _QUESTION_MARKERS = re.compile(
@@ -75,28 +74,72 @@ def _answer_already_in_context(reply: str, context: ConversationContext) -> bool
     return bool(reply_tokens & known)
 
 
+def _triggers_catalogue(
+    items: Mapping[str, Help] | Mapping[str, Objection],
+) -> dict[str, Sequence[str]]:
+    """Идентификатор → признаки срабатывания."""
+    return {item_id: item.triggers for item_id, item in items.items()}
+
+
+def _append_dynamic(context: ConversationContext, text: str) -> None:
+    """Дописывает текст в динамику, без пустых дублей в хвосте."""
+    chunk = text.strip()
+    if not chunk:
+        return
+    if chunk in context.dynamic_text:
+        return
+    dynamic = (context.dynamic_text + "\n" + chunk).strip()
+    context.dynamic_text = dynamic
+
+
 async def run_contexter(
     context: ConversationContext,
     *,
     reply: str,
     tools: ContexterTools,
+    helps: Mapping[str, Help] | None = None,
+    objections: Mapping[str, Objection] | None = None,
 ) -> ConversationContext:
     """Наполняет динамику контекста и ставит ей статус.
 
-    Единственный писатель динамической части. Решает: нужного нет — статус «в
-    поиске» + слаг ситуации; ответ уже в статике/накопленном — «готово» сразу,
-    без вызовов; не нашлось — «не нашлось». Реальные инструменты поиска
-    подключаются позже, интерфейс наружу при этом не меняется.
+    Единственный писатель динамической части. Справки — из ``helps`` скрипта
+    (по ``find_aside`` / триггерам). Возражения не трогает — это тактика
+    генератора. Решает: нужного нет — «не нашлось»; ответ уже в
+    статике/накопленном — «готово» сразу; нашлось через поиск — «готово».
 
     Args:
         context: текущий контекст разговора.
         reply: реплика клиента на этот ход.
         tools: набор инструментов поиска.
+        helps: справки скрипта; ``None`` — не сверять.
+        objections: возражения скрипта; при совпадении статус «не требуется».
 
     Returns:
         Контекст с обновлённой динамикой и статусом; статика без изменений.
     """
     updated = context.model_copy(deep=True)
+
+    # Возражения — тактика разговора в скрипте, контекстер не обрабатывает.
+    if objections and find_aside(reply, _triggers_catalogue(objections)):
+        updated.dynamic_status = DYN_NONE
+        updated.situation_slug = None
+        return updated
+
+    # Справки из статичного списка helps — источник до появления реального поиска.
+    if helps:
+        help_id = find_aside(reply, _triggers_catalogue(helps))
+        if help_id is not None:
+            item = helps.get(help_id)
+            text = (item.text if item else "").strip()
+            if text:
+                _append_dynamic(updated, text)
+                updated.dynamic_status = DYN_READY
+                updated.situation_slug = None
+                updated.filler_spoken = False
+            else:
+                updated.dynamic_status = DYN_MISSING
+                updated.situation_slug = None
+            return updated
 
     if not _looks_like_fact_request(reply):
         updated.dynamic_status = DYN_NONE
@@ -108,22 +151,16 @@ async def run_contexter(
         updated.situation_slug = None
         return updated
 
-    # Каркас: поиск не подключён. Ставим «в поиске» + общий слаг, чтобы
-    # генератор мог отдать заглушку. Точный разбор ситуаций — следующий этап.
-    # Если tools.search когда-нибудь вернёт текст — допишем динамику и READY.
     found = await tools.search(reply.strip())
     if found:
-        dynamic = (updated.dynamic_text + "\n" + found).strip()
-        updated.dynamic_text = dynamic
+        _append_dynamic(updated, found)
         updated.dynamic_status = DYN_READY
         updated.situation_slug = None
         updated.filler_spoken = False
     else:
-        # Поиска нет / промах: для каркаса оставляем «в поиске» с default,
-        # чтобы проверить заглушку; «не нашлось» — когда заглушка не нужна.
-        updated.dynamic_status = DYN_SEARCHING
-        updated.situation_slug = DEFAULT_SITUATION
-        # Новый заход поиска — флаг заглушки сбрасываем.
+        # Справочный вопрос есть, но ни в helps, ни в поиске — «не нашлось».
+        updated.dynamic_status = DYN_MISSING
+        updated.situation_slug = None
         updated.filler_spoken = False
 
     return updated

@@ -25,6 +25,7 @@ from graph.context import (
     context_from_state,
     merge_static,
 )
+from graph.contexter import NullContexterTools, run_contexter
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
@@ -529,6 +530,15 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     facts.pop("city_choices", None)
     spoken: list[str] = []
     ctx = context_from_state(state.get("conversation_context"))
+    user_text = last_user_text(state.get("messages") or [])
+    # Контекстер в ходу: справки из helps → динамика до генерации.
+    ctx = await run_contexter(
+        ctx,
+        reply=user_text,
+        tools=NullContexterTools(),
+        helps=script.helps,
+        objections=script.objections,
+    )
     fillers_used = list(state.get("fillers_used") or [])
     spoken_filler: str | None = state.get("spoken_filler")
     # Повторный «в поиске» после заглушки — на контекст не опираемся.

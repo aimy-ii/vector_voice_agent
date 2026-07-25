@@ -349,21 +349,18 @@ def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
 
 
 def aside_block(script: CompiledScript, done: Sequence[str]) -> str:
-    """Перечисляет справки и возражения для `aside_id`.
+    """Перечисляет возражения для `aside_id`.
+
+    Справки в перечень не входят — их отдаёт контекстер в динамику контекста.
 
     Args:
         script: скомпилированный скрипт.
-        done: уже отработанные справки и возражения.
+        done: уже отработанные возражения.
 
     Returns:
-        Текстовый блок перечня.
+        Текстовый блок перечня возражений.
     """
-    lines = ["Перечень посторонних вопросов и возражений (для поля aside_id):"]
-    for help_id, item in script.helps.items():
-        mark = " — уже отвечали" if help_id in done else ""
-        lines.append(
-            f"- {help_id}: справка о том, что {item.triggers[0] if item.triggers else help_id}{mark}"
-        )
+    lines = ["Перечень возражений (для поля aside_id):"]
     for objection_id, item in script.objections.items():
         mark = " — уже отвечали" if objection_id in done else ""
         lines.append(f"- {objection_id}: возражение{mark}")
@@ -405,7 +402,7 @@ def build_turn_messages(
     """Собирает сообщения запроса к генератору.
 
     Порядок: персона + естественность + unknown → статика контекста →
-    профиль → факты хода → шапка → справки → заглушка → инструкция схемы →
+    профиль → факты хода → шапка → возражения → заглушка → инструкция схемы →
     хвост истории.
 
     Args:
@@ -415,7 +412,7 @@ def build_turn_messages(
         profile: собранный профиль.
         facts: факты хода.
         history: история звонка без системных сообщений.
-        asides_done: отработанные справки и возражения.
+        asides_done: отработанные возражения.
         next_step: следующий шаг (совместимость).
         context_text: документ контекста.
         spoken_filler: фраза-заглушка, уже ушедшая в эфир.

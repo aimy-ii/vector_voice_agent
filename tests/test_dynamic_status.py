@@ -108,9 +108,16 @@ def test_промпт_готово_и_не_требуется_как_обычн�
         assert "пауза-заглушка уже звучала" not in messages[0].content.lower()
 
 
-async def test_генератор_в_поиске_отдаёт_фразу_и_ставит_флаг(spoken, store, model, use_v2):
+async def test_генератор_в_поиске_отдаёт_фразу_и_ставит_флаг(
+    spoken, store, model, use_v2, monkeypatch
+):
     model["result"] = {"understood": [], "reply": "Продолжаем."}
     catalog = load_situations()
+
+    async def _keep_searching(context, **kwargs: Any):
+        return context
+
+    monkeypatch.setattr(nodes_module, "run_contexter", _keep_searching)
     state: dict[str, Any] = {
         **new_state_defaults(),
         "messages": [HumanMessage(content="а медкомиссия?")],
@@ -144,7 +151,11 @@ async def test_генератор_повторный_в_поиске_фразу_
         calls.append("pick")
         return "НЕ ДОЛЖНА ЗВУЧАТЬ"
 
+    async def _keep_searching(context, **kwargs: Any):
+        return context
+
     monkeypatch.setattr(nodes_module, "pick_filler", _no_pick)
+    monkeypatch.setattr(nodes_module, "run_contexter", _keep_searching)
     state: dict[str, Any] = {
         **new_state_defaults(),
         "messages": [HumanMessage(content="ну что там?")],
@@ -167,3 +178,27 @@ async def test_генератор_повторный_в_поиске_фразу_
     prompt = model["messages"][0].content
     assert "Секрет" not in prompt
     assert "пауза-заглушка уже звучала" in prompt.lower()
+
+
+async def test_контекстер_до_respond_кладёт_справку_в_динамику(
+    spoken, store, model, use_v2, script
+):
+    """Контекстер вызывается до генерации; справка уже в промпте."""
+    model["result"] = {"understood": [], "aside_id": None, "reply": "Медкомиссия отдельно."}
+    med = script.helps["medcheck"].text
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="а когда медкомиссию проходить?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "conversation_context": {"static_text": "Город: Пермь"},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    ctx = out["conversation_context"]
+    assert ctx["dynamic_status"] == DYN_READY
+    assert med in ctx["dynamic_text"]
+    prompt = model["messages"][0].content
+    assert med in prompt
+    assert model["calls"] == 1

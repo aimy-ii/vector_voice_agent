@@ -1,14 +1,15 @@
-"""Тесты каркаса контекстера."""
+"""Тесты каркаса контекстера и выдачи справок."""
 
 from __future__ import annotations
 
 from graph.context import (
+    DYN_MISSING,
     DYN_NONE,
     DYN_READY,
-    DYN_SEARCHING,
     ConversationContext,
 )
-from graph.contexter import DEFAULT_SITUATION, NullContexterTools, run_contexter
+from graph.contexter import NullContexterTools, run_contexter
+from script.models import Help, Objection
 
 
 class _CountingTools:
@@ -44,13 +45,17 @@ async def test_контекстер_ответ_в_статике_готово_б
     assert out.static_text == ctx.static_text
 
 
-async def test_контекстер_нет_в_статике_в_поиске_и_слаг():
+async def test_контекстер_нет_в_статике_и_helps_не_нашлось():
     ctx = ConversationContext(static_text="Город: Пермь. Автопарк: Solaris.")
     tools = NullContexterTools()
-    out = await run_contexter(ctx, reply="а как проходит медкомиссия?", tools=tools)
-    assert out.dynamic_status == DYN_SEARCHING
-    assert out.situation_slug == DEFAULT_SITUATION
-    assert out.filler_spoken is False
+    out = await run_contexter(
+        ctx,
+        reply="а как записаться на дайвинг?",
+        tools=tools,
+        helps={},
+    )
+    assert out.dynamic_status == DYN_MISSING
+    assert out.situation_slug is None
     assert out.static_text == ctx.static_text
 
 
@@ -62,3 +67,70 @@ async def test_контекстер_статика_не_трогается_пр�
     assert out.dynamic_status == DYN_READY
     assert "маршрут" in out.dynamic_text
     assert tools.calls == ["как добраться до филиала?"]
+
+
+async def test_контекстер_справка_из_helps_в_динамику():
+    helps = {
+        "medcheck": Help(
+            id="medcheck",
+            triggers=["медкомисс", "медсправк"],
+            text="Медкомиссия понадобится к началу практики.",
+        )
+    }
+    ctx = ConversationContext(static_text="Город: Пермь")
+    tools = _CountingTools()
+    out = await run_contexter(
+        ctx,
+        reply="а когда медкомиссию проходить?",
+        tools=tools,
+        helps=helps,
+    )
+    assert out.dynamic_status == DYN_READY
+    assert "Медкомиссия понадобится" in out.dynamic_text
+    assert tools.calls == []
+    assert out.static_text == "Город: Пермь"
+
+
+async def test_контекстер_справка_без_текста_не_нашлось():
+    helps = {
+        "empty": Help(id="empty", triggers=["квантовая скидка"], text="   "),
+    }
+    ctx = ConversationContext()
+    out = await run_contexter(
+        ctx,
+        reply="есть квантовая скидка?",
+        tools=NullContexterTools(),
+        helps=helps,
+    )
+    assert out.dynamic_status == DYN_MISSING
+    assert out.dynamic_text == ""
+
+
+async def test_контекстер_возражение_не_трогает():
+    objections = {
+        "think": Objection(
+            id="think",
+            triggers=["подумаю", "надо подумать"],
+            text="Конечно, подумайте.",
+            sets={"urgency": "high"},
+        )
+    }
+    helps = {
+        "medcheck": Help(
+            id="medcheck",
+            triggers=["медкомисс"],
+            text="Медкомиссия понадобится.",
+        )
+    }
+    ctx = ConversationContext(static_text="Город: Пермь", dynamic_text="было")
+    tools = _CountingTools()
+    out = await run_contexter(
+        ctx,
+        reply="я ещё подумаю",
+        tools=tools,
+        helps=helps,
+        objections=objections,
+    )
+    assert out.dynamic_status == DYN_NONE
+    assert out.dynamic_text == "было"
+    assert tools.calls == []

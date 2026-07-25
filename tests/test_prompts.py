@@ -260,11 +260,31 @@ def test_пустые_факты_не_засоряют_промпт():
     assert "Пермь" in facts_block({"city": {"name": "Пермь"}})
 
 
-def test_перечень_справок_уходит_модели(script):
-    block = aside_block(script, done=["medcheck"])
-    assert "medcheck" in block
-    assert "уже отвечали" in block
+def test_перечень_возражений_без_справок(script):
+    block = aside_block(script, done=["think"])
     assert "think" in block
+    assert "уже отвечали" in block
+    assert "medcheck" not in block
+    assert "справка" not in block.lower()
+    for help_id in script.helps:
+        assert help_id not in block
+
+
+def test_справка_доходит_через_динамику_контекста(script):
+    med = script.helps["medcheck"].text
+    messages = build_turn_messages(
+        script=script,
+        step=script.step("name"),
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        context_text=f"Город: Пермь\n\n{med}",
+        dynamic_status="готово",
+    )
+    content = messages[0].content
+    assert med in content
+    assert "medcheck" not in aside_block(script, done=[])
 
 
 def test_запрос_к_модели_содержит_системный_блок_и_хвост(script):
