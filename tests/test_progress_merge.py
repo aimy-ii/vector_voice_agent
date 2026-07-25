@@ -103,3 +103,45 @@ async def test_генератор_не_затирает_статус_чекер�
     assert loaded.status["name"] == "closed"
     assert loaded.attempts["name"] == 2
     assert loaded.attempts["city"] == 1
+
+
+@pytest.mark.asyncio
+async def test_последовательные_точечные_записи_сохраняют_оба_набора(
+    memory_store: MemoryScriptStore,
+):
+    """Как после параллельного check∥lookup: чекер, затем генератор в plan."""
+    await memory_store.save(
+        "local",
+        ScriptProgress(status={"name": "pending"}, attempts={"name": 1}, taken_turn={"name": 1}),
+    )
+    with patch.object(nodes_module, "_call_id", return_value="local"):
+        chk = ScriptProgress(
+            status={"name": "closed"},
+            attempts={"name": 1},
+            taken_turn={"name": 1},
+            profile={"caller_name": "Андрей"},
+        )
+        await nodes_module._save_progress(chk, fields=PROGRESS_FIELDS_CHECKER)
+        gen = ScriptProgress(
+            status={"name": "pending"},
+            attempts={"name": 2, "city": 1},
+            taken_turn={"name": 1, "city": 2},
+        )
+        await nodes_module._save_progress(gen, fields=PROGRESS_FIELDS_GENERATOR)
+
+    loaded = await memory_store.load("local")
+    assert loaded is not None
+    assert loaded.status["name"] == "closed"
+    assert loaded.attempts["name"] == 2
+    assert loaded.profile.get("caller_name") == "Андрей"
+
+
+def test_merge_dicts_для_параллельного_профиля():
+    """Редьюсер профиля: правки check и lookup не затирают друг друга."""
+    from graph.state import merge_dicts
+
+    after_check = merge_dicts({"caller_name": "Андрей"}, {"caller_name": "Андрей"})
+    after_both = merge_dicts(after_check, {"city": "Пермь"})
+    assert after_both == {"caller_name": "Андрей", "city": "Пермь"}
+    assert merge_dicts({"a": "1"}, None) == {"a": "1"}
+    assert merge_dicts(None, {"b": "2"}) == {"b": "2"}

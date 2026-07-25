@@ -18,6 +18,7 @@ r"""Служебный граф чекера в реальном времени.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from langgraph.graph import StateGraph
@@ -48,11 +49,14 @@ log = logging.getLogger(__name__)
 
 
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
-    """Прирост текста меньше порога и это не первый проход.
+    """Прирост текста меньше порога внутри текущей реплики.
+
+    Отрицательный прирост — реплика началась заново: точку отсчёта
+    сбрасывают снаружи, сюда такой случай не должен доходить как «пропуск».
 
     Args:
         reply: накопленный текст текущего прохода.
-        previous: текст прошлого отработанного прохода.
+        previous: текст прошлого отработанного прохода в этой же реплике.
         min_growth: порог прироста в символах.
 
     Returns:
@@ -60,7 +64,10 @@ def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> boo
     """
     if not previous:
         return False
-    return len(reply) - len(previous) < min_growth
+    growth = len(reply) - len(previous)
+    if growth < 0:
+        return False
+    return growth < min_growth
 
 
 def _script_of(state: CallState):
@@ -148,19 +155,34 @@ async def _warmup_next_step(
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Один служебный проход чекера и контекстера по ``partial_reply``.
 
+    Прирост считается внутри текущей реплики относительно
+    ``last_checked_partial``. Отрицательный прирост — реплика началась
+    заново: сбрасываем точку отсчёта и разбираем текст как новый.
     При приросте меньше порога (и не первый проход) тихо выходит без
     вызова модели. Иначе дозаполняет профиль, зовёт ``check_pass``,
     ``run_contexter`` и прогрев под предстоящий шаг.
     """
+    started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
     previous = str(state.get("last_checked_partial") or "")
     growth = len(reply) - len(previous)
     min_growth = settings.checker_min_growth_chars
-    stage(
-        "live-check",
-        f"накоплено {len(reply)} симв., прирост с прошлого прохода {growth} симв.",
-        "start",
-    )
+    if growth < 0:
+        # Новая реплика: буфер бота сброшен, прошлый last_checked чужой.
+        stage(
+            "live-check",
+            f"накоплено {len(reply)} симв., прирост {growth} симв. — "
+            f"новая реплика, сброс точки отсчёта",
+            "start",
+        )
+        previous = ""
+        growth = len(reply)
+    else:
+        stage(
+            "live-check",
+            f"накоплено {len(reply)} симв., прирост с прошлого прохода {growth} симв.",
+            "start",
+        )
     if growth_below_threshold(reply, previous, min_growth=min_growth):
         stage(
             "live-check",
@@ -214,9 +236,10 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)
     else:
         checker_text = "ничего"
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
     stage(
         "live-check",
-        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}",
+        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}; {elapsed_ms} мс",
         "done",
     )
     return patch

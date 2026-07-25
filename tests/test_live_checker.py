@@ -255,6 +255,99 @@ async def test_первый_проход_не_режется_порогом():
     assert growth_below_threshold("коротко+", "коротко", min_growth=10)
 
 
+async def test_отрицательный_прирост_не_пропускает_проход():
+    """Новая реплика (прирост < 0) — не skip, а сброс точки отсчёта."""
+    assert not growth_below_threshold("да", "Меня зовут Андрей Петров", min_growth=10)
+    assert not growth_below_threshold("к", "длинный прошлый текст", min_growth=10)
+
+
+async def test_прирост_внутри_реплики_от_разобранного_ранее():
+    """Внутри одной реплики порог считается от last_checked этой же реплики."""
+    previous = "Меня зовут"
+    # +2 символа — ниже порога.
+    assert growth_below_threshold(previous + " А", previous, min_growth=10)
+    # +12 — выше порога.
+    assert not growth_below_threshold(previous + " Андрей Петр", previous, min_growth=10)
+
+
+async def test_live_check_отрицательный_прирост_сбрасывает_и_зовёт_чекер(script):
+    """Буфер сброшен: прирост отрицательный → разбор как новой реплики."""
+    text = "да"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        last_checked="Меня зовут Андрей очень длинный прошлый",
+    )
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert client.calls
+    assert client.calls[0]["client_reply"] == text
+    assert patch_out.get("last_checked_partial") == text
+
+
+async def test_live_check_done_содержит_длительность_мс(script):
+    """В [live-check|done] есть длительность прохода в миллисекундах."""
+    text = "пока ещё думаю над ответом длинный"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    stages: list[tuple] = []
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    def _stage(name, text, kind="done", **kwargs):
+        stages.append((name, text, kind))
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.stage", side_effect=_stage),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    done = [t for n, t, k in stages if n == "live-check" and k == "done"]
+    assert done
+    assert " мс" in done[0]
+
+
 async def test_live_check_с_приростом_зовёт_чекер_и_пишет_last_checked(script):
     """Достаточный прирост: чекер отрабатывает, last_checked_partial обновляется."""
     # Текст без имени — иначе фон закроет name по fills без модели.

@@ -930,7 +930,7 @@ async def test_просьба_рассказать_на_шаге_образца_
 
 
 async def test_граф_без_узла_verbatim_всегда_respond_commit():
-    """Топология: узла verbatim нет; после respond всегда commit."""
+    """Топология: check∥lookup → plan → respond → commit; verbatim нет."""
     from graph.graph import build_graph
 
     built = build_graph()
@@ -939,9 +939,15 @@ async def test_граф_без_узла_verbatim_всегда_respond_commit():
     assert {"ingest", "check", "plan", "lookup", "respond", "commit"} <= nodes
 
     edges = built.edges
-    assert ("lookup", "respond") in edges
+    assert ("ingest", "check") in edges
+    assert ("ingest", "lookup") in edges
+    assert ("plan", "respond") in edges
     assert ("respond", "commit") in edges
     assert not any(src == "verbatim" or tgt == "verbatim" for src, tgt in edges)
+    # Барьер: plan ждёт оба параллельных узла.
+    assert ((("check", "lookup"), "plan") in built.waiting_edges) or (
+        (("lookup", "check"), "plan") in built.waiting_edges
+    )
 
 
 async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(
@@ -1046,3 +1052,98 @@ async def test_слепок_в_конце_звонка(spoken, store, checker, k
     )
     assert state.get("script_progress")
     assert state.get("call_finished") is True or state["current_step"] in (None, "messenger")
+
+
+async def test_check_и_lookup_идут_параллельно(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Чекер и резолвер стартуют одновременно, а не по очереди."""
+    import asyncio
+    import time
+
+    marks: dict[str, float] = {}
+    real_check = nodes_module.check_node
+    real_lookup = nodes_module.lookup_node
+
+    async def slow_check(state, runtime):
+        marks["check_start"] = time.perf_counter()
+        await asyncio.sleep(0.08)
+        result = await real_check(state, runtime)
+        marks["check_end"] = time.perf_counter()
+        return result
+
+    async def slow_lookup(state, runtime):
+        marks["lookup_start"] = time.perf_counter()
+        await asyncio.sleep(0.08)
+        result = await real_lookup(state, runtime)
+        marks["lookup_end"] = time.perf_counter()
+        return result
+
+    # Скомпилированный граф держит ссылки на функции — подменяем узлы через
+    # пересборку на лету нельзя; патчим сами корутины в nodes и пересоберём.
+    from graph.graph import build_graph
+
+    monkeypatch.setattr(nodes_module, "check_node", slow_check)
+    monkeypatch.setattr(nodes_module, "lookup_node", slow_lookup)
+    # graph.graph импортировал узлы по имени на момент загрузки модуля.
+    import graph.graph as graph_module
+
+    monkeypatch.setattr(graph_module, "check_node", slow_check)
+    monkeypatch.setattr(graph_module, "lookup_node", slow_lookup)
+    fresh = build_graph().compile(name="vector_agent_parallel_test")
+
+    model["result"] = {"understood": [], "reply": "Отлично, Пермь."}
+    state = await fresh.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert "check_start" in marks and "lookup_start" in marks
+    # Перекрытие интервалов: каждый стартовал до чужого финиша.
+    assert marks["check_start"] < marks["lookup_end"]
+    assert marks["lookup_start"] < marks["check_end"]
+    assert state["city_slug"] == "perm"
+
+
+async def test_plan_получает_результаты_check_и_lookup(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """После барьера plan видит закрытия чекера и слаг из lookup."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Отлично, Пермь. Учиться будете сами?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert state["city_slug"] == "perm"
+    assert state["current_step"] in ("city", "who_studies")
+    assert state.get("step_status", {}).get("name") == "closed"
+    # Счётчик ведущего шага выставлен plan после обоих параллельных узлов.
+    assert int(state.get("step_attempts", {}).get(state["current_step"], 0)) >= 1
+
+
+async def test_ошибка_lookup_не_роняет_ход(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Исключение в резолвере глотается; чекер и генератор отрабатывают."""
+
+    async def _boom(*args: Any, **kwargs: Any):
+        raise RuntimeError("справочник недоступен")
+
+    monkeypatch.setattr(nodes_module, "_lookup_body", _boom)
+    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert state["current_step"] == "name"
+    assert model["calls"] == 1
+    assert "".join(spoken) == model["result"]["reply"]

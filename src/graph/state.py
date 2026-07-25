@@ -34,6 +34,26 @@ def replace_messages(
     return convert_to_messages(incoming)
 
 
+def merge_dicts(
+    current: dict[str, Any] | None,
+    incoming: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Редьюсер словарей: точечное слияние при параллельной записи узлов.
+
+    Args:
+        current: что уже лежит в состоянии.
+        incoming: правка узла; ``None`` — не трогать.
+
+    Returns:
+        Копия ``current`` с наложенным ``incoming``.
+    """
+    merged = dict(current or {})
+    if not incoming:
+        return merged
+    merged.update(incoming)
+    return merged
+
+
 class CallContext(TypedDict, total=False):
     """Параметры запуска, приходящие снаружи на каждый ход."""
 
@@ -62,7 +82,7 @@ class CallState(TypedDict, total=False):
         partial_reply: накопленный распознанный текст текущей реплики
             клиента; вход служебного графа ``vector_checker``.
         last_checked_partial: текст последнего служебного прохода чекера
-            (порог прироста между проходами).
+            (порог прироста внутри текущей реплики).
     """
 
     messages: Annotated[list[BaseMessage], replace_messages]
@@ -75,7 +95,7 @@ class CallState(TypedDict, total=False):
     step_taken_turn: dict[str, int]
     script_progress: dict[str, Any]
 
-    profile: dict[str, str]
+    profile: Annotated[dict[str, str], merge_dicts]
     client_asks_inform: bool
     city_slug: str | None
     city_name: str | None

@@ -2,11 +2,12 @@
 
 ::
 
-    ingest → check → plan ─┬─► lookup ──► respond ──► commit
-                           └─► respond ─────────────► commit
+    ingest ─┬─► check  ─┐
+            └─► lookup ─┴─► plan ──► respond ──► commit
 
-Чекер — единственная точка закрытия шагов; генератор плюсует счётчик ведущему
-шагу в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
+Чекер и резолвер идут параллельно; plan ждёт обоих. Чекер — единственная
+точка закрытия шагов; генератор плюсует счётчик ведущему шагу в момент
+взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from graph.log_fmt import (
     format_spoken_preview,
 )
 from graph.names import given_name
+from graph.profile_fill import fill_basic_profile
 from graph.progress import say, stage
 from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
@@ -132,6 +134,68 @@ def _current_step(state: CallState) -> Step | None:
     if not step_id:
         return None
     return _script_of(state).steps.get(step_id)
+
+
+def _lead_from_progress(
+    state: CallState,
+    *,
+    progress: ScriptProgress,
+    profile: dict[str, str],
+) -> tuple[list[Step], Step | None]:
+    """Считает шапку и ведущий шаг по прогрессу — без инкремента счётчика.
+
+    Args:
+        state: состояние хода.
+        progress: прогресс из кеша или зеркала.
+        profile: слитый профиль.
+
+    Returns:
+        Шапка и ведущий шаг (или None).
+    """
+    script = _script_of(state)
+    inform_reason = bool(state.get("client_asks_inform")) or answered_inform_check(
+        script,
+        status=progress.status,
+        pending_step=state.get("pending_step") or state.get("delivered_step"),
+    )
+    head = script_head(
+        script,
+        status=progress.status,
+        attempts=progress.attempts,
+        profile=profile,
+        inform_reason=inform_reason,
+        pending_soft_cap=settings.pending_steps_soft_cap,
+    )
+    step = head[0] if head else None
+    if state.get("resume_step") and state["resume_step"] in script.steps:
+        resume = script.step(state["resume_step"])
+        if any(s.id == resume.id for s in head):
+            step = resume
+    return head, step
+
+
+def _step_needs_lookup(step: Step | None, state: CallState) -> bool:
+    """Нужен ли справочник на этом ведущем шаге.
+
+    Args:
+        step: ведущий шаг или None.
+        state: состояние хода (слаги города/филиала).
+
+    Returns:
+        True — резолвер/факты имеют смысл; иначе узел может выйти сразу.
+    """
+    if step is None:
+        return False
+    if step.needs or (step.fills and "city" in step.fills and not state.get("city_slug")):
+        return True
+    if (
+        step.fills
+        and "branch" in step.fills
+        and state.get("city_slug")
+        and not state.get("branch_slug")
+    ):
+        return True
+    return False
 
 
 def _head_steps(state: CallState) -> list[Step]:
@@ -311,20 +375,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         pending_step=state.get("pending_step") or state.get("delivered_step"),
     )
 
-    head = script_head(
-        script,
-        status=progress.status,
-        attempts=progress.attempts,
-        profile=profile,
-        inform_reason=inform_reason,
-        pending_soft_cap=settings.pending_steps_soft_cap,
-    )
-
-    step = head[0] if head else None
-    if state.get("resume_step") and state["resume_step"] in script.steps:
-        resume = script.step(state["resume_step"])
-        if any(s.id == resume.id for s in head):
-            step = resume
+    head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
     # Счётчик — только ведущему шагу хода. Висящие в шапке попытку не тратят.
     if step is not None:
@@ -336,16 +387,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
 
-    if step is None:
-        route = ROUTE_RESPOND
-    elif step.needs or (step.fills and "city" in step.fills and not state.get("city_slug")):
-        route = ROUTE_LOOKUP
-    elif (
-        step.fills
-        and "branch" in step.fills
-        and state.get("city_slug")
-        and not state.get("branch_slug")
-    ):
+    if _step_needs_lookup(step, state):
         route = ROUTE_LOOKUP
     else:
         route = ROUTE_RESPOND
@@ -389,12 +431,45 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
 
 async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Резолверы города/филиала и факты справочника; заглушки без модели."""
+    """Резолверы города/филиала и факты справочника; заглушки без модели.
+
+    Идёт параллельно с чекером: ведущий шаг считает сам по прогрессу.
+    Если искать нечего — сразу пустой патч. Ошибка не роняет ход.
+    """
+    try:
+        return await _lookup_body(state, runtime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("lookup не удался: %s", exc)
+        stage("lookup", f"ошибка, пропуск: {exc}", "done")
+        return {}
+
+
+async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
+    """Тело резолвера; исключения ловит ``lookup_node``."""
     script = _script_of(state)
-    step = _current_step(state)
-    needs = needs_of(step)
-    profile = dict(state.get("profile") or {})
+    progress = await _load_progress(state)
+    profile = _merge_profile(state, progress)
+    # Фон: базовые поля из реплики — чтобы city из текста резолвился
+    # даже когда ведущий шаг ещё не city (параллельно с чекером).
     user_text = last_user_text(state.get("messages") or [])
+    filled = fill_basic_profile(user_text, profile)
+    if filled:
+        profile = {**profile, **filled}
+
+    _head, step = _lead_from_progress(state, progress=progress, profile=profile)
+    ctx = context_from_state(state.get("conversation_context"))
+    profile_city = str(profile.get("city") or "").strip()
+    # Резолвер нужен по шагу либо когда в профиле уже есть город без слага
+    # (реплика закрыла name и назвала город в одном ходе — параллельно с чекером).
+    needs_lookup = _step_needs_lookup(step, state) or bool(
+        profile_city and not (state.get("city_slug") or ctx.city_slug)
+    )
+    if not needs_lookup:
+        # Нечего искать — не ждём справочник и не зовём контекстер.
+        stage("lookup", "нечего искать, пропуск", "done")
+        return {}
+
+    needs = needs_of(step)
     facts: dict[str, Any] = {}
     journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
     turn_calls: list[dict[str, Any]] = []
@@ -407,7 +482,6 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     allow_filler = settings.lookup_fillers_enabled and not (
         last_filler_turn > 0 and last_filler_turn == turn - 1
     )
-    ctx = context_from_state(state.get("conversation_context"))
 
     def _speak_filler(phrase: str | None) -> None:
         nonlocal spoken_filler
@@ -424,7 +498,6 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     # Город: резолвер только при пустом слаге и поводе — ведущий шаг
     # собирает city (ищем в реплике) либо в профиле уже есть имя (ищем по нему).
     fills_city = bool(step and step.fills and "city" in step.fills)
-    profile_city = str(profile.get("city") or "").strip()
     if fills_city and user_text:
         search_text: str | None = user_text
     elif profile_city:
