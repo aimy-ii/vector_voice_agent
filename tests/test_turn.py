@@ -180,7 +180,18 @@ async def test_перечень_городов_не_в_промпте_ни_на_
     assert "city_choices" not in model["messages"][0].content
 
 
-async def test_дословный_practice_с_проверкой(spoken, store, checker, kb, resolvers, model, use_v2):
+async def test_шаг_с_образцом_идёт_через_модель(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Шаг practice с образцом — respond, модель зовётся, образец в промпте."""
+    from graph.prompts import _SAMPLE_PREFIX
+
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Практику подбираем под ваш график. Как вам в целом такой подход?",
+    }
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Да, понятно")],
@@ -211,15 +222,25 @@ async def test_дословный_practice_с_проверкой(spoken, store, 
             },
         }
     )
-    текст = "".join(spoken)
     assert state["current_step"] == "practice"
-    assert "Как вам в целом такой подход" in текст
-    assert model["calls"] == 0
+    assert state["route"] == "respond"
+    assert model["calls"] == 1
+    prompt = model["messages"][0].content
+    assert _SAMPLE_PREFIX in prompt
+    assert "Практические занятия" in prompt
+    assert "".join(spoken) == model["result"]["reply"]
 
 
-async def test_дословный_price_задаёт_следующий_вопрос(
-    spoken, store, checker, kb, resolvers, model, use_v2
-):
+async def test_шаг_price_lookup_затем_respond(spoken, store, checker, kb, resolvers, model, use_v2):
+    """Шаг price нуждается в справочнике — lookup → respond, факт и образец в промпте."""
+    from graph.prompts import _SAMPLE_PREFIX
+
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Стоимость — от 43900 рублей. Оплатить можно частями или целиком.",
+    }
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Да")],
@@ -256,59 +277,25 @@ async def test_дословный_price_задаёт_следующий_вопр
             },
         }
     )
+    assert state["current_step"] == "price"
+    assert state["route"] == "lookup"
+    assert model["calls"] == 1
+    prompt = model["messages"][0].content
+    assert _SAMPLE_PREFIX in prompt
+    assert "43900" in prompt
     текст = "".join(spoken)
-    assert state["current_step"] == "price"
-    assert model["calls"] == 0
     assert "43900" in текст or "стоимость" in текст.lower()
-    assert "частями" in текст.lower() or "целиком" in текст.lower() or "оплатить" in текст.lower()
 
 
-async def test_дословный_пустая_подстановка_не_произносится(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+async def test_маршрут_respond_без_справочника(
+    spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """Пустая подстановка — в эфир ничего, шаг не закрыт, follow-up не выталкивался."""
-    monkeypatch.setattr(nodes_module, "fill_facts", lambda text, facts: "")
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Да")],
-            "city_slug": "perm",
-            "city_name": "Пермь",
-            "branch_slug": "perm_chernyshevskogo",
-            "profile": {
-                "city": "Пермь",
-                "caller_name": "Мария",
-                "student_is_caller": "да",
-                "experience": "впервые",
-                "transmission": "механика",
-                "theory_format": "очно",
-                "branch": "perm_chernyshevskogo",
-            },
-            "step_status": {
-                "name": "closed",
-                "city": "closed",
-                "who_studies": "closed",
-                "experience": "closed",
-                "transmission": "closed",
-                "terms": "closed",
-                "theory_format": "closed",
-                "included": "closed",
-                "practice": "closed",
-                "branch": "closed",
-            },
-            "conversation_context": {
-                "static_text": "Город: Пермь",
-                "city_slug": "perm",
-                "city_name": "Пермь",
-                "branch_slug": "perm_chernyshevskogo",
-                "frozen": True,
-            },
-        }
-    )
-    assert state["current_step"] == "price"
-    assert "".join(spoken).strip() == ""
-    assert state.get("step_status", {}).get("price") != "closed"
-    assert state.get("pending_step") is None
-    assert model["calls"] == 0
+    """Шаг без needs и без сбора city/branch — сразу respond."""
+    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert state["current_step"] == "name"
+    assert state["route"] == "respond"
+    assert model["calls"] == 1
 
 
 async def test_генератор_плюсует_счётчик_в_момент_взятия(
@@ -651,15 +638,17 @@ async def test_заглушка_не_два_хода_подряд(
     assert not state.get("spoken_filler")
 
 
-async def test_дословный_блок_один_раз_без_пересказа(
+async def test_образец_в_промпте_склейки_мимо_модели_нет(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """Реплика по существу → модель коротко, затем один дословный блок без пересказа."""
+    """Шаг terms: образец в промпте, в эфир только реплика модели."""
+    from graph.prompts import _SAMPLE_PREFIX
+
     model["result"] = {
         "understood": [],
         "aside_id": None,
         "resume_step": True,
-        "reply": "Хорошо.",
+        "reply": "Обучение занимает два с половиной месяца. Как вам такой срок?",
     }
     state = await graph.ainvoke(
         {
@@ -688,17 +677,24 @@ async def test_дословный_блок_один_раз_без_переска
         }
     )
     assert state["current_step"] == "terms"
-    assert state["skip_model"] is False
+    assert state["route"] == "lookup"
     assert model["calls"] == 1
-    текст = "".join(spoken)
-    assert текст.count("Как вам") <= 1
-    assert "два с половиной месяца" in текст or "Расскажу, как всё устроено" in текст
+    prompt = model["messages"][0].content
+    assert _SAMPLE_PREFIX in prompt
+    assert "два с половиной месяца" in prompt or "Расскажу, как всё устроено" in prompt
+    assert "".join(spoken) == model["result"]["reply"]
 
 
-async def test_plan_verbatim_подтверждение_пропускает_модель(
+async def test_подтверждение_на_шаге_образца_зовёт_модель(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """Дословный шаг + «да, конечно» → skip_model, модель не зовётся."""
+    """Подтверждение на шаге с образцом — модель всё равно генерит реплику."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Расскажу про сроки. Обучение — два с половиной месяца.",
+    }
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="да, конечно")],
@@ -726,15 +722,14 @@ async def test_plan_verbatim_подтверждение_пропускает_м�
         }
     )
     assert state["current_step"] == "terms"
-    assert state["skip_model"] is True
-    assert state["route"] in ("verbatim", "lookup")
-    assert model["calls"] == 0
+    assert state["route"] == "lookup"
+    assert model["calls"] == 1
 
 
-async def test_plan_verbatim_реплика_по_существу_зовёт_модель(
+async def test_реплика_по_существу_на_шаге_образца_зовёт_модель(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """Дословный шаг + реплика по существу → модель, не skip_model."""
+    """Шаг с образцом + реплика по существу → модель."""
     model["result"] = {
         "understood": [],
         "aside_id": None,
@@ -768,17 +763,45 @@ async def test_plan_verbatim_реплика_по_существу_зовёт_м�
         }
     )
     assert state["current_step"] == "terms"
-    assert state["skip_model"] is False
     assert model["calls"] == 1
+    assert state["route"] in ("lookup", "respond")
 
 
-async def test_повтор_дословного_блока_без_модели(
+async def test_счётчик_только_у_ведущего_висящие_не_тратят(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """Просьба повторить — в эфир прежний текст, модель молчит, счётчик тот же."""
-    block = (
-        "Расскажу, как всё устроено. Срок обучения на категорию B — всего два с половиной месяца."
+    """В шапке два висящих: плюс только ведущему, второй и свежий не растут."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="ну не знаю пока")],
+            "step_status": {"name": "pending", "city": "pending"},
+            "step_attempts": {"name": 1, "city": 1},
+            "step_taken_turn": {"name": 1, "city": 1},
+            "turn": 3,
+        }
     )
+    attempts = state.get("step_attempts") or {}
+    assert attempts.get("name") == 2
+    assert attempts.get("city") == 1
+    assert attempts.get("who_studies", 0) == 0
+
+
+async def test_просьба_повторить_идёт_через_модель(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Просьба повторить — обычный ход через модель, обхода нет."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Ещё раз: срок обучения — два с половиной месяца.",
+    }
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="повторите")],
@@ -807,8 +830,6 @@ async def test_повтор_дословного_блока_без_модели(
                 "transmission": 1,
                 "terms": 1,
             },
-            "last_verbatim_step": "terms",
-            "last_verbatim_text": block,
             "conversation_context": {
                 "static_text": "Город: Пермь",
                 "city_slug": "perm",
@@ -816,91 +837,20 @@ async def test_повтор_дословного_блока_без_модели(
             },
         }
     )
-    assert model["calls"] == 0
-    assert block in "".join(spoken)
-    assert state.get("step_attempts", {}).get("terms") == 1
-    assert state.get("step_status", {}).get("terms") != "closed"
-    assert state.get("repeat_verbatim") is False
+    assert model["calls"] == 1
+    assert state.get("step_attempts", {}).get("terms") == 2
+    assert "".join(spoken) == model["result"]["reply"]
 
 
-async def test_счётчик_только_у_ведущего_висящие_не_тратят(
+async def test_вопрос_на_шаге_образца_зовёт_модель(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """В шапке два висящих: плюс только ведущему, второй и свежий не растут."""
+    """Шаг с образцом + вопрос → модель отвечает."""
     model["result"] = {
         "understood": [],
         "aside_id": None,
         "resume_step": True,
-        "reply": "Как я могу к вам обращаться?",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="ну не знаю пока")],
-            "step_status": {"name": "pending", "city": "pending"},
-            "step_attempts": {"name": 1, "city": 1},
-            "step_taken_turn": {"name": 1, "city": 1},
-            "turn": 3,
-        }
-    )
-    attempts = state.get("step_attempts") or {}
-    assert attempts.get("name") == 2
-    assert attempts.get("city") == 1
-    assert attempts.get("who_studies", 0) == 0
-
-
-async def test_повтор_блока_счётчик_не_растит(spoken, store, checker, kb, resolvers, model, use_v2):
-    """Ход с повтором дословного блока — attempts ведущего шага без изменений."""
-    block = "Расскажу, как всё устроено."
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="ещё раз, пожалуйста")],
-            "city_slug": "perm",
-            "city_name": "Пермь",
-            "profile": {
-                "city": "Пермь",
-                "caller_name": "Мария",
-                "student_is_caller": "да",
-                "experience": "впервые",
-                "transmission": "механика",
-            },
-            "step_status": {
-                "name": "closed",
-                "city": "closed",
-                "who_studies": "closed",
-                "experience": "closed",
-                "transmission": "closed",
-                "terms": "pending",
-            },
-            "step_attempts": {
-                "name": 1,
-                "city": 1,
-                "who_studies": 1,
-                "experience": 1,
-                "transmission": 1,
-                "terms": 1,
-            },
-            "last_verbatim_step": "terms",
-            "last_verbatim_text": block,
-            "conversation_context": {
-                "static_text": "Город: Пермь",
-                "city_slug": "perm",
-                "city_name": "Пермь",
-            },
-        }
-    )
-    assert state.get("step_attempts", {}).get("terms") == 1
-    assert model["calls"] == 0
-
-
-async def test_plan_verbatim_с_вопросом_зовёт_модель(
-    spoken, store, checker, kb, resolvers, model, use_v2
-):
-    """Дословный шаг + вопрос → модель отвечает коротко, затем блок."""
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Сейчас расскажу.",
+        "reply": "Сейчас расскажу про сроки.",
     }
     state = await graph.ainvoke(
         {
@@ -929,15 +879,14 @@ async def test_plan_verbatim_с_вопросом_зовёт_модель(
         }
     )
     assert state["current_step"] == "terms"
-    assert state["skip_model"] is False
     assert model["calls"] == 1
-    assert "два с половиной месяца" in "".join(spoken) or "Расскажу" in "".join(spoken)
+    assert state["route"] != "verbatim"
 
 
-async def test_plan_verbatim_с_просьбой_зовёт_модель(
+async def test_просьба_рассказать_на_шаге_образца_зовёт_модель(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """Дословный шаг + просьба рассказать → модель, не skip_model."""
+    """Шаг с образцом + просьба рассказать → модель."""
     model["result"] = {
         "understood": [],
         "aside_id": None,
@@ -973,9 +922,23 @@ async def test_plan_verbatim_с_просьбой_зовёт_модель(
         }
     )
     assert state["current_step"] == "terms"
-    assert state["skip_model"] is False
     assert state["route"] != "verbatim"
     assert model["calls"] == 1
+
+
+async def test_граф_без_узла_verbatim_всегда_respond_commit():
+    """Топология: узла verbatim нет; после respond всегда commit."""
+    from graph.graph import build_graph
+
+    built = build_graph()
+    nodes = set(built.nodes)
+    assert "verbatim" not in nodes
+    assert {"ingest", "check", "plan", "lookup", "respond", "commit"} <= nodes
+
+    edges = built.edges
+    assert ("lookup", "respond") in edges
+    assert ("respond", "commit") in edges
+    assert not any(src == "verbatim" or tgt == "verbatim" for src, tgt in edges)
 
 
 async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(

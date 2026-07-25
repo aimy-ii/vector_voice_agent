@@ -54,7 +54,10 @@ def test_профиль_разделяет_роли(script):
     assert "student_name" in block
 
 
-def test_дословный_шаг_не_попадает_в_промпт(script):
+def test_шаг_с_образцом_попадает_в_промпт(script):
+    """Текст verbatim-шага — образец с пометкой, не готовая реплика мимо модели."""
+    from graph.prompts import _SAMPLE_PREFIX
+
     step = script.step("practice")
     messages = build_turn_messages(
         script=script,
@@ -65,27 +68,32 @@ def test_дословный_шаг_не_попадает_в_промпт(script)
         asides_done=[],
     )
     content = messages[0].content
-    assert step.text not in content
-    assert step.goal not in content
-    lowered = content.lower()
-    assert "дословн" not in lowered
-    assert "блок" not in lowered
-    assert "подводи разговор к завершению" not in lowered
-    assert "вопрос не задавай" in lowered or "вопрос не задавать" in lowered
+    assert _SAMPLE_PREFIX in content
+    filled = step.text or ""
+    assert filled in content
+    assert "Опорная формулировка (можно сказать своими словами)" not in content
+    assert "подводи разговор к завершению" not in content.lower()
 
 
-def test_цена_дословного_шага_не_в_промпте_генератора(script):
-    from graph.prompts import facts_for_generator
+def test_цена_образца_и_факт_в_промпте_генератора(script):
+    """Факт price_line и образец шага price уходят модели вместе."""
+    from graph.prompts import _SAMPLE_PREFIX
 
     step = script.step("price")
     facts = {"price_line": "Стоимость — от 43900 рублей.", "city": {"name": "Пермь"}}
-    cleaned = facts_for_generator(facts, [step])
-    assert "price_line" not in cleaned
-    block = step_block(step, {}, facts)
-    assert "от 43900" not in block
-    assert "{price_line}" not in block
-    assert step.goal not in block
-    assert step.text not in block
+    messages = build_turn_messages(
+        script=script,
+        steps=[step],
+        profile={},
+        facts=facts,
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "price_line" in content or "43900" in content
+    assert _SAMPLE_PREFIX in content
+    assert "от 43900" in content
+    assert step.goal in content
 
 
 def test_промпт_запрещает_восторги_и_разрешает_короткое_подтверждение(script):
@@ -131,7 +139,8 @@ def test_промпт_требует_заканчивать_ходом_к_соб
     assert "ходом к собеседнику" in messages[0].content.lower()
 
 
-def test_шапка_только_дословные_без_требования_вопроса(script):
+def test_шапка_с_образцом_тоже_требует_хода_к_собеседнику(script):
+    """Незакрытый вопрос в шапке — ask_for_move и для шага с образцом."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("terms")],
@@ -141,9 +150,29 @@ def test_шапка_только_дословные_без_требования_
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "ходом к собеседнику" not in content
-    assert "вопрос не задавай" in content
-    assert "не прощайся" in content or "не прощаться" in content
+    assert "ходом к собеседнику" in content
+    assert "сформулируй в этом ключе" in content
+
+
+def test_шапка_с_висящими_и_образцом_одним_промптом(script):
+    """Несколько шагов в шапке + образец — всё в одном системном сообщении."""
+    from graph.prompts import _SAMPLE_PREFIX
+
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city"), script.step("terms")],
+        profile={},
+        facts={"price_line": "срок два месяца"},
+        history=[],
+        asides_done=[],
+        attempts={"city": 1},
+    )
+    content = messages[0].content
+    assert "city" in content
+    assert "terms" in content
+    assert _SAMPLE_PREFIX in content
+    assert "Шапка скрипта" in content
+    assert content.count("Шаг:") >= 2
 
 
 def test_шапка_пуста_текст_завершения(script):

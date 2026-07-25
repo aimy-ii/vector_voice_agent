@@ -100,7 +100,6 @@ class CallState(TypedDict, total=False):
 
     facts: dict[str, Any]
     route: str | None
-    skip_model: bool
     spoken: list[str]
     spoken_filler: str | None
     fillers_used: list[str]
@@ -108,9 +107,6 @@ class CallState(TypedDict, total=False):
     branch_candidates: list[str]
     turn_result: dict[str, Any]
     call_finished: bool
-    last_verbatim_step: str | None
-    last_verbatim_text: str | None
-    repeat_verbatim: bool
     partial_reply: str
     last_checked_partial: str
 
@@ -143,7 +139,6 @@ def new_state_defaults() -> dict[str, Any]:
         "delivered_step": None,
         "facts": {},
         "route": None,
-        "skip_model": False,
         "spoken": [],
         "spoken_filler": None,
         "fillers_used": [],
@@ -151,9 +146,6 @@ def new_state_defaults() -> dict[str, Any]:
         "branch_candidates": [],
         "turn_result": {},
         "call_finished": False,
-        "last_verbatim_step": None,
-        "last_verbatim_text": None,
-        "repeat_verbatim": False,
         "partial_reply": "",
         "last_checked_partial": "",
     }

@@ -32,24 +32,8 @@ _NO_MECHANICS = (
     "полей и системы. Собеседник разговаривает с менеджером, а не с программой."
 )
 
-#: Текст шапки, когда в ней только дословные шаги (в описание не попадают).
-_VERBATIM_ONLY_HEAD = (
-    "Сейчас вести разговор по скрипту не нужно: ответь коротко только на то, "
-    "что сказал собеседник.\n"
-    "- Одно-два предложения.\n"
-    "- Вопрос не задавай.\n"
-    "- Не прощайся.\n"
-    "- Тему не меняй.\n"
-    "- Разговор дальше не веди."
-)
-
-
-def head_is_verbatim_only(steps: Sequence[Step]) -> bool:
-    """В шапке только дословные шаги — короткая реакция, без ведения скрипта.
-
-    Тем же условием включается короткий потолок токенов в ``respond_node``.
-    """
-    return bool(steps) and all(step.verbatim for step in steps)
+#: Пометка к тексту-образцу шага с флагом verbatim.
+_SAMPLE_PREFIX = "Сформулируй в этом ключе, цифры не меняй:"
 
 
 def fill_facts(text: str, facts: Mapping[str, Any]) -> str:
@@ -75,7 +59,7 @@ def naturalness_block(*, ask_for_move: bool) -> str:
 
     Args:
         ask_for_move: True — требовать заканчивать вопросом или предложением
-            (есть невербатимный шаг в шапке). False — этот пункт не включать.
+            (в шапке есть незакрытый вопрос). False — этот пункт не включать.
 
     Returns:
         Текстовый блок для системного сообщения.
@@ -180,10 +164,10 @@ def _describe_step(
     heading: str,
     attempts: int = 0,
 ) -> list[str]:
-    """Собирает строки описания одного невербатимного шага для промпта.
+    """Собирает строки описания одного шага для промпта.
 
     Args:
-        step: шаг скрипта (не дословный).
+        step: шаг скрипта.
         profile: профиль для ветвления текста.
         facts: факты хода для подстановки.
         heading: заголовок строки («Шаг»).
@@ -197,7 +181,11 @@ def _describe_step(
     text = render_step_text(step, profile)
     if text:
         filled = fill_facts(text, facts)
-        lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
+        if filled:
+            if step.verbatim:
+                lines.append(f"{_SAMPLE_PREFIX}\n{filled}")
+            else:
+                lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
     if step.check_question:
         lines.append(f"Проверочный вопрос в конце: {step.check_question}")
     if step.options:
@@ -216,14 +204,10 @@ def steps_block(
     *,
     attempts: Mapping[str, int],
 ) -> str:
-    """Описывает шапку: уже заданные и один новый (без дословных шагов).
-
-    Три режима: есть невербатимные шаги — их описание; в шапке только
-    дословные — короткая реакция на реплику; шапка пуста — завершение
-    разговора.
+    """Описывает шапку: уже заданные и один новый.
 
     Args:
-        steps: шаги шапки (включая дословные — они отфильтруются).
+        steps: шаги шапки.
         profile: профиль.
         facts: факты хода (без перечня городов).
         attempts: счётчики попыток.
@@ -237,16 +221,12 @@ def steps_block(
             "подводи разговор к завершению."
         )
 
-    if head_is_verbatim_only(steps):
-        return _VERBATIM_ONLY_HEAD
-
-    speakable = [step for step in steps if not step.verbatim]
     lines = [
         "Шапка скрипта на этот ход. Новый вопрос — только один; уже "
         "спрашивавшиеся отрабатывай, когда уместно по разговору, не затыкай "
         "ими каждую реплику."
     ]
-    for step in speakable:
+    for step in steps:
         lines.append("")
         lines.extend(
             _describe_step(
@@ -315,31 +295,6 @@ def facts_block(facts: Mapping[str, Any]) -> str:
         "Факты этого хода, которыми можно оперировать. Называть можно только "
         f"их; чего здесь нет — того не выдумывай:\n{body}"
     )
-
-
-def facts_for_generator(
-    facts: Mapping[str, Any],
-    steps: Sequence[Step],
-) -> dict[str, Any]:
-    """Факты для генератора: без тех, что нужны только дословным шагам.
-
-    Args:
-        facts: факты хода.
-        steps: шапка шагов.
-
-    Returns:
-        Копия фактов без плейсхолдеров дословных блоков (например price_line).
-    """
-    payload = dict(facts)
-    # Дословные шаги факты в промпт не получают: подстановку делает писатель.
-    if any(step.verbatim for step in steps):
-        for step in steps:
-            if not step.verbatim:
-                continue
-            text = step.text or ""
-            for key in _PLACEHOLDER.findall(text):
-                payload.pop(key, None)
-    return payload
 
 
 def filler_spoken_block(spoken_filler: str | None) -> str:
@@ -445,7 +400,7 @@ def build_turn_messages(
     else:
         head = []
 
-    ask_for_move = bool(head) and not head_is_verbatim_only(head)
+    ask_for_move = bool(head)
     blocks: list[str] = [
         persona_block(script),
         naturalness_block(ask_for_move=ask_for_move),
@@ -456,7 +411,7 @@ def build_turn_messages(
         blocks.append(ctx)
     blocks.append(profile_block(script, profile))
 
-    facts_text = facts_block(facts_for_generator(facts, head))
+    facts_text = facts_block(facts)
     if facts_text:
         blocks.append(facts_text)
 

@@ -95,7 +95,7 @@ class Step(BaseModel):
     check_question: str | None = None
     #: Альтернативный вопрос как приём: «механика или автомат?».
     options: list[str] = Field(default_factory=list)
-    #: Текст произносится дословно и моделью не переформулируется.
+    #: Шаг несёт готовый текст-образец реплики; подаётся модели как пример формулировки.
     verbatim: bool = False
 
 

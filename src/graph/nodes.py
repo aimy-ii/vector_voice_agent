@@ -2,9 +2,8 @@
 
 ::
 
-    ingest → check → plan ─┬─► verbatim ──────────────► commit
-                           ├─► lookup ──► respond ──┬─► verbatim ──► commit
-                           └─► respond ─────────────┴─► commit
+    ingest → check → plan ─┬─► lookup ──► respond ──► commit
+                           └─► respond ─────────────► commit
 
 Чекер — единственная точка закрытия шагов; генератор плюсует счётчик ведущему
 шагу в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
@@ -13,7 +12,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping
+from typing import Any
 
 from langchain_core.messages import AIMessage
 from langgraph.config import get_config
@@ -25,8 +24,6 @@ from graph.context import context_from_state, merge_static
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
-    _nothing_to_say,
-    is_repeat_request,
     last_agent_text,
     last_user_text,
     strip_system,
@@ -39,7 +36,7 @@ from graph.log_fmt import (
 )
 from graph.names import given_name
 from graph.progress import say, stage
-from graph.prompts import build_turn_messages, fill_facts, head_is_verbatim_only
+from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import BranchResolver, CityResolver, resolve_branch, resolve_city
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
@@ -52,7 +49,6 @@ from script.planner import (
     answered_inform_check,
     client_asks_inform,
     peek_next_step,
-    render_step_text,
     script_head,
 )
 from script.price import price_line
@@ -67,7 +63,6 @@ from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_f
 
 log = logging.getLogger(__name__)
 
-ROUTE_VERBATIM = "verbatim"
 ROUTE_LOOKUP = "lookup"
 ROUTE_RESPOND = "respond"
 
@@ -236,25 +231,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     turn = int(state.get("turn") or 0)
     user_text = last_user_text(state.get("messages") or [])
 
-    # Просьба повторить: выталкиваем прошлый блок, счётчик и статус не трогаем.
-    if is_repeat_request(user_text) and state.get("last_verbatim_text"):
-        step_id = state.get("last_verbatim_step")
-        stage(
-            "plan",
-            f"повтор дословного блока {step_id or '—'}",
-            "done",
-            step=step_id,
-            route=ROUTE_VERBATIM,
-        )
-        return {
-            "current_step": step_id,
-            "next_step": state.get("next_step"),
-            "head_steps": list(state.get("head_steps") or []),
-            "route": ROUTE_VERBATIM,
-            "skip_model": True,
-            "repeat_verbatim": True,
-        }
-
     inform_reason = client_asks_inform(user_text) or answered_inform_check(
         script,
         status=progress.status,
@@ -276,8 +252,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         if any(s.id == resume.id for s in head):
             step = resume
 
-    # Счётчик — только ведущему шагу хода. Висящие в шапке попытку не тратят;
-    # повтор блока уже вышел выше без инкремента.
+    # Счётчик — только ведущему шагу хода. Висящие в шапке попытку не тратят.
     if step is not None:
         prev = int(progress.attempts.get(step.id, 0))
         progress.attempts[step.id] = prev + 1
@@ -286,8 +261,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         progress.status.setdefault(step.id, "pending")
 
     progress_patch = await _save_progress(progress)
-
-    skip_model = bool(step and step.verbatim and _nothing_to_say(user_text))
 
     if step is None:
         route = ROUTE_RESPOND
@@ -300,8 +273,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         and not state.get("branch_slug")
     ):
         route = ROUTE_LOOKUP
-    elif skip_model:
-        route = ROUTE_VERBATIM
     else:
         route = ROUTE_RESPOND
 
@@ -339,8 +310,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
         "route": route,
-        "skip_model": skip_model,
-        "repeat_verbatim": False,
     }
 
 
@@ -570,14 +539,13 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     system_len = len(messages[0].content) if messages else 0
     stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
-    max_tokens = settings.llm_max_tokens_short if head_is_verbatim_only(head) else None
 
     def _on_delta(delta: str) -> None:
         spoken.append(delta)
         say(delta)
 
     try:
-        async with get_llm(max_tokens=max_tokens) as llm:
+        async with get_llm() as llm:
             raw = await astream_structured(
                 llm,
                 messages,
@@ -614,90 +582,6 @@ def _safe_result(raw: dict[str, Any]) -> TurnResult:
         log.warning("Ответ модели не прошёл валидацию: %s", exc)
         reply = raw.get("reply") if isinstance(raw, dict) else ""
         return TurnResult(reply=reply if isinstance(reply, str) else "")
-
-
-async def verbatim_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Выталкивает дословный блок скрипта мимо модели."""
-    spoken = list(state.get("spoken") or [])
-
-    # Повтор прошлого блока по просьбе клиента — без пересчёта и follow-up.
-    if state.get("repeat_verbatim") and state.get("last_verbatim_text"):
-        block = str(state["last_verbatim_text"])
-        prefix = " " if spoken else ""
-        say(prefix + block)
-        stage(
-            "verbatim",
-            f"повтор блока {state.get('last_verbatim_step') or '—'}",
-            "done",
-            step=state.get("last_verbatim_step"),
-        )
-        return {
-            "spoken": spoken + [prefix + block],
-            "repeat_verbatim": False,
-        }
-
-    step = _current_step(state)
-    if step is None:
-        return {}
-
-    facts = dict(state.get("facts") or {})
-    profile = dict(state.get("profile") or {})
-    text = render_step_text(step, profile)
-    if not text:
-        return {}
-
-    filled = fill_facts(text, facts).strip()
-    if not filled:
-        # Плейсхолдер без факта → пустота; не произносим, не закрываем, не follow-up.
-        stage(
-            "verbatim",
-            f"пустая подстановка шага {step.id}, блок не произнесён",
-            "done",
-            step=step.id,
-        )
-        return {}
-
-    prefix = " " if spoken else ""
-    say(prefix + filled)
-    chunks = [prefix + filled]
-    block_parts = [filled]
-
-    if step.kind == "inform_check" and step.check_question:
-        say(" " + step.check_question)
-        chunks.append(" " + step.check_question)
-        block_parts.append(step.check_question)
-    elif not step.check_question:
-        follow = _verbatim_follow_up(state, profile=profile, facts=facts)
-        if follow:
-            say(" " + follow)
-            chunks.append(" " + follow)
-
-    stage("verbatim", f"дословный блок шага {step.id}", "done", step=step.id)
-    return {
-        "spoken": spoken + chunks,
-        "last_verbatim_step": step.id,
-        "last_verbatim_text": " ".join(block_parts),
-        "repeat_verbatim": False,
-    }
-
-
-def _verbatim_follow_up(
-    state: CallState,
-    *,
-    profile: Mapping[str, str],
-    facts: Mapping[str, Any],
-) -> str | None:
-    """Текст следующего шага после inform без проверочного вопроса."""
-    next_id = state.get("next_step")
-    if not next_id:
-        return None
-    nxt = _script_of(state).steps.get(next_id)
-    if nxt is None or nxt.kind not in ("question", "action"):
-        return None
-    text = render_step_text(nxt, profile)
-    if not text:
-        return None
-    return fill_facts(text, facts)
 
 
 async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
