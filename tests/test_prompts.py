@@ -106,17 +106,21 @@ def test_промпт_запрещает_восторги_и_разрешает_
     assert "молча учесть" in lowered
 
 
-def test_промпт_требует_полный_проверочный_вопрос(script):
-    """check_question доходит явным полем; правило запрещает обрубки."""
+def test_промпт_требует_живой_проверочный_вопрос(script):
+    """check_question — образец смысла; правило требует живую формулировку."""
     step = script.step("practice")
     assert step.check_question
     block = steps_block([step], {}, {}, attempts={})
-    assert "Проверочный вопрос (обязателен" in block
+    assert "Образец смысла проверки" in block
     assert step.check_question in block
     assert f"«{step.check_question}»" in block
+    assert "не зачитывай дословно" in block.lower()
     natural = naturalness_block(ask_for_move=True).lower()
-    assert "проверочный вопрос" in natural
-    assert "рассказывать про практику" in natural
+    assert "своими словами" in natural
+    assert "каждый раз по-разному" in natural
+    assert "канцелярская пластинка" in natural
+    assert "задай его целиком" not in natural
+    assert "не сокращай" not in natural
     messages = build_turn_messages(
         script=script,
         steps=[step],
@@ -127,7 +131,9 @@ def test_промпт_требует_полный_проверочный_воп�
     )
     content = messages[0].content
     assert step.check_question in content
-    assert "не сокращай" in content.lower()
+    assert "не зачитывай" in content.lower()
+    assert "не сокращай" not in content.lower()
+    assert "задай целиком" not in content.lower()
 
 
 def test_обычный_шаг_разрешает_свои_слова(script):
