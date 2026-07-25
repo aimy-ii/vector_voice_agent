@@ -227,7 +227,7 @@ async def test_шаг_с_образцом_идёт_через_модель(
     assert model["calls"] == 1
     prompt = model["messages"][0].content
     assert _SAMPLE_PREFIX in prompt
-    assert "Практические занятия" in prompt
+    assert "Практика по вашему графику" in prompt
     assert "".join(spoken) == model["result"]["reply"]
 
 
