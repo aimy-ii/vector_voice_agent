@@ -103,3 +103,67 @@ def test_проверочный_вопрос_обязателен_для_инф�
             step["check_question"] = None
     with pytest.raises(ScriptError, match="проверочного вопроса"):
         build_script(RawScript.model_validate(payload))
+
+
+def test_step_разбирает_новые_поля_и_дефолты():
+    """Step принимает why/examples/avoid и даёт пустые значения без них."""
+    from script.models import Step
+
+    bare = Step.model_validate({"id": "x", "kind": "question", "goal": "узнать город"})
+    assert bare.why == ""
+    assert bare.examples == []
+    assert bare.avoid == ""
+
+    full = Step.model_validate(
+        {
+            "id": "y",
+            "kind": "inform",
+            "goal": "рассказать",
+            "why": "зачем",
+            "examples": ["фраза один", "фраза два"],
+            "avoid": "нельзя так",
+            "text": "готово",
+        }
+    )
+    assert full.why == "зачем"
+    assert full.examples == ["фраза один", "фраза два"]
+    assert full.avoid == "нельзя так"
+
+
+def test_inform_только_с_examples_собирается(raw_script):
+    """Шаг inform проходит проверку, если есть examples без text и branches."""
+    payload = copy.deepcopy(raw_script.model_dump())
+    for step in payload["steps"]:
+        if step["id"] == "terms":
+            step["text"] = None
+            step["branches"] = None
+            step["examples"] = ["Срок обучения — около двух месяцев."]
+            step["verbatim"] = False
+    compiled = build_script(RawScript.model_validate(payload))
+    assert compiled.steps["terms"].examples == ["Срок обучения — около двух месяцев."]
+    assert compiled.steps["terms"].text is None
+
+
+def test_inform_без_text_branches_examples_падает(raw_script):
+    """Шаг inform без text, branches и examples — ошибка сборки."""
+    payload = copy.deepcopy(raw_script.model_dump())
+    for step in payload["steps"]:
+        if step["id"] == "terms":
+            step["text"] = None
+            step["branches"] = None
+            step["examples"] = []
+            step["verbatim"] = False
+    with pytest.raises(ScriptError, match="информирования"):
+        build_script(RawScript.model_validate(payload))
+
+
+def test_objection_разбирает_why():
+    """Objection принимает why и даёт пустую строку по умолчанию."""
+    from script.models import Objection
+
+    bare = Objection.model_validate({"id": "think", "triggers": ["подумаю"], "text": "Хорошо."})
+    assert bare.why == ""
+    full = Objection.model_validate(
+        {"id": "think", "triggers": ["подумаю"], "text": "Хорошо.", "why": "не давить"}
+    )
+    assert full.why == "не давить"

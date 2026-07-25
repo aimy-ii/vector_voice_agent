@@ -13,7 +13,7 @@ from script.source import JsonScriptSource, ScriptRegistry
 
 def test_последняя_версия_берётся_без_указания(data_dir):
     raw = JsonScriptSource(data_dir).fetch("vector_ru", None)
-    assert raw.version == "2"
+    assert raw.version == "3"
 
 
 def test_точная_версия_v1_поднимается(data_dir):
@@ -27,6 +27,11 @@ def test_точная_версия_v2_поднимается(data_dir):
     assert raw.version == "2"
 
 
+def test_точная_версия_v3_поднимается(data_dir):
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "3")
+    assert raw.version == "3"
+
+
 def test_v1_и_v2_обе_собираются(raw_script, raw_script_v1):
     v2 = build_script(raw_script)
     v1 = build_script(raw_script_v1)
@@ -34,6 +39,31 @@ def test_v1_и_v2_обе_собираются(raw_script, raw_script_v1):
     assert v1.version == "1"
     assert "practice" in v2.steps
     assert "presentation" in v1.steps
+
+
+def test_v3_собирается_с_why_и_avoid(data_dir):
+    """Скрипт v3 собирается; у каждого шага непустые why и avoid."""
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "3")
+    compiled = build_script(raw)
+    assert compiled.version == "3"
+    assert len(compiled.steps) == 21
+    for step in compiled.steps.values():
+        assert step.why.strip(), step.id
+        assert step.avoid.strip(), step.id
+
+
+def test_лишние_persona_и_rules_игнорируются(data_dir):
+    """v1 и v2 содержат persona/rules — разбор не падает, полей в модели нет."""
+    from script.models import RawScript
+
+    assert "persona" not in RawScript.model_fields
+    assert "rules" not in RawScript.model_fields
+    for version in ("1", "2"):
+        raw = JsonScriptSource(data_dir).fetch("vector_ru", version)
+        assert not hasattr(raw, "persona") or "persona" not in raw.model_dump()
+        assert "persona" not in raw.model_dump()
+        assert "rules" not in raw.model_dump()
+        build_script(raw)
 
 
 def test_несуществующая_версия_падает_с_перечнем(data_dir):

@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Mapping
 
 from script.models import Help, Objection, ProfileField, RawScript, ScriptParams, Step
 
@@ -34,9 +34,7 @@ class CompiledScript:
 
     id: str
     version: str
-    persona: Any
     opening_line: str
-    rules: tuple[str, ...]
     params: ScriptParams
     steps: Mapping[str, Step]
     #: Порядок объявления — тай-брейк при равном приоритете.
@@ -126,7 +124,7 @@ def _check_references(raw: RawScript) -> None:
 def _check_texts(raw: RawScript) -> None:
     """Проверяет, что у дословных блоков и информирования есть что произнести."""
     for step in raw.steps:
-        has_text = bool(step.text) or step.branches is not None
+        has_text = bool(step.text) or step.branches is not None or bool(step.examples)
         if step.verbatim and not has_text:
             raise ScriptError(f"Дословный шаг {step.id!r} без текста")
         if step.kind in ("inform", "inform_check") and not has_text:
@@ -200,9 +198,7 @@ def build_script(raw: RawScript) -> CompiledScript:
     return CompiledScript(
         id=raw.id,
         version=raw.version,
-        persona=raw.persona,
         opening_line=raw.opening_line,
-        rules=tuple(raw.rules),
         params=raw.params,
         steps={s.id: s for s in raw.steps},
         step_order=tuple(s.id for s in raw.steps),

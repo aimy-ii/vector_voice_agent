@@ -70,8 +70,8 @@ def spoken(monkeypatch) -> list[str]:
 
 @pytest.fixture()
 def use_v2(monkeypatch) -> None:
-    """Локальный .env может держать SCRIPT_VERSION=1 для идущих звонков."""
-    monkeypatch.setattr(nodes_module.settings, "script_version", None)
+    """Ход-тесты идут на v2; .env и «последняя» не должны подменять версию."""
+    monkeypatch.setattr(nodes_module.settings, "script_version", "2")
 
 
 @pytest.fixture()
@@ -576,7 +576,7 @@ async def test_пустая_версия_из_env_берёт_последнюю(
     model["result"] = {"understood": [], "reply": "Слушаю."}
     state = await graph.ainvoke({"messages": [{"role": "human", "content": "Здравствуйте"}]})
     assert nodes_module.settings.script_version is None
-    assert state["script_version"] == "2"
+    assert state["script_version"] == "3"
 
 
 async def test_заглушка_города_без_модели_и_видна_генератору(

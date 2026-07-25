@@ -33,15 +33,6 @@ StepKind = Literal["question", "inform", "inform_check", "action"]
 NeedKind = Literal["city_meta", "branches", "branch_meta", "price"]
 
 
-class Persona(BaseModel):
-    """Кого отыгрывает бот."""
-
-    agent_name: str
-    company: str
-    role: str
-    tone: str
-
-
 class ProfileField(BaseModel):
     """Поле профиля, которое собирается за разговор.
 
@@ -87,8 +78,14 @@ class Step(BaseModel):
 
     #: Задача шага человеческим языком — уходит в промпт.
     goal: str = ""
+    #: Зачем шаг нужен в разговоре; помогает модели выбрать акцент.
+    why: str = ""
     #: Готовый текст (для `inform` и дословных блоков).
     text: str | None = None
+    #: Образцы формулировок: форма фразы, не зачитывать дословно.
+    examples: list[str] = Field(default_factory=list)
+    #: Что на шаге делать нельзя, включая поведение при отсутствии данных.
+    avoid: str = ""
     #: Ветки текста по значению поля профиля.
     branches: StepBranches | None = None
     #: Проверочный вопрос для `inform_check`.
@@ -122,6 +119,8 @@ class Objection(BaseModel):
     id: str
     triggers: list[str] = Field(default_factory=list)
     text: str
+    #: Зачем возражение нужно в разговоре; помогает модели выбрать акцент.
+    why: str = ""
     #: Что выставить в профиле при срабатывании.
     sets: dict[str, str] = Field(default_factory=dict)
 
@@ -160,13 +159,17 @@ class ScriptParams(BaseModel):
 
 
 class RawScript(BaseModel):
-    """Скрипт разговора как он лежит в источнике."""
+    """Скрипт разговора как он лежит в источнике.
+
+    Персона и правила речи живут в настройках агента, не в скрипте.
+    Лишние ключи вроде ``persona`` / ``rules`` из v1–v2 молча игнорируются.
+    """
+
+    model_config = {"extra": "ignore"}
 
     id: str
     version: str
-    persona: Persona
     opening_line: str = ""
-    rules: list[str] = Field(default_factory=list)
     profile_fields: list[ProfileField] = Field(default_factory=list)
     steps: list[Step] = Field(default_factory=list)
     helps: list[Help] = Field(default_factory=list)
