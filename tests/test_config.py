@@ -100,3 +100,8 @@ def test_lookup_fillers_выключены_по_умолчанию():
 
 def test_llm_max_tokens_short_есть():
     assert Settings.model_fields["llm_max_tokens_short"].default == 200
+
+
+def test_pending_steps_soft_cap_дефолт_и_алиас():
+    assert Settings.model_fields["pending_steps_soft_cap"].default == 4
+    assert Settings(pending_steps_soft_cap=3).pending_steps_soft_cap == 3

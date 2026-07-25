@@ -274,7 +274,7 @@ async def check_pass(
             closures.append((step.id, "счётчик"))
 
     # 1b. question: fills уже в профиле (с прошлого commit) — закрываем кодом,
-    # иначе after-зависимости не откроются, а should_skip только прячет шаг.
+    # иначе after-зависимости не откроются.
     for step_id in script.step_order:
         step = script.step(step_id)
         if is_closed(updated.status.get(step.id)):

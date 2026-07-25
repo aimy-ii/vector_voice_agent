@@ -244,6 +244,7 @@ async def test_закрытия_служебного_видны_в_шапке(sc
         status=updated.status,
         attempts=updated.attempts,
         profile=profile,
+        pending_soft_cap=4,
     )
     assert all(step.id != "name" for step in head)
 

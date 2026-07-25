@@ -267,6 +267,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         attempts=progress.attempts,
         profile=profile,
         inform_reason=inform_reason,
+        pending_soft_cap=settings.pending_steps_soft_cap,
     )
 
     step = head[0] if head else None
@@ -312,6 +313,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
             profile=profile,
             attempts=progress.attempts,
             inform_reason=inform_reason,
+            pending_soft_cap=settings.pending_steps_soft_cap,
         )
         if step is not None
         else None
@@ -747,7 +749,6 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     all_closed = all(
         progress.status.get(step_id) == "closed" or step_id not in progress.status
         for step_id in script.step_order
-        if not _should_ignore_for_finish(script, step_id, profile)
     )
     # Реалистичнее: нет доступных шагов в шапке.
     remaining = script_head(
@@ -755,6 +756,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         status=progress.status,
         attempts=progress.attempts,
         profile=profile,
+        pending_soft_cap=settings.pending_steps_soft_cap,
     )
     finished = not remaining and (bool(profile.get("outcome")) or all_closed or step is None)
 
@@ -794,14 +796,3 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         profile_keys=sorted(profile),
     )
     return patch
-
-
-def _should_ignore_for_finish(
-    script: CompiledScript,
-    step_id: str,
-    profile: Mapping[str, str],
-) -> bool:
-    """Шаг отсеян пропуском — для завершения звонка не ждём его закрытия."""
-    from script.planner import should_skip
-
-    return should_skip(script.step(step_id), profile)

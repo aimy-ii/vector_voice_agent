@@ -6,8 +6,7 @@
 
 Статусов два: ``pending`` (ждёт отработки) и ``closed`` (закрыт). Заданность
 говорит счётчик: ноль — не спрашивали, больше нуля — вопрос уходил в
-генерацию. Пропуск по признаку статусом не помечается: шаг просто не
-попадает в шапку при чтении.
+генерацию.
 """
 
 from __future__ import annotations
@@ -98,33 +97,6 @@ def profile_has(profile: Mapping[str, str], key: str) -> bool:
     return bool(value and str(value).strip())
 
 
-def should_skip(step: Step, profile: Mapping[str, str]) -> bool:
-    """Сработало ли условие пропуска шага.
-
-    Такой шаг не попадает в шапку: отдельного статуса «пропущен» нет.
-
-    Args:
-        step: описание шага.
-        profile: собранный профиль.
-
-    Returns:
-        True, если шаг нужно отсеять при чтении скрипта.
-    """
-    if step.fills and all(profile_has(profile, key) for key in step.fills):
-        return True
-
-    rule = step.skip_when
-    if rule is None:
-        return False
-    if rule.filled and all(profile_has(profile, key) for key in rule.filled):
-        return True
-    for key, values in rule.equals.items():
-        current = str(profile.get(key, "")).strip().lower()
-        if current and current in {v.strip().lower() for v in values}:
-            return True
-    return False
-
-
 def is_available(
     step: Step,
     *,
@@ -142,8 +114,6 @@ def is_available(
         True, если шаг не закрыт и все его условия выполнены.
     """
     if is_closed(status.get(step.id)):
-        return False
-    if should_skip(step, profile):
         return False
     if not all(is_closed(status.get(dep)) for dep in step.after):
         return False
@@ -244,6 +214,7 @@ def script_head(
     attempts: Mapping[str, int],
     profile: Mapping[str, str],
     inform_reason: bool = False,
+    pending_soft_cap: int,
 ) -> list[Step]:
     """Шапка для генератора: все уже заданные и один новый с верхушки.
 
@@ -251,12 +222,16 @@ def script_head(
     спросил сам, ответил на проверочный вопрос предыдущего блока, либо
     вопросов среди доступных больше нет. Иначе ждёт, берём вопрос.
 
+    Если висящих уже ``pending_soft_cap`` или больше, новый шаг с верхушки
+    в этот ход не берём — генератор дорабатывает висящее.
+
     Args:
         script: скомпилированный скрипт.
         status: статусы шагов.
         attempts: счётчики попыток.
         profile: собранный профиль.
         inform_reason: внешний повод (вопрос клиента или ответ на проверку).
+        pending_soft_cap: потолок висящих, при котором fresh не добираем.
 
     Returns:
         Список шагов: сначала со счётчиком больше нуля, затем один с нулём.
@@ -275,6 +250,9 @@ def script_head(
             continue
         if fresh is not None:
             continue
+        # Висящих уже потолок — новый шаг не добираем, дорабатываем висящее.
+        if len(asked) >= pending_soft_cap:
+            continue
         if step.kind in _INFORM_KINDS and not allow_inform:
             continue
         fresh = step
@@ -292,6 +270,7 @@ def pick_step(
     resume: str | None = None,
     attempts: Mapping[str, int] | None = None,
     inform_reason: bool = False,
+    pending_soft_cap: int,
 ) -> Step | None:
     """Выбирает ведущий шаг хода (первый из шапки или resume).
 
@@ -302,6 +281,7 @@ def pick_step(
         resume: шаг, на который надо вернуться после отработки вопроса.
         attempts: счётчики попыток; нужны для шапки.
         inform_reason: повод выдать информирующий блок.
+        pending_soft_cap: потолок висящих для шапки.
 
     Returns:
         Описание шага или None, если закрывать больше нечего.
@@ -318,6 +298,7 @@ def pick_step(
         attempts=counts,
         profile=profile,
         inform_reason=inform_reason,
+        pending_soft_cap=pending_soft_cap,
     )
     return head[0] if head else None
 
@@ -330,6 +311,7 @@ def peek_next_step(
     profile: Mapping[str, str],
     attempts: Mapping[str, int] | None = None,
     inform_reason: bool = False,
+    pending_soft_cap: int,
 ) -> Step | None:
     """Какой шаг откроется, если текущий закроется прямо сейчас.
 
@@ -340,6 +322,7 @@ def peek_next_step(
         profile: собранный профиль на этот ход.
         attempts: счётчики попыток.
         inform_reason: повод выдать информирующий блок.
+        pending_soft_cap: потолок висящих для шапки.
 
     Returns:
         Следующий шаг или None, если после закрытия текущего открывать нечего.
@@ -358,6 +341,7 @@ def peek_next_step(
         profile=preview_profile,
         attempts=attempts,
         inform_reason=inform_reason,
+        pending_soft_cap=pending_soft_cap,
     )
 
 
@@ -437,28 +421,3 @@ def exhausted(step: Step, attempts: Mapping[str, int], *, limit: int) -> bool:
         True, если чекер должен закрыть шаг без вызова модели.
     """
     return int(attempts.get(step.id, 0)) >= limit
-
-
-def steps_to_skip(
-    script: CompiledScript,
-    *,
-    status: Mapping[str, str],
-    profile: Mapping[str, str],
-) -> list[str]:
-    """Идентификаторы шагов, отсеянных условием пропуска.
-
-    Статусом они не помечаются; функция нужна тестам и журналу.
-
-    Args:
-        script: скомпилированный скрипт.
-        status: статусы шагов.
-        profile: собранный профиль.
-
-    Returns:
-        Идентификаторы отсеянных незакрытых шагов.
-    """
-    return [
-        step_id
-        for step_id in script.step_order
-        if not is_closed(status.get(step_id)) and should_skip(script.step(step_id), profile)
-    ]
