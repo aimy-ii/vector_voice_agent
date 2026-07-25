@@ -102,6 +102,23 @@ def test_системное_сообщение_на_вы_без_ты_к_моде
     assert match is None, f"обращение на «ты»: {match.group(0) if match else ''}"
 
 
+def test_системное_сообщение_содержит_правила_связки_и_проверок(script):
+    """В SPEECH_RULES есть связка по существу, повтор проверок, ASR и информ-шаг."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "Связка с предыдущей репликой делается по существу" in content
+    assert "Проверочный вопрос в конце информирующей реплики не ставится подряд" in content
+    assert "Если реплика клиента бессвязна, оборвана или не отвечает" in content
+    assert "Информирующий шаг выполняется, а не предлагается на выбор" in content
+
+
 def test_профиль_разделяет_роли(script):
     block = profile_block(script, {"caller_name": "Ольга"})
     assert "Ольга" in block

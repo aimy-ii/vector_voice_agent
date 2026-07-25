@@ -330,12 +330,15 @@ async def test_возражение_меняет_состояние(spoken, stor
 
 
 async def test_модель_не_ответила_в_эфир_идёт_заглушка(
-    spoken, store, checker, kb, resolvers, model, script, use_v2
+    spoken, store, checker, kb, resolvers, model, script, use_v2, caplog
 ):
     model["result"] = LLMTurnFailed("бюджет хода исчерпан")
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    with caplog.at_level("WARNING"):
+        state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
     assert script.params.fallback in "".join(spoken)
     assert state["last_error"]
+    assert any("Подстановка фолбэка" in rec.message for rec in caplog.records)
+    assert any("бюджет хода исчерпан" in rec.message for rec in caplog.records)
 
 
 async def test_версия_скрипта_фиксируется_в_состоянии(

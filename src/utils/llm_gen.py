@@ -61,6 +61,46 @@ class LLMTurnFailed(RuntimeError):
     """Модель не ответила в бюджет хода — узел уходит в заглушку."""
 
 
+def glue_stream_delta(previous: str, delta: str) -> str:
+    """Добавляет ведущий пробел к куску, если на стыке слиплись слова.
+
+    Args:
+        previous: уже отданный в эфир текст.
+        delta: новый кусок потока.
+
+    Returns:
+        ``delta`` как есть или с ведущим пробелом на стыке букв/цифр.
+    """
+    if not delta:
+        return ""
+    if not previous:
+        return delta
+    left = previous[-1]
+    right = delta[0]
+    if left.isspace() or right.isspace():
+        return delta
+    if left.isalnum() and right.isalnum():
+        return f" {delta}"
+    return delta
+
+
+def join_stream_chunks(chunks: list[str]) -> str:
+    """Склеивает куски потока без потери пробела на стыке.
+
+    Args:
+        chunks: последовательные куски реплики.
+
+    Returns:
+        Собранный текст.
+    """
+    assembled = ""
+    for chunk in chunks:
+        if not chunk:
+            continue
+        assembled += glue_stream_delta(assembled, chunk)
+    return assembled
+
+
 def response_format_from(model: type[BaseModel], *, name: str) -> dict[str, Any]:
     """Собирает JSON-схему словарём из Pydantic-модели.
 
@@ -222,6 +262,7 @@ async def astream_structured(
 
     async def _run() -> dict[str, Any]:
         sent = 0
+        emitted = ""
         final: dict[str, Any] = {}
         async for partial in structured.astream(messages):
             if not isinstance(partial, dict):
@@ -231,7 +272,10 @@ async def astream_structured(
                 continue
             value = partial.get(text_field)
             if isinstance(value, str) and len(value) > sent:
-                on_delta(value[sent:])
+                raw_delta = value[sent:]
+                fixed = glue_stream_delta(emitted, raw_delta)
+                on_delta(fixed)
+                emitted += fixed
                 sent = len(value)
         return final
 
@@ -242,10 +286,21 @@ async def astream_structured(
                 async with _llm_semaphore:
                     result = await asyncio.wait_for(_run(), timeout=limit)
                 if result:
-                    return result
-                last = LLMTurnFailed("Пустой ответ модели")
+                    if text_field is not None:
+                        value = result.get(text_field)
+                        if not isinstance(value, str) or not value.strip():
+                            last = LLMTurnFailed("Пустой ответ модели")
+                        else:
+                            return result
+                    else:
+                        return result
+                else:
+                    last = LLMTurnFailed("Пустой ответ модели")
             except TimeoutError as exc:
-                log.warning("Модель не уложилась в бюджет хода %.1f с", limit)
+                log.warning(
+                    "Подстановка фолбэка: таймаут, модель не уложилась в бюджет хода %.1f с",
+                    limit,
+                )
                 raise LLMTurnFailed("Бюджет хода исчерпан") from exc
             except _RETRYABLE as exc:
                 last = exc
@@ -253,10 +308,12 @@ async def astream_structured(
                 if attempt < LLM_RETRY_ATTEMPTS:
                     await asyncio.sleep(LLM_RETRY_DELAY)
             except Exception as exc:  # noqa: BLE001
-                log.error("Ошибка вызова модели: %s", exc)
+                log.warning("Подстановка фолбэка: ошибка вызова модели: %s", exc)
                 raise LLMTurnFailed(str(exc)) from exc
 
-        raise LLMTurnFailed(str(last))
+        reason = str(last) if last is not None else "Пустой ответ модели"
+        log.warning("Подстановка фолбэка: %s", reason)
+        raise LLMTurnFailed(reason)
     finally:
         if purpose:
             elapsed_ms = int((time.perf_counter() - started) * 1000)

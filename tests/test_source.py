@@ -52,6 +52,21 @@ def test_v3_собирается_с_why_и_avoid(data_dir):
         assert step.avoid.strip(), step.id
 
 
+def test_v3_price_practice_group_avoid_дополнены(data_dir):
+    """У price/practice/group в v3 непустые avoid с правилами против канцелярии."""
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "3")
+    compiled = build_script(raw)
+    price = compiled.step("price")
+    practice = compiled.step("practice")
+    group = compiled.step("group")
+    assert price.avoid.strip()
+    assert "назвать сумму или сначала рассказать" in price.avoid
+    assert practice.avoid.strip()
+    assert "предыдущая реплика уже заканчивалась проверкой" in practice.avoid
+    assert group.avoid.strip()
+    assert "предыдущая реплика уже заканчивалась проверкой" in group.avoid
+
+
 def test_лишние_persona_и_rules_игнорируются(data_dir):
     """v1 и v2 содержат persona/rules — разбор не падает, полей в модели нет."""
     from script.models import RawScript

@@ -68,7 +68,13 @@ from script.store import (
     progress_to_state,
     script_store,
 )
-from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
+from utils.llm_gen import (
+    LLMTurnFailed,
+    astream_structured,
+    get_llm,
+    join_stream_chunks,
+    response_format_from,
+)
 
 log = logging.getLogger(__name__)
 
@@ -653,7 +659,8 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 purpose="генератор",
             )
     except LLMTurnFailed as exc:
-        log.warning("Ход отдан в заглушку: %s", exc)
+        reason = str(exc) or "неизвестная причина"
+        log.warning("Подстановка фолбэка: %s", reason)
         if not spoken:
             say(script.params.fallback)
             spoken.append(script.params.fallback)
@@ -723,7 +730,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
                 if key in script.profile_fields:
                     profile[key] = value
 
-    spoken_text = "".join(state.get("spoken") or []).strip()
+    spoken_text = join_stream_chunks(list(state.get("spoken") or [])).strip()
     resume: str | None = None
     if step is not None and aside_id and result.get("resume_step", True):
         if progress.status.get(step.id) != "closed":
