@@ -99,11 +99,35 @@ def test_цена_образца_и_факт_в_промпте_генерато�
 def test_промпт_запрещает_восторги_и_разрешает_короткое_подтверждение(script):
     block = naturalness_block(ask_for_move=True)
     lowered = block.lower()
-    assert "не оценивай выбор" in lowered or "не восторгайся" in lowered
-    assert "прекрасный выбор" in lowered or "отличное решение" in lowered
-    assert "понятно" in lowered or "хорошо" in lowered
-    # Запрет именно на похвалу, не на короткое подтверждение.
-    assert "запрещ" not in lowered or "понятно" in lowered
+    assert "не оценивай" in lowered and "выбор клиента" in lowered
+    assert "хороший выбор" in lowered
+    assert "возраст подходит" in lowered
+    assert "сложности" in lowered or "лёгкости" in lowered
+    assert "молча учесть" in lowered
+
+
+def test_промпт_требует_полный_проверочный_вопрос(script):
+    """check_question доходит явным полем; правило запрещает обрубки."""
+    step = script.step("practice")
+    assert step.check_question
+    block = steps_block([step], {}, {}, attempts={})
+    assert "Проверочный вопрос (обязателен" in block
+    assert step.check_question in block
+    assert f"«{step.check_question}»" in block
+    natural = naturalness_block(ask_for_move=True).lower()
+    assert "проверочный вопрос" in natural
+    assert "рассказывать про практику" in natural
+    messages = build_turn_messages(
+        script=script,
+        steps=[step],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert step.check_question in content
+    assert "не сокращай" in content.lower()
 
 
 def test_обычный_шаг_разрешает_свои_слова(script):
