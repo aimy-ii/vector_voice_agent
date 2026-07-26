@@ -33,8 +33,8 @@ from graph.prompts import (
     steps_block,
 )
 
-#: Число правил речи до правки реакции и хвостов.
-_SPEECH_RULES_BEFORE = 17
+#: Число правил речи — замена формулировок не увеличивает набор.
+_SPEECH_RULES_COUNT = 19
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -123,12 +123,12 @@ def test_системное_сообщение_содержит_ключевые
     assert "Открытых вопросов не задавать" in content
     assert "когда человек сам прощается словами" in content
     assert "Тон разговорный, не рекламный" in content
-    assert "Реплика состоит из двух частей" in content
+    assert "Если по ответу человека есть что сказать по делу" in content
     assert "Если реплика клиента бессвязна, оборвана или не отвечает" in content
 
 
 def test_системное_сообщение_содержит_правила_реакции_и_хвостов(script):
-    """Реакция, дежурные хвосты и канцелярит — в системном сообщении; связка снята."""
+    """Реакция по делу, предметная проверка и живой вопрос — замены, не дубли."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -138,14 +138,20 @@ def test_системное_сообщение_содержит_правила_�
         asides_done=[],
     )
     content = messages[0].content
-    assert "Реплика состоит из двух частей" in content
-    assert "Голый вопрос без реакции — ошибка" in content
-    assert "Проверочный вопрос в конце рассказа" in content
-    assert "дежурной формулой" in content
-    assert "Вопрос задаётся по-человечески" in content
-    assert "без служебных оборотов" in content
+    assert "Если по ответу человека есть что сказать по делу" in content
+    assert "без предисловия" in content
+    assert "Вежливые пустышки" in content
+    assert "Проверочный вопрос в конце рассказа спрашивает о том" in content
+    assert "не про содержание и годится к чему угодно" in content
+    assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
+    assert "в живой речи не встречаются" in content
+    assert "Реплика состоит из двух частей" not in content
+    assert "Голый вопрос без реакции — ошибка" not in content
+    assert "дежурной формулой" not in content
+    assert "Вопрос задаётся по-человечески" not in content
+    assert "по коробке определились" not in content
     assert "Связка с предыдущей репликой делается по существу" not in content
-    assert len(SPEECH_RULES) <= _SPEECH_RULES_BEFORE + 2
+    assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
 
 
 def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
@@ -161,7 +167,10 @@ def test_скрипты_v1_v4_собирают_ход_с_правилами_ре
             asides_done=[],
         )
         assert isinstance(messages[0], SystemMessage)
-        assert "Реплика состоит из двух частей" in messages[0].content
+        assert "Если по ответу человека есть что сказать по делу" in messages[0].content
+        assert "Проверочный вопрос в конце рассказа спрашивает о том" in messages[0].content
+        assert "Вопрос звучит так, как спросил бы человек в разговоре" in messages[0].content
+        assert "Реплика состоит из двух частей" not in messages[0].content
 
 
 def test_профиль_разделяет_роли(script):
