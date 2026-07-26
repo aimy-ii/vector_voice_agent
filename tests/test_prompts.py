@@ -67,7 +67,7 @@ def test_персона_из_настроек(monkeypatch):
     assert "спокойный и чёткий" in block
     assert "Роль:" in block
     assert "Ты —" not in block
-    assert "агент и есть менеджер" in block
+    assert "только на «Вы»" in block
 
 
 def test_правило_рода_из_agent_gender(monkeypatch):
@@ -102,8 +102,8 @@ def test_системное_сообщение_на_вы_без_ты_к_моде
     assert match is None, f"обращение на «ты»: {match.group(0) if match else ''}"
 
 
-def test_системное_сообщение_содержит_правила_связки_и_проверок(script):
-    """В SPEECH_RULES есть связка по существу, повтор проверок, ASR и информ-шаг."""
+def test_системное_сообщение_содержит_ключевые_правила_речи(script):
+    """В SPEECH_RULES — шаг задачи, образцы, открытые вопросы, прощание, тон."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -113,10 +113,14 @@ def test_системное_сообщение_содержит_правила_�
         asides_done=[],
     )
     content = messages[0].content
+    assert "только на «Вы»" in content
+    assert "шаг из текущей задачи" in content
+    assert "форма фразы, а не текст реплики" in content
+    assert "Открытых вопросов не задавать" in content
+    assert "когда человек сам прощается словами" in content
+    assert "Тон разговорный, не рекламный" in content
     assert "Связка с предыдущей репликой делается по существу" in content
-    assert "Проверочный вопрос в конце информирующей реплики не ставится подряд" in content
     assert "Если реплика клиента бессвязна, оборвана или не отвечает" in content
-    assert "Информирующий шаг выполняется, а не предлагается на выбор" in content
 
 
 def test_профиль_разделяет_роли(script):
