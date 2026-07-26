@@ -29,7 +29,9 @@ from graph.checker import check_pass
 from graph.context import context_from_state, merge_static
 from graph.contexter import run_contexter
 from graph.facts import needs_of
+from graph.log_fmt import format_live_check_state
 from graph.nodes import (
+    _call_id,
     _checker_client,
     _load_progress,
     _merge_profile,
@@ -207,13 +209,14 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     previous = str(state.get("last_checked_partial") or "")
     is_final = bool(state.get("partial_is_final"))
     min_growth = settings.checker_min_growth_chars
+    call_id = _call_id()
     new_utterance = is_new_utterance(utterance_id, last_utterance_id)
     if new_utterance:
         previous = ""
         stage(
             "live-check",
             f"накоплено {len(reply)} симв., utterance {utterance_id} — "
-            f"новая реплика, сброс точки отсчёта",
+            f"новая реплика, сброс точки отсчёта, звонок {call_id}",
             "start",
         )
     growth = len(reply) - len(previous)
@@ -221,7 +224,8 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         kind = "финал" if is_final else "прирост"
         stage(
             "live-check",
-            f"накоплено {len(reply)} симв., {kind} с прошлого прохода {growth} симв.",
+            f"накоплено {len(reply)} симв., {kind} с прошлого прохода {growth} симв., "
+            f"звонок {call_id}",
             "start",
         )
     # Порог только для промежуточных; финал — всегда разбирать.
@@ -235,6 +239,15 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
 
     progress = await _load_progress(state)
     profile = _merge_profile(state, progress)
+    stage(
+        "live-check",
+        format_live_check_state(
+            attempts=progress.attempts,
+            status=progress.status,
+            profile=profile,
+        ),
+        "state",
+    )
 
     # Фон: базовые поля из уже сказанного — до check_pass, чтобы fills закрылись.
     filled = fill_basic_profile(reply, profile)

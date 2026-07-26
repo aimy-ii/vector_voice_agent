@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from core.config import settings
 from graph.history import last_user_text
+from graph.log_fmt import format_check_pending
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep, Step
 from script.planner import exhausted, is_closed, iter_available, profile_has, render_step_text
@@ -303,13 +304,37 @@ async def check_pass(
     # inform закрывает код по доставке — в pending чекера не отдаём.
     # Включаем и шаги на пороге счётчика: модель смотрит раньше счётчика.
     # В формате продаж видов нет — все висящие идут в чекер.
+    available = iter_available(script, status=updated.status, profile=profile)
     pending = []
-    for step in iter_available(script, status=updated.status, profile=profile):
-        if int(updated.attempts.get(step.id, 0)) <= 0:
+    rejected: list[tuple[str, str]] = []
+    for step in available:
+        count = int(updated.attempts.get(step.id, 0))
+        if count <= 0:
+            rejected.append((step.id, "счётчик ноль"))
             continue
         if isinstance(step, Step) and step.kind == "inform":
+            rejected.append((step.id, "inform"))
             continue
         pending.append(step)
+    # Закрытые с ненулевым счётчиком — «исчерпан»: в available их уже нет.
+    pending_ids = {step.id for step in pending}
+    for step_id, count in updated.attempts.items():
+        if count <= 0 or step_id in pending_ids:
+            continue
+        if any(sid == step_id for sid, _ in rejected):
+            continue
+        if is_closed(updated.status.get(step_id)):
+            rejected.append((step_id, "исчерпан"))
+    pending_pairs = [(step.id, int(updated.attempts.get(step.id, 0))) for step in pending]
+    available_pairs = [(step.id, int(updated.attempts.get(step.id, 0))) for step in available]
+    log.info(
+        "[check|pending] %s",
+        format_check_pending(
+            pending=pending_pairs,
+            rejected=rejected,
+            available=available_pairs if not pending else None,
+        ),
+    )
     if pending and reply.strip():
         client = judge or LlmCheckerClient()
         history = history_slice_for(

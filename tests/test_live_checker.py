@@ -497,6 +497,75 @@ async def test_live_check_с_приростом_зовёт_чекер_и_пиш�
     assert patch_out.get("last_checked_partial") == text
 
 
+async def test_логи_не_роняют_ход_при_пустом_прогрессе(script, caplog):
+    """Пустой прогресс и профиль: [live-check|state] и [check|pending] без падения."""
+    import logging
+
+    text = "пока ещё думаю что ответить на вопрос"
+    client = FakeChecker([])
+    progress = ScriptProgress()
+    state = _state(script, partial=text, progress=progress, profile={}, last_checked="")
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph._call_id", return_value="diag-call"),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert patch_out != {}
+    assert client.calls == []
+    messages = [rec.message for rec in caplog.records]
+    assert any("[live-check|state]" in m and "счётчики {}" in m for m in messages)
+    assert any("[live-check|start]" in m and "звонок diag-call" in m for m in messages)
+    assert any("[check|pending]" in m and "на проверку: пусто" in m for m in messages)
+
+
+async def test_check_pass_логирует_висящие_перед_моделью(script, caplog):
+    """[check|pending] показывает шаг со счётчиком до вызова модели."""
+    import logging
+
+    text = "В городе Санкт-Петербург"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(
+        status={"name": "closed", "city": "pending"},
+        attempts={"name": 1, "city": 1},
+        taken_turn={"name": 1, "city": 2},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"caller_name": "Андрей"},
+        turn=3,
+    )
+    with caplog.at_level(logging.INFO, logger="graph.checker"):
+        await check_pass(state, reply=text, judge=client, progress=progress)
+
+    assert client.calls
+    pending_logs = [r.message for r in caplog.records if "[check|pending]" in r.message]
+    assert pending_logs
+    assert "на проверку: [city(1)]" in pending_logs[0]
+    assert "name — исчерпан" in pending_logs[0]
+
+
 async def test_live_check_контекстер_кладёт_справку_в_контекст(script):
     """После чекера контекстер печёт справку в conversation_context."""
     from graph.context import DYN_READY

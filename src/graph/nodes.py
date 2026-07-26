@@ -461,6 +461,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
             or context_from_state(state.get("conversation_context")).city_slug,
             branch_slug=state.get("branch_slug")
             or context_from_state(state.get("conversation_context")).branch_slug,
+            call_id=_call_id(),
         ),
         "done",
         step=step.id if step else None,
