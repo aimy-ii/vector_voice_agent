@@ -37,6 +37,8 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
         if not dumped["knowledge"]:
             empty_knowledge += 1
     assert empty_knowledge == 8
+    experience = script_v4.step("experience")
+    assert "подбадривать" in experience.requirements
 
 
 def test_v4_порядок_по_order(script_v4):

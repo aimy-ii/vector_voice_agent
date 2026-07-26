@@ -141,10 +141,15 @@ def test_системное_сообщение_содержит_правила_�
     assert "Если по ответу человека есть что сказать по делу" in content
     assert "без предисловия" in content
     assert "Вежливые пустышки" in content
-    assert "Реплика заканчивается движением разговора вперёд" in content
-    assert "Выдумывать вопрос, чтобы чем-то закончить, нельзя" in content
-    assert "Проверок после рассказа не бывает" in content
-    assert "пустой вопрос, на который человек отвечает «да»" in content
+    assert "Реплика всегда заканчивается передачей хода собеседнику" in content
+    assert "Что скажете?" in content
+    assert "Пока всё понятно?" in content
+    assert "Продолжу?" in content
+    assert "Молчать после рассказа нельзя" in content
+    assert "Спрашивать согласие с содержанием" in content
+    assert "пустая проверка, на которую человек отвечает «да»" in content
+    assert "Короткий возврат хода после рассказа" in content
+    assert "запретом не считается" in content
     assert "рассказать и задать этот вопрос в одной реплике" in content
     assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
     assert "в живой речи не встречаются" in content
@@ -157,7 +162,29 @@ def test_системное_сообщение_содержит_правила_�
     assert "Вопрос задаётся по-человечески" not in content
     assert "по коробке определились" not in content
     assert "Связка с предыдущей репликой делается по существу" not in content
+    assert "закончить самим фактом" not in content
+    assert "Проверок после рассказа не бывает" not in content
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
+
+
+def test_правила_передачи_хода_и_запрета_проверок_идут_подряд():
+    """Передача хода и запрет пустых проверок стоят рядом как одно целое."""
+    turn_idx = next(
+        i for i, rule in enumerate(SPEECH_RULES) if "передачей хода собеседнику" in rule
+    )
+    check_idx = next(
+        i
+        for i, rule in enumerate(SPEECH_RULES)
+        if "согласие с содержанием" in rule and "запретом не считается" in rule
+    )
+    assert check_idx == turn_idx + 1
+    turn_rule = SPEECH_RULES[turn_idx]
+    check_rule = SPEECH_RULES[check_idx]
+    assert "Что скажете?" in turn_rule
+    assert "Пока всё понятно?" in turn_rule
+    assert "Продолжу?" in turn_rule
+    assert "Молчать после рассказа нельзя" in turn_rule
+    assert "Короткий возврат хода после рассказа" in check_rule
 
 
 def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
@@ -175,8 +202,9 @@ def test_скрипты_v1_v4_собирают_ход_с_правилами_ре
         assert isinstance(messages[0], SystemMessage)
         content = messages[0].content
         assert "Если по ответу человека есть что сказать по делу" in content
-        assert "Реплика заканчивается движением разговора вперёд" in content
-        assert "Проверок после рассказа не бывает" in content
+        assert "Реплика всегда заканчивается передачей хода собеседнику" in content
+        assert "Спрашивать согласие с содержанием" in content
+        assert "запретом не считается" in content
         assert "рассказать и задать этот вопрос в одной реплике" in content
         assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
         assert "Каждая реплика заканчивается вопросом или конкретным предложением" not in content
