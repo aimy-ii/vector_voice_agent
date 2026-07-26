@@ -163,10 +163,9 @@ async def test_порог_исчерпан_после_модели_закрыв�
     assert client.calls[0]["step_id"] == "name"
 
 
-async def test_закрытие_по_счётчику_по_заданным_не_по_ходам(script):
-    """Чекер закрывает по числу заданий; пять ходов в шапке при двух попытках."""
+async def test_закрытие_по_счётчику_по_попыткам(script):
+    """Чекер закрывает по attempts при достижении порога, turn сам по себе не важен."""
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
-    # Шаг «присутствовал» пять ходов, но ведущим брали дважды → attempts=2.
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
     updated, closures = await run_checker(
         script=script,
@@ -192,7 +191,6 @@ async def test_закрытие_по_счётчику_по_заданным_не
         client=client,
         attempt_limit=2,
     )
-    assert updated2.status.get("name") != "closed" or ("name", "счётчик") not in closures2
     assert ("name", "счётчик") not in closures2
 
 

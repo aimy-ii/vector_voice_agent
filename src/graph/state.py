@@ -69,7 +69,7 @@ class CallState(TypedDict, total=False):
         messages: история звонка на этот ход (редьюсер на замену).
         script_id / script_version: закреплённый скрипт звонка.
         step_status: pending / closed по шагам (зеркало Redis).
-        step_attempts: счётчик попыток задать шаг (сколько раз был ведущим).
+        step_attempts: счётчик попыток задать шаг (сколько раз был в шапке).
         step_taken_turn: ход первого взятия шага.
         script_progress: слепок прогресса (на конец звонка — на постоянку).
         profile: собранный профиль.

@@ -6,13 +6,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from graph import nodes as nodes_module
 from graph.checker import CheckerVerdict
 from graph.graph import graph
 from graph.resolvers import BranchResolution, CityResolution
-from script.store import MemoryScriptStore
+from script.store import MemoryScriptStore, ScriptProgress
 from utils.llm_gen import LLMTurnFailed
 
 
@@ -839,10 +839,10 @@ async def test_реплика_по_существу_на_шаге_образца
     assert state["route"] in ("lookup", "respond")
 
 
-async def test_счётчик_только_у_ведущего_висящие_не_тратят(
+async def test_счётчик_растёт_у_всех_шагов_шапки(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """В шапке два висящих: плюс только ведущему, второй и свежий не растут."""
+    """В шапке два висящих и один свежий: плюс каждому из шапки."""
     model["result"] = {
         "understood": [],
         "aside_id": None,
@@ -860,8 +860,127 @@ async def test_счётчик_только_у_ведущего_висящие_н
     )
     attempts = state.get("step_attempts") or {}
     assert attempts.get("name") == 2
-    assert attempts.get("city") == 1
-    assert attempts.get("who_studies", 0) == 0
+    assert attempts.get("city") == 2
+    # Свежий who_studies тоже в шапке — счётчик с нуля.
+    assert attempts.get("who_studies") == 1
+    assert state["head_steps"] == ["name", "city", "who_studies"]
+
+
+async def test_taken_turn_всем_шапке_без_перезаписи(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """taken_turn проставляется всем шагам шапки и не перезаписывается."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state1 = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="ну не знаю")],
+            "step_status": {"name": "pending"},
+            "step_attempts": {"name": 1},
+            "step_taken_turn": {"name": 1},
+            "turn": 1,
+        }
+    )
+    taken1 = state1.get("step_taken_turn") or {}
+    assert taken1.get("name") == 1
+    assert taken1.get("city") == 2
+
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком городе планируете учиться?",
+    }
+    state2 = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="пока думаю")],
+            "turn": state1["turn"],
+        }
+    )
+    taken2 = state2.get("step_taken_turn") or {}
+    assert taken2.get("name") == 1
+    assert taken2.get("city") == 2
+
+
+async def test_pending_всем_шагам_шапки(spoken, store, checker, kb, resolvers, model, use_v2):
+    """Статус pending проставляется каждому шагу шапки, в том числе свежему."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="здравствуйте")],
+            "step_status": {"name": "pending"},
+            "step_attempts": {"name": 1},
+            "step_taken_turn": {"name": 1},
+        }
+    )
+    status = state.get("step_status") or {}
+    assert status.get("name") == "pending"
+    assert status.get("city") == "pending"
+    assert "city" in state["head_steps"]
+
+
+async def test_шаг_шапки_на_следующем_ходу_у_чекера(
+    spoken, store, checker, kb, resolvers, model, use_v2, script
+):
+    """Шаг, попавший в шапку свежим, на следующем ходу — в висящих чекера."""
+    from graph.checker import run_checker
+
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком городе планируете учиться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Андрей")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "step_taken_turn": {"name": 1},
+            "profile": {"caller_name": "Андрей"},
+        }
+    )
+    assert int(state["step_attempts"].get("city", 0)) >= 1
+    assert "city" in state["head_steps"]
+
+    class CapturingChecker:
+        def __init__(self) -> None:
+            self.step_ids: list[str] = []
+
+        async def judge(self, *, step, **kwargs: Any) -> CheckerVerdict:
+            self.step_ids.append(step.id)
+            return CheckerVerdict(reply_usable=True, step_closed=False)
+
+    client = CapturingChecker()
+    progress = ScriptProgress.from_mapping(
+        {
+            "status": state.get("step_status") or {},
+            "attempts": state.get("step_attempts") or {},
+            "taken_turn": state.get("step_taken_turn") or {},
+        }
+    )
+    await run_checker(
+        script=script,
+        progress=progress,
+        messages=[
+            HumanMessage(content="Андрей"),
+            AIMessage(content=model["result"]["reply"]),
+            HumanMessage(content="В городе Санкт-Петербург"),
+        ],
+        profile={"caller_name": "Андрей"},
+        turn=int(state["turn"]) + 1,
+        client=client,
+    )
+    assert "city" in client.step_ids
 
 
 async def test_просьба_повторить_идёт_через_модель(

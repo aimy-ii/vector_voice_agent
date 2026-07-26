@@ -271,10 +271,9 @@ def test_порог_попыток_по_умолчанию_2():
     assert exhausted(fake, {"x": default}, limit=default) is True
 
 
-def test_exhausted_по_числу_заданий_не_по_ходам(script):
-    """Шаг ведущим дважды при пяти «присутствиях» в шапке → счётчик 2, не 5."""
+def test_exhausted_по_счётчику_попыток(script):
+    """Закрытие по порогу attempts, а не по числу ходов звонка."""
     step = script.step("name")
-    # Пять ходов в шапке, но ведущим брали только два раза.
     assert exhausted(step, {"name": 2}, limit=2) is True
     assert exhausted(step, {"name": 2}, limit=5) is False
     assert exhausted(step, {"name": 5}, limit=5) is True

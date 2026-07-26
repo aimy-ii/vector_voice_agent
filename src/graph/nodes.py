@@ -5,9 +5,9 @@
     ingest → lookup → plan → respond → commit
 
 Модельный чекер живёт только в лайв-канале. Plan читает закрытия из
-Redis-кеша и не ждёт лайв. Генератор плюсует счётчик ведущему шагу в
-момент взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок —
-в тред.
+Redis-кеша и не ждёт лайв. Генератор плюсует счётчик всем шагам шапки
+в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка
+слепок — в тред.
 """
 
 from __future__ import annotations
@@ -241,8 +241,8 @@ def _step_needs_lookup(
     Args:
         step: ведущий шаг или None.
         state: состояние хода (слаги города/филиала).
-        city_asked: шаг city уже брали ведущим.
-        branch_asked: шаг branch уже брали ведущим.
+        city_asked: шаг city уже был в шапке.
+        branch_asked: шаг branch уже был в шапке.
 
     Returns:
         True — резолвер/факты имеют смысл; иначе узел может выйти сразу.
@@ -388,11 +388,17 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
 
 async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Берёт шапку из кеша, плюсует счётчик ведущему шагу, выбирает маршрут.
+    """Берёт шапку из кеша, плюсует счётчик всем её шагам, выбирает маршрут.
 
     Закрытия шагов делает только лайв-канал; здесь читаем уже записанный
     прогресс и закрываем ``inform`` по факту доставки прошлой реплики.
     Ждать лайв-канал нельзя: что не успел — увидим следующим ходом.
+
+    Счётчик растёт у каждого шага шапки: генератор мог отработать любой
+    из них, и для чекера шаг считается заданным. Побочный эффект — висящий
+    шаг тратит попытку каждый ход, пока висит; при потолке в две попытки
+    он уходит из шапки быстрее. Если на прогоне шаги вылетают слишком рано,
+    поднимают ``STEP_ATTEMPT_LIMIT`` настройкой, без правки кода.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -423,13 +429,13 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Счётчик — только ведущему шагу хода. Висящие в шапке попытку не тратят.
-    if step is not None:
-        prev = int(progress.attempts.get(step.id, 0))
-        progress.attempts[step.id] = prev + 1
-        if step.id not in progress.taken_turn:
-            progress.taken_turn[step.id] = turn
-        progress.status.setdefault(step.id, "pending")
+    # Шаг попал в шапку — генератор мог его отработать, для чекера задан.
+    for head_step in head:
+        prev = int(progress.attempts.get(head_step.id, 0))
+        progress.attempts[head_step.id] = prev + 1
+        if head_step.id not in progress.taken_turn:
+            progress.taken_turn[head_step.id] = turn
+        progress.status.setdefault(head_step.id, "pending")
 
     progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
 
