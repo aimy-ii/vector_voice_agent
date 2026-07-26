@@ -8,30 +8,66 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from utils.llm_gen import (
-    LLMTurnFailed,
-    astream_structured,
-    glue_stream_delta,
-    join_stream_chunks,
-)
+from utils.llm_gen import LLMTurnFailed, astream_structured
 
 
-def test_склейка_кусков_не_теряет_пробел_на_стыке():
-    """На стыке «внутренние»+«экзамены» появляется пробел."""
-    assert glue_stream_delta("внутренние", "экзамены") == " экзамены"
-    assert (
-        join_stream_chunks(["все необходимые ", "внутренние", "экзамены"])
-        == "все необходимые внутренние экзамены"
+@pytest.mark.asyncio
+async def test_токены_слова_склеиваются_встык():
+    """«внут»+«ренние»+« экзамены» → «внутренние экзамены» без пробела внутри слова."""
+    deltas: list[str] = []
+
+    class _Structured:
+        async def astream(self, _messages: list[Any]):
+            yield {"reply": "внут"}
+            yield {"reply": "внутренние"}
+            yield {"reply": "внутренние экзамены"}
+
+    llm = MagicMock()
+    llm.with_structured_output.return_value = _Structured()
+    llm.model_name = "test-model"
+
+    result = await astream_structured(
+        llm,
+        [],
+        schema={"name": "t", "schema": {}, "strict": False},
+        text_field="reply",
+        on_delta=deltas.append,
+        budget=5.0,
     )
 
+    assert deltas == ["внут", "ренние", " экзамены"]
+    assert "".join(deltas) == "внутренние экзамены"
+    assert result["reply"] == "внутренние экзамены"
 
-def test_склейка_не_дублирует_пробел():
-    """Если пробел уже на границе — второй не вставляется."""
-    assert glue_stream_delta("внутренние ", "экзамены") == "экзамены"
-    assert glue_stream_delta("внутренние", " экзамены") == " экзамены"
-    assert join_stream_chunks(["все ", "необходимые внутренние ", "экзамены"]) == (
-        "все необходимые внутренние экзамены"
+
+@pytest.mark.asyncio
+async def test_односимвольные_токены_не_разбиваются_пробелами():
+    """Поток «П»+«р»+…+«т» собирается в «Привет», а не «П р и в е т»."""
+    deltas: list[str] = []
+    word = "Привет"
+    prefixes = [word[: i + 1] for i in range(len(word))]
+
+    class _Structured:
+        async def astream(self, _messages: list[Any]):
+            for prefix in prefixes:
+                yield {"reply": prefix}
+
+    llm = MagicMock()
+    llm.with_structured_output.return_value = _Structured()
+    llm.model_name = "test-model"
+
+    result = await astream_structured(
+        llm,
+        [],
+        schema={"name": "t", "schema": {}, "strict": False},
+        text_field="reply",
+        on_delta=deltas.append,
+        budget=5.0,
     )
+
+    assert deltas == list(word)
+    assert "".join(deltas) == "Привет"
+    assert result["reply"] == "Привет"
 
 
 @pytest.mark.asyncio

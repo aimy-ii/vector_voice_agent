@@ -74,7 +74,6 @@ from utils.llm_gen import (
     LLMTurnFailed,
     astream_structured,
     get_llm,
-    join_stream_chunks,
     response_format_from,
 )
 
@@ -803,7 +802,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
                 if key in script.profile_fields:
                     profile[key] = value
 
-    spoken_text = join_stream_chunks(list(state.get("spoken") or [])).strip()
+    spoken_text = "".join(list(state.get("spoken") or [])).strip()
     resume: str | None = None
     if step is not None and aside_id and result.get("resume_step", True):
         if progress.status.get(step.id) != "closed":
