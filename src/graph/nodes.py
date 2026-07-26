@@ -173,22 +173,57 @@ def _lead_from_progress(
     return head, step
 
 
-def _step_needs_lookup(step: Step | None, state: CallState) -> bool:
+def _field_step_attempts(
+    script: CompiledScript,
+    progress: ScriptProgress,
+    field: str,
+) -> int:
+    """Счётчик попыток шага, который заполняет поле профиля.
+
+    Args:
+        script: скомпилированный скрипт.
+        progress: прогресс звонка.
+        field: ключ поля профиля (``city``, ``branch``).
+
+    Returns:
+        Число попыток; ноль — шаг ещё ни разу не задавался.
+    """
+    step_id = script.filled_by.get(field)
+    if not step_id:
+        return 0
+    return int(progress.attempts.get(step_id, 0))
+
+
+def _step_needs_lookup(
+    step: Step | None,
+    state: CallState,
+    *,
+    city_asked: bool = True,
+    branch_asked: bool = True,
+) -> bool:
     """Нужен ли справочник на этом ведущем шаге.
+
+    Город и филиал ищем только если шаг, который их заполняет, уже
+    задавался (счётчик попыток > 0).
 
     Args:
         step: ведущий шаг или None.
         state: состояние хода (слаги города/филиала).
+        city_asked: шаг city уже брали ведущим.
+        branch_asked: шаг branch уже брали ведущим.
 
     Returns:
         True — резолвер/факты имеют смысл; иначе узел может выйти сразу.
     """
     if step is None:
         return False
-    if step.needs or (step.fills and "city" in step.fills and not state.get("city_slug")):
+    if step.needs:
+        return True
+    if city_asked and step.fills and "city" in step.fills and not state.get("city_slug"):
         return True
     if (
-        step.fills
+        branch_asked
+        and step.fills
         and "branch" in step.fills
         and state.get("city_slug")
         and not state.get("branch_slug")
@@ -458,11 +493,13 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
     _head, step = _lead_from_progress(state, progress=progress, profile=profile)
     ctx = context_from_state(state.get("conversation_context"))
     profile_city = str(profile.get("city") or "").strip()
+    city_asked = _field_step_attempts(script, progress, "city") > 0
+    branch_asked = _field_step_attempts(script, progress, "branch") > 0
     # Резолвер нужен по шагу либо когда в профиле уже есть город без слага
-    # (реплика закрыла name и назвала город в одном ходе — параллельно с чекером).
-    needs_lookup = _step_needs_lookup(step, state) or bool(
-        profile_city and not (state.get("city_slug") or ctx.city_slug)
-    )
+    # и шаг city уже задавался (иначе вхолостую не ищем).
+    needs_lookup = _step_needs_lookup(
+        step, state, city_asked=city_asked, branch_asked=branch_asked
+    ) or bool(city_asked and profile_city and not (state.get("city_slug") or ctx.city_slug))
     if not needs_lookup:
         # Нечего искать — не ждём справочник и не зовём контекстер.
         stage("lookup", "нечего искать, пропуск", "done")
@@ -494,12 +531,12 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
         journal.append(entry)
         turn_calls.append(entry)
 
-    # Город: резолвер только при пустом слаге и поводе — ведущий шаг
-    # собирает city (ищем в реплике) либо в профиле уже есть имя (ищем по нему).
+    # Город: только если шаг city уже задавался и слага ещё нет —
+    # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
     fills_city = bool(step and step.fills and "city" in step.fills)
-    if fills_city and user_text:
+    if city_asked and fills_city and user_text:
         search_text: str | None = user_text
-    elif profile_city:
+    elif city_asked and profile_city:
         search_text = profile_city
     else:
         search_text = None
@@ -560,9 +597,10 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     city_slug = patch.get("city_slug") or state.get("city_slug") or ctx.city_slug
 
-    # Филиал: отбор до трёх; мета только после выбора.
+    # Филиал: только если шаг branch уже задавался; отбор до трёх.
     if (
-        city_slug
+        branch_asked
+        and city_slug
         and not (state.get("branch_slug") or ctx.branch_slug)
         and step
         and "branch" in (step.fills or [])

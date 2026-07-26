@@ -51,8 +51,9 @@ log = logging.getLogger(__name__)
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
     """Прирост текста меньше порога внутри текущей реплики.
 
-    Отрицательный прирост — реплика началась заново: точку отсчёта
-    сбрасывают снаружи, сюда такой случай не должен доходить как «пропуск».
+    Точку отсчёта при новой реплике сбрасывают снаружи по
+    ``partial_utterance_id``; сюда доходит только прирост внутри одной
+    реплики. Пустой ``previous`` — первый проход, порог не применяется.
 
     Args:
         reply: накопленный текст текущего прохода.
@@ -65,9 +66,28 @@ def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> boo
     if not previous:
         return False
     growth = len(reply) - len(previous)
+    # Укорочение текста (переразметка ASR) — не пропуск по порогу.
     if growth < 0:
         return False
     return growth < min_growth
+
+
+def is_new_utterance(
+    utterance_id: str,
+    last_utterance_id: str,
+) -> bool:
+    """Новая ли реплика по идентификатору от бота.
+
+    Args:
+        utterance_id: ``partial_utterance_id`` из полезной нагрузки.
+        last_utterance_id: идентификатор, к которому относится точка отсчёта.
+
+    Returns:
+        True — точка отсчёта прироста должна быть сброшена.
+    """
+    if not utterance_id:
+        return False
+    return utterance_id != last_utterance_id
 
 
 def _script_of(state: CallState):
@@ -155,29 +175,30 @@ async def _warmup_next_step(
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Один служебный проход чекера и контекстера по ``partial_reply``.
 
-    Прирост считается внутри текущей реплики относительно
-    ``last_checked_partial``. Отрицательный прирост — реплика началась
-    заново: сбрасываем точку отсчёта и разбираем текст как новый.
-    При приросте меньше порога (и не первый проход) тихо выходит без
-    вызова модели. Иначе дозаполняет профиль, зовёт ``check_pass``,
-    ``run_contexter`` и прогрев под предстоящий шаг.
+    Точка отсчёта сбрасывается при смене ``partial_utterance_id`` от бота —
+    не по знаку прироста длины. Порог ``checker_min_growth_chars``
+    применяется только к приросту внутри одной реплики относительно
+    ``last_checked_partial``. Первый проход новой реплики порогом не режется.
+    Иначе дозаполняет профиль, зовёт ``check_pass``, ``run_contexter``
+    и прогрев под предстоящий шаг.
     """
     started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
+    utterance_id = str(state.get("partial_utterance_id") or "")
+    last_utterance_id = str(state.get("last_checked_utterance_id") or "")
     previous = str(state.get("last_checked_partial") or "")
-    growth = len(reply) - len(previous)
     min_growth = settings.checker_min_growth_chars
-    if growth < 0:
-        # Новая реплика: буфер бота сброшен, прошлый last_checked чужой.
+    new_utterance = is_new_utterance(utterance_id, last_utterance_id)
+    if new_utterance:
+        previous = ""
         stage(
             "live-check",
-            f"накоплено {len(reply)} симв., прирост {growth} симв. — "
+            f"накоплено {len(reply)} симв., utterance {utterance_id} — "
             f"новая реплика, сброс точки отсчёта",
             "start",
         )
-        previous = ""
-        growth = len(reply)
-    else:
+    growth = len(reply) - len(previous)
+    if not new_utterance:
         stage(
             "live-check",
             f"накоплено {len(reply)} симв., прирост с прошлого прохода {growth} симв.",
@@ -209,6 +230,8 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     )
     patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
     patch["last_checked_partial"] = reply
+    if utterance_id:
+        patch["last_checked_utterance_id"] = utterance_id
     patch["client_asks_inform"] = asks_inform
     patch["profile"] = profile
 

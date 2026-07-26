@@ -81,8 +81,12 @@ class CallState(TypedDict, total=False):
         branch_candidates: отобранные резолвером слаги филиалов.
         partial_reply: накопленный распознанный текст текущей реплики
             клиента; вход служебного графа ``vector_checker``.
+        partial_utterance_id: идентификатор текущей реплики от бота;
+            смена значения — новая реплика, точка отсчёта прироста сбрасывается.
         last_checked_partial: текст последнего служебного прохода чекера
             (порог прироста внутри текущей реплики).
+        last_checked_utterance_id: ``partial_utterance_id``, к которому
+            относится ``last_checked_partial``.
     """
 
     messages: Annotated[list[BaseMessage], replace_messages]
@@ -129,7 +133,9 @@ class CallState(TypedDict, total=False):
     turn_result: dict[str, Any]
     call_finished: bool
     partial_reply: str
+    partial_utterance_id: str
     last_checked_partial: str
+    last_checked_utterance_id: str
 
 
 def new_state_defaults() -> dict[str, Any]:
@@ -169,5 +175,7 @@ def new_state_defaults() -> dict[str, Any]:
         "turn_result": {},
         "call_finished": False,
         "partial_reply": "",
+        "partial_utterance_id": "",
         "last_checked_partial": "",
+        "last_checked_utterance_id": "",
     }

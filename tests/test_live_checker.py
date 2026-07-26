@@ -9,7 +9,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.checker import CheckerVerdict, check_pass, history_slice_for, run_checker
-from graph.checker_graph import growth_below_threshold, live_check_node
+from graph.checker_graph import (
+    growth_below_threshold,
+    is_new_utterance,
+    live_check_node,
+)
 from script.planner import script_head
 from script.store import ScriptProgress, progress_to_state
 
@@ -54,6 +58,8 @@ def _state(
     profile: dict[str, str] | None = None,
     turn: int = 2,
     last_checked: str = "",
+    utterance_id: str = "",
+    last_utterance_id: str = "",
 ) -> dict[str, Any]:
     """Собирает минимальное состояние для ``check_pass`` / live_check."""
     prog = progress or _name_progress()
@@ -68,7 +74,9 @@ def _state(
         "profile": profile or {},
         "turn": turn,
         "partial_reply": partial,
+        "partial_utterance_id": utterance_id,
         "last_checked_partial": last_checked,
+        "last_checked_utterance_id": last_utterance_id,
     }
     state.update(progress_to_state(prog))
     return state
@@ -255,10 +263,12 @@ async def test_первый_проход_не_режется_порогом():
     assert growth_below_threshold("коротко+", "коротко", min_growth=10)
 
 
-async def test_отрицательный_прирост_не_пропускает_проход():
-    """Новая реплика (прирост < 0) — не skip, а сброс точки отсчёта."""
-    assert not growth_below_threshold("да", "Меня зовут Андрей Петров", min_growth=10)
-    assert not growth_below_threshold("к", "длинный прошлый текст", min_growth=10)
+def test_новая_реплика_по_utterance_id():
+    """Смена идентификатора от бота — новая реплика, независимо от длины."""
+    assert is_new_utterance("u2", "u1")
+    assert is_new_utterance("u1", "")
+    assert not is_new_utterance("u1", "u1")
+    assert not is_new_utterance("", "u1")
 
 
 async def test_прирост_внутри_реплики_от_разобранного_ранее():
@@ -270,16 +280,22 @@ async def test_прирост_внутри_реплики_от_разобран�
     assert not growth_below_threshold(previous + " Андрей Петр", previous, min_growth=10)
 
 
-async def test_live_check_отрицательный_прирост_сбрасывает_и_зовёт_чекер(script):
-    """Буфер сброшен: прирост отрицательный → разбор как новой реплики."""
-    text = "да"
+async def test_live_check_новая_реплика_сбрасывает_точку_независимо_от_знака(script):
+    """Новый utterance_id сбрасывает точку отсчёта даже при положительном приросте."""
+    # Новая реплика длиннее прошлого last_checked — без сброса прирост был бы +8 < 10.
+    previous = "xxx"
+    text = previous + "12345678"
+    assert len(text) - len(previous) == 8
+    assert growth_below_threshold(text, previous, min_growth=10)
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = _name_progress()
     state = _state(
         script,
         partial=text,
         progress=progress,
-        last_checked="Меня зовут Андрей очень длинный прошлый",
+        last_checked=previous,
+        utterance_id="u2",
+        last_utterance_id="u1",
     )
 
     async def fake_load(_state):
@@ -307,6 +323,52 @@ async def test_live_check_отрицательный_прирост_сбрасы
     assert client.calls
     assert client.calls[0]["client_reply"] == text
     assert patch_out.get("last_checked_partial") == text
+    assert patch_out.get("last_checked_utterance_id") == "u2"
+
+
+async def test_live_check_прирост_внутри_реплики_сравнивается_с_порогом(script):
+    """Тот же utterance_id: прирост ниже порога — тихий пропуск."""
+    previous = "Меня зовут"
+    reply = previous + " А"
+    assert growth_below_threshold(reply, previous, min_growth=10)
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=reply,
+        progress=progress,
+        last_checked=previous,
+        utterance_id="u1",
+        last_utterance_id="u1",
+    )
+
+    class _MemStore:
+        def __init__(self) -> None:
+            self.saved = False
+
+        async def load(self, call_id: str):
+            return progress
+
+        async def save(self, call_id: str, prog):
+            self.saved = True
+            return True
+
+    store = _MemStore()
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=lambda s: store.load("t")),
+        patch(
+            "graph.checker_graph._save_progress",
+            side_effect=lambda p, **kw: store.save("t", p) or {},
+        ),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert patch_out == {}
+    assert client.calls == []
+    assert not store.saved
 
 
 async def test_live_check_done_содержит_длительность_мс(script):

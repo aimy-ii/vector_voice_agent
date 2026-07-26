@@ -85,21 +85,6 @@ def closure_criterion(step: Step) -> str:
     return _KIND_CRITERIA.get(step.kind, "задача шага решена")
 
 
-def accept_model_closure(
-    step: Step,
-    *,
-    profile: Mapping[str, str],
-) -> bool:
-    """Можно ли принять вердикт модели о закрытии.
-
-    ``question`` с непустым ``fills`` не закрываем, пока ни одно из его
-    полей профиля не заполнилось — модели в этом случае не верим.
-    """
-    if step.kind == "question" and step.fills:
-        return any(profile_has(profile, key) for key in step.fills)
-    return True
-
-
 class LlmCheckerClient:
     """Чекер на быстрой модели с короткой схемой."""
 
@@ -332,7 +317,7 @@ async def check_pass(
                 asks_inform = True
             if not verdict.reply_usable:
                 break
-            if verdict.step_closed and accept_model_closure(step, profile=profile):
+            if verdict.step_closed:
                 updated.status[step.id] = "closed"
                 closures.append((step.id, "диалог"))
                 continue

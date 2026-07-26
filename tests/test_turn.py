@@ -156,12 +156,12 @@ async def test_город_фиксируется_резолвером(
         "resume_step": True,
         "reply": "Отлично, Пермь. Учиться будете сами?",
     }
-    # Имя уже закрыто, на шаге города.
+    # Имя уже закрыто, шаг city уже задавали.
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -436,6 +436,13 @@ async def test_город_из_профиля_точное_совпадение_
                 "experience": "closed",
                 "transmission": "closed",
             },
+            "step_attempts": {
+                "name": 1,
+                "city": 1,
+                "who_studies": 1,
+                "experience": 1,
+                "transmission": 1,
+            },
         }
     )
     assert state["city_slug"] == "perm"
@@ -466,13 +473,73 @@ async def test_ведущий_шаг_city_ищет_в_реплике(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
     assert state["city_slug"] == "perm"
     assert resolve_calls == ["Пермь"]
     assert resolvers[0].calls == 0
+
+
+async def test_заполнитель_города_не_зовётся_при_нулевых_попытках(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Шаг city ещё не задавался — resolve_city не вызывается."""
+    resolve_calls: list[str] = []
+    real = nodes_module.resolve_city
+
+    async def _spy(text: str, cities: Any, *, resolver: Any = None):
+        resolve_calls.append(text)
+        return await real(text, cities, resolver=resolver)
+
+    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Из какого города?",
+    }
+    await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Да, хорошо")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert resolve_calls == []
+    assert resolvers[0].calls == 0
+
+
+async def test_заполнитель_города_зовётся_когда_шаг_уже_задавали(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Счётчик city > 0 и поле пустое — резолвер ищет в реплике."""
+    resolve_calls: list[str] = []
+    real = nodes_module.resolve_city
+
+    async def _spy(text: str, cities: Any, *, resolver: Any = None):
+        resolve_calls.append(text)
+        return await real(text, cities, resolver=resolver)
+
+    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Учиться будете сами?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed", "city": "pending"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert resolve_calls == ["Пермь"]
+    assert state["city_slug"] == "perm"
 
 
 async def test_слаг_города_доживает_до_следующего_хода(
@@ -497,7 +564,7 @@ async def test_слаг_города_доживает_до_следующего_
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -591,6 +658,7 @@ async def test_заглушка_города_без_модели_и_видна_�
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -632,6 +700,7 @@ async def test_заглушка_не_два_хода_подряд(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
             "turn": 1,
             "last_filler_turn": 1,
@@ -1097,7 +1166,7 @@ async def test_check_и_lookup_идут_параллельно(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -1122,7 +1191,7 @@ async def test_plan_получает_результаты_check_и_lookup(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )

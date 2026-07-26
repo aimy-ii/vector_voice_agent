@@ -106,7 +106,6 @@ async def test_реплика_не_годится_цикл_рвётся(script):
 async def test_цикл_останавливается_на_первом_незакрывшемся(script):
     client = FakeChecker(
         [
-            CheckerVerdict(reply_usable=True, step_closed=True),
             CheckerVerdict(reply_usable=True, step_closed=False),
             CheckerVerdict(reply_usable=True, step_closed=True),
         ]
@@ -116,7 +115,7 @@ async def test_цикл_останавливается_на_первом_нез�
         attempts={"name": 1, "city": 1},
     )
     # caller_name уже в профиле — name закрывает код до модели.
-    # city без поля в профиле: модель сказала «закрыт» — не верим, цикл рвётся.
+    # city: модель не закрыла — цикл рвётся, who_studies не смотрим.
     updated, _ = await run_checker(
         script=script,
         progress=progress,
@@ -212,8 +211,8 @@ async def test_счётчик_ноль_модель_не_вызывается(sc
     assert updated.status.get("name") != "closed"
 
 
-async def test_question_с_пустыми_fills_не_закрывается(script):
-    """Модель сказала «закрыт», поля профиля пустые — не верим."""
+async def test_question_с_пустыми_fills_закрывается_по_вердикту(script):
+    """Вердикт чекера окончательный: пустой профиль закрытию не мешает."""
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
     progress = ScriptProgress(
         status={"theory_format": "pending"},
@@ -223,10 +222,10 @@ async def test_question_с_пустыми_fills_не_закрывается(scri
     for step_id in ("name", "city", "who_studies", "experience", "transmission", "terms"):
         progress.status[step_id] = "closed"
         progress.attempts[step_id] = 1
-    updated, _ = await run_checker(
+    updated, closures = await run_checker(
         script=script,
         progress=progress,
-        messages=[HumanMessage(content="У меня проспект Просвещения, адрес")],
+        messages=[HumanMessage(content="Очно в классе")],
         profile={
             "caller_name": "Мария",
             "city": "Пермь",
@@ -237,8 +236,42 @@ async def test_question_с_пустыми_fills_не_закрывается(scri
         turn=5,
         client=client,
     )
-    assert updated.status.get("theory_format") != "closed"
+    assert updated.status.get("theory_format") == "closed"
+    assert ("theory_format", "диалог") in closures
     assert any(c["step_id"] == "theory_format" for c in client.calls)
+
+
+async def test_закрытие_не_зависит_от_порядка_заполнителя(script):
+    """Заполнитель раньше или позже — вердикт модели даёт один итог."""
+    progress_base = ScriptProgress(
+        status={"city": "pending"},
+        attempts={"city": 1},
+    )
+    progress_base.status["name"] = "closed"
+    progress_base.attempts["name"] = 1
+    reply = "В Санкт-Петербурге"
+    verdicts = [CheckerVerdict(reply_usable=True, step_closed=True)]
+
+    before_fill, closures_before = await run_checker(
+        script=script,
+        progress=ScriptProgress.from_mapping(progress_base.to_dict()),
+        messages=[HumanMessage(content=reply)],
+        profile={"caller_name": "Андрей"},
+        turn=2,
+        client=FakeChecker(list(verdicts)),
+    )
+    after_fill, closures_after = await run_checker(
+        script=script,
+        progress=ScriptProgress.from_mapping(progress_base.to_dict()),
+        messages=[HumanMessage(content=reply)],
+        profile={"caller_name": "Андрей", "city": "Санкт-Петербург"},
+        turn=2,
+        client=FakeChecker(list(verdicts)),
+    )
+    assert before_fill.status.get("city") == "closed"
+    assert after_fill.status.get("city") == "closed"
+    assert ("city", "диалог") in closures_before
+    assert ("city", "диалог") in closures_after
 
 
 async def test_question_с_заполненным_fills_закрывается(script):
