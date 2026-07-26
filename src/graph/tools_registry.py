@@ -17,8 +17,8 @@ from script.models import Help
 #: Признак: инструмент подошёл, но без города клиента ответить нельзя.
 NEED_CITY_SIGNAL = "\0need_city"
 
-#: Человекочитаемые факты из ``есть_в_базе`` → потребности справочника.
-#: ``нужно_завести`` сюда не входит: этих данных в базе нет.
+#: Человекочитаемые факты из ``knowledge`` → потребности справочника.
+#: Чего в справочнике нет — просто не найдётся, шаг отработает без чисел.
 _KNOWLEDGE_TO_NEED: dict[str, str] = {
     "перечень городов сети": "city_choices",
     "автопарк города по коробке передач": "city_meta",
@@ -35,18 +35,19 @@ _KNOWLEDGE_TO_NEED: dict[str, str] = {
 }
 
 
-def needs_from_knowledge(есть_в_базе: Sequence[str]) -> list[str]:
-    """Превращает список ``есть_в_базе`` в потребности справочника для прогрева.
+def needs_from_knowledge(knowledge: Sequence[str]) -> list[str]:
+    """Превращает список ``knowledge`` в потребности справочника для прогрева.
 
     Args:
-        есть_в_базе: факты, которые справочник уже отдаёт.
+        knowledge: факты, которые шаг ищет в базе знаний.
 
     Returns:
         Уникальный список ключей ``NeedKind`` / ``city_choices`` в стабильном порядке.
+        Неизвестные факты пропускаются — в справочнике их нет.
     """
     ordered: list[str] = []
     seen: set[str] = set()
-    for fact in есть_в_базе:
+    for fact in knowledge:
         need = _KNOWLEDGE_TO_NEED.get(str(fact).strip())
         if need and need not in seen:
             seen.add(need)

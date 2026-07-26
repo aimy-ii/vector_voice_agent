@@ -177,22 +177,12 @@ class RawScript(BaseModel):
     params: ScriptParams
 
 
-class StepKnowledge(BaseModel):
-    """Знания шага: что уже есть в справочнике и чего ещё нет.
-
-    Оба списка могут быть пустыми. ``нужно_завести`` в прогрев не берётся —
-    этих фактов в базе нет.
-    """
-
-    есть_в_базе: list[str] = Field(default_factory=list)
-    нужно_завести: list[str] = Field(default_factory=list)
-
-
 class SalesStep(BaseModel):
     """Шаг скрипта продаж (новый формат): ровно шесть полей.
 
     Название уходит в промпт вместе с требованиями — даёт модели контекст
     этапа продажи. Технических полей (счётчик, закрытие, fills) в файле нет.
+    ``knowledge`` — факты, которые шаг ищет в базе; пустой список — искать нечего.
     """
 
     id: str
@@ -200,7 +190,7 @@ class SalesStep(BaseModel):
     order: int
     requirements: str
     examples: list[str]
-    knowledge: StepKnowledge = Field(default_factory=StepKnowledge)
+    knowledge: list[str] = Field(default_factory=list)
 
 
 class RawSalesScript(BaseModel):

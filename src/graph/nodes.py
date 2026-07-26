@@ -202,7 +202,7 @@ def _step_fills_city(step: AnyStep | None) -> bool:
     if isinstance(step, SalesStep):
         if step.id == "city":
             return True
-        return "перечень городов сети" in step.knowledge.есть_в_базе
+        return "перечень городов сети" in step.knowledge
     return bool(step.fills and "city" in step.fills)
 
 
@@ -213,7 +213,7 @@ def _step_fills_branch(step: AnyStep | None) -> bool:
     if isinstance(step, SalesStep):
         if step.id == "branch":
             return True
-        return "филиалы города с адресами" in step.knowledge.есть_в_базе
+        return "филиалы города с адресами" in step.knowledge
     return bool(step.fills and "branch" in step.fills)
 
 

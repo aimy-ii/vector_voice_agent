@@ -130,8 +130,8 @@ def branch_summary(branch: Mapping[str, Any]) -> dict[str, Any]:
 def needs_of(step: AnyStep | None) -> list[str]:
     """Что шаг просит принести из справочника.
 
-    Старый формат — поле ``needs``. Новый — список ``есть_в_базе``
-    (``нужно_завести`` в прогрев не входит: этих данных в справочнике нет).
+    Старый формат — поле ``needs``. Новый — весь список ``knowledge``
+    (чего в справочнике нет, то не мапится и не найдётся).
 
     Args:
         step: шаг этого хода или None.
@@ -142,7 +142,7 @@ def needs_of(step: AnyStep | None) -> list[str]:
     if step is None:
         return []
     if isinstance(step, SalesStep):
-        return needs_from_knowledge(step.knowledge.есть_в_базе)
+        return needs_from_knowledge(step.knowledge)
     return list(step.needs)
 
 

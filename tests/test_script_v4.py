@@ -11,7 +11,7 @@ from graph.facts import needs_of
 from graph.prompts import _EXAMPLES_PREFIX, _describe_step, build_turn_messages, unknown_block
 from graph.tools_registry import FaqTool, HelpsTool, build_context_tools, needs_from_knowledge
 from script.build import ScriptError, build_script, params_from_settings
-from script.models import RawSalesScript, SalesStep, StepKnowledge
+from script.models import RawSalesScript, SalesStep
 from script.planner import script_head
 from script.source import JsonScriptSource
 
@@ -22,6 +22,7 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
     assert script_v4.version == "4"
     assert len(script_v4.steps) == 26
     assert len(script_v4.step_order) == 26
+    empty_knowledge = 0
     for step in script_v4.steps.values():
         dumped = step.model_dump()
         assert set(dumped) == {
@@ -32,7 +33,10 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
             "examples",
             "knowledge",
         }
-        assert set(dumped["knowledge"]) == {"есть_в_базе", "нужно_завести"}
+        assert isinstance(dumped["knowledge"], list)
+        if not dumped["knowledge"]:
+            empty_knowledge += 1
+    assert empty_knowledge == 8
 
 
 def test_v4_порядок_по_order(script_v4):
@@ -83,33 +87,42 @@ def test_v4_повтор_order_не_проходит(raw_script_v4):
         build_script(RawSalesScript.model_validate(payload))
 
 
-def test_knowledge_оба_пустые_и_заполненные():
-    """Knowledge разбирается с обоими пустыми списками и с заполненными."""
-    empty = StepKnowledge.model_validate({"есть_в_базе": [], "нужно_завести": []})
-    assert empty.есть_в_базе == []
-    assert empty.нужно_завести == []
-
-    filled = StepKnowledge.model_validate(
-        {
-            "есть_в_базе": ["стоимость обучения в городе"],
-            "нужно_завести": ["условия рассрочки"],
-        }
-    )
-    assert filled.есть_в_базе == ["стоимость обучения в городе"]
-    assert filled.нужно_завести == ["условия рассрочки"]
-
-    bare = SalesStep.model_validate(
+def test_knowledge_пустой_и_заполненный():
+    """Шаг разбирается с пустым knowledge и с заполненным списком."""
+    empty = SalesStep.model_validate(
         {
             "id": "x",
             "name": "Шаг",
             "order": 1,
             "requirements": "сделать",
             "examples": ["фраза"],
-            "knowledge": {"есть_в_базе": [], "нужно_завести": []},
+            "knowledge": [],
         }
     )
-    assert bare.knowledge.есть_в_базе == []
-    assert bare.knowledge.нужно_завести == []
+    assert empty.knowledge == []
+
+    filled = SalesStep.model_validate(
+        {
+            "id": "y",
+            "name": "Шаг",
+            "order": 2,
+            "requirements": "сделать",
+            "examples": ["фраза"],
+            "knowledge": ["филиалы города", "свободные места"],
+        }
+    )
+    assert filled.knowledge == ["филиалы города", "свободные места"]
+
+    bare = SalesStep.model_validate(
+        {
+            "id": "z",
+            "name": "Шаг",
+            "order": 3,
+            "requirements": "сделать",
+            "examples": ["фраза"],
+        }
+    )
+    assert bare.knowledge == []
 
 
 def test_шапка_v4_по_order_и_потолок(script_v4):
@@ -167,35 +180,43 @@ def test_промпт_v4_название_требования_образцы(sc
     assert _EXAMPLES_PREFIX in content
 
 
-def test_промпт_v4_нехватка_данных_из_нужно_завести(script_v4):
-    """При непустом нужно_завести и отсутствии фактов — строка о нехватке."""
+def test_промпт_v4_нехватка_данных_из_knowledge(script_v4):
+    """При непустом knowledge и отсутствии фактов — строка о нехватке."""
     step = script_v4.step("terms")
-    assert step.knowledge.нужно_завести
+    assert step.knowledge
     lines = _describe_step(step, {}, {}, heading="Шаг", context_text="")
     text = "\n".join(lines)
     assert "В контексте нет данных:" in text
     assert "время до первого занятия" in text
     assert "не выдумывать" in text
 
-    # Если факт уже в контексте — строки нет.
-    ctx = "время до первого занятия по вождению: 3 дня"
+    # Если факты уже в контексте — строки нет.
+    ctx = "срок обучения по городу: 2 месяца; время до первого занятия по вождению: 3 дня"
     lines_ok = _describe_step(step, {}, {}, heading="Шаг", context_text=ctx)
     assert "В контексте нет данных:" not in "\n".join(lines_ok)
 
 
-def test_прогрев_из_есть_в_базе_не_из_нужно_завести(script_v4):
-    """needs_of берёт только есть_в_базе; нужно_завести не мапится."""
+def test_промпт_v4_пустой_knowledge_без_строки_нехватки(script_v4):
+    """При пустом knowledge строки о нехватке данных нет."""
+    step = script_v4.step("greeting")
+    assert step.knowledge == []
+    lines = _describe_step(step, {}, {}, heading="Шаг", context_text="")
+    assert "В контексте нет данных:" not in "\n".join(lines)
+
+
+def test_прогрев_по_всему_списку_knowledge(script_v4):
+    """needs_of / прогрев идут по всему списку knowledge."""
     city = script_v4.step("city")
     assert needs_of(city) == ["city_choices"]
-    assert "city_choices" in needs_from_knowledge(city.knowledge.есть_в_базе)
+    assert needs_of(city) == needs_from_knowledge(city.knowledge)
 
     terms = script_v4.step("terms")
     needs = needs_of(terms)
     assert "city_meta" in needs
-    # «время до первого занятия» — в нужно_завести, в прогрев не входит.
-    mapped_need = needs_from_knowledge(terms.knowledge.нужно_завести)
-    assert mapped_need == []
-    assert needs == needs_from_knowledge(terms.knowledge.есть_в_базе)
+    assert needs == needs_from_knowledge(terms.knowledge)
+    # Факт без маппинга в справочник не даёт потребности — просто не найдётся.
+    assert "время до первого занятия по вождению" in terms.knowledge
+    assert needs_from_knowledge(["время до первого занятия по вождению"]) == []
 
     price = script_v4.step("price")
     assert needs_of(price) == ["price"]

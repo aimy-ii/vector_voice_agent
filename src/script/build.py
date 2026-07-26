@@ -29,7 +29,6 @@ from script.models import (
     SalesStep,
     ScriptParams,
     Step,
-    StepKnowledge,
 )
 
 
@@ -268,18 +267,9 @@ def _build_sales(raw: RawSalesScript) -> CompiledScript:
     _check_sales_steps(raw)
 
     ranked = sorted(raw.steps, key=lambda s: s.order)
-    # Нормализуем knowledge, чтобы оба списка всегда были списками.
-    steps: dict[str, SalesStep] = {}
-    for step in ranked:
-        knowledge = step.knowledge or StepKnowledge()
-        steps[step.id] = step.model_copy(
-            update={
-                "knowledge": StepKnowledge(
-                    есть_в_базе=list(knowledge.есть_в_базе),
-                    нужно_завести=list(knowledge.нужно_завести),
-                )
-            }
-        )
+    steps: dict[str, SalesStep] = {
+        step.id: step.model_copy(update={"knowledge": list(step.knowledge)}) for step in ranked
+    }
 
     return CompiledScript(
         id=raw.id,

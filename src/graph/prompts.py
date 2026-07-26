@@ -272,10 +272,12 @@ def _missing_knowledge_line(
     context_text: str,
     facts: Mapping[str, Any],
 ) -> str | None:
-    """Строка о нехватке данных из ``нужно_завести``, если их нет в контексте."""
+    """Строка о нехватке данных из ``knowledge``, если их нет в контексте."""
+    if not step.knowledge:
+        return None
     missing = [
         fact
-        for fact in step.knowledge.нужно_завести
+        for fact in step.knowledge
         if fact.strip() and not _context_has_fact(context_text, facts, fact)
     ]
     if not missing:
@@ -328,7 +330,7 @@ def _describe_step(
         facts: факты хода для подстановки.
         heading: заголовок строки («Шаг»).
         attempts: сколько раз шаг уже брали.
-        context_text: документ контекста (для проверки ``нужно_завести``).
+        context_text: документ контекста (для проверки ``knowledge``).
 
     Returns:
         Список строк описания.
