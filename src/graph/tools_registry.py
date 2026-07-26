@@ -17,6 +17,42 @@ from script.models import Help
 #: Признак: инструмент подошёл, но без города клиента ответить нельзя.
 NEED_CITY_SIGNAL = "\0need_city"
 
+#: Человекочитаемые факты из ``есть_в_базе`` → потребности справочника.
+#: ``нужно_завести`` сюда не входит: этих данных в базе нет.
+_KNOWLEDGE_TO_NEED: dict[str, str] = {
+    "перечень городов сети": "city_choices",
+    "автопарк города по коробке передач": "city_meta",
+    "срок обучения по городу": "city_meta",
+    "форматы теории в городе": "city_meta",
+    "что входит в стоимость курса": "city_meta",
+    "график занятий и адреса филиалов": "city_meta",
+    "филиалы города с адресами": "branches",
+    "стоимость обучения в городе": "price",
+    "адрес выбранного филиала": "branch_meta",
+    "документы для оформления": "city_meta",
+    "категории обучения кроме легковой": "city_meta",
+    "мессенджеры, доступные в городе": "city_meta",
+}
+
+
+def needs_from_knowledge(есть_в_базе: Sequence[str]) -> list[str]:
+    """Превращает список ``есть_в_базе`` в потребности справочника для прогрева.
+
+    Args:
+        есть_в_базе: факты, которые справочник уже отдаёт.
+
+    Returns:
+        Уникальный список ключей ``NeedKind`` / ``city_choices`` в стабильном порядке.
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for fact in есть_в_базе:
+        need = _KNOWLEDGE_TO_NEED.get(str(fact).strip())
+        if need and need not in seen:
+            seen.add(need)
+            ordered.append(need)
+    return ordered
+
 
 class ContextTool(Protocol):
     """Инструмент контекстера.
@@ -177,9 +213,12 @@ class FaqTool:
 def build_context_tools(script: CompiledScript) -> list[ContextTool]:
     """Реестр инструментов контекстера по приоритету.
 
+    В формате продаж справок в скрипте нет — поиск через FAQ справочника.
     Добавить новый инструмент = дописать его в этот список. Контекстер
     перебирает реестр по порядку, первый подходящий отвечает.
     """
+    if script.is_sales:
+        return [FaqTool()]
     return [
         HelpsTool(script),  # справки скрипта — главнее
         FaqTool(),  # FAQ города — резерв

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from script.build import CompiledScript, build_script  # noqa: E402
-from script.models import RawScript  # noqa: E402
+from script.models import RawSalesScript, RawScript  # noqa: E402
 from script.source import JsonScriptSource, ScriptRegistry  # noqa: E402
 from script.store import MemoryScriptStore  # noqa: E402
 
@@ -39,6 +39,20 @@ def raw_script_v1(data_dir: Path) -> RawScript:
     return JsonScriptSource(data_dir).fetch("vector_ru", "1")
 
 
+@pytest.fixture(scope="session")
+def raw_script_v3(data_dir: Path) -> RawScript:
+    """Сырой скрипт v3."""
+    return JsonScriptSource(data_dir).fetch("vector_ru", "3")
+
+
+@pytest.fixture(scope="session")
+def raw_script_v4(data_dir: Path) -> RawSalesScript:
+    """Сырой скрипт продаж v4."""
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "4")
+    assert isinstance(raw, RawSalesScript)
+    return raw
+
+
 @pytest.fixture()
 def script(raw_script: RawScript) -> CompiledScript:
     """Скомпилированный рабочий скрипт v2."""
@@ -49,6 +63,18 @@ def script(raw_script: RawScript) -> CompiledScript:
 def script_v1(raw_script_v1: RawScript) -> CompiledScript:
     """Скомпилированный скрипт v1."""
     return build_script(raw_script_v1)
+
+
+@pytest.fixture()
+def script_v3(raw_script_v3: RawScript) -> CompiledScript:
+    """Скомпилированный скрипт v3."""
+    return build_script(raw_script_v3)
+
+
+@pytest.fixture()
+def script_v4(raw_script_v4) -> CompiledScript:
+    """Скомпилированный скрипт продаж v4."""
+    return build_script(raw_script_v4)
 
 
 @pytest.fixture()

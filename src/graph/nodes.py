@@ -52,14 +52,14 @@ from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from graph.tools_registry import build_context_tools
 from kb.client import vector_kb
-from script.build import CompiledScript
-from script.models import Step
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep
 from script.planner import (
     answered_inform_check,
     peek_next_step,
     script_head,
 )
-from script.price import price_line
+from script.price import price_line, price_line_from_kb
 from script.source import registry
 from script.store import (
     PROGRESS_FIELDS_CHECKER,
@@ -127,7 +127,7 @@ def _script_of(state: CallState) -> CompiledScript:
     )
 
 
-def _current_step(state: CallState) -> Step | None:
+def _current_step(state: CallState) -> AnyStep | None:
     """Возвращает ведущий шаг хода."""
     step_id = state.get("current_step")
     if not step_id:
@@ -140,7 +140,7 @@ def _lead_from_progress(
     *,
     progress: ScriptProgress,
     profile: dict[str, str],
-) -> tuple[list[Step], Step | None]:
+) -> tuple[list[AnyStep], AnyStep | None]:
     """Считает шапку и ведущий шаг по прогрессу — без инкремента счётчика.
 
     Args:
@@ -189,13 +189,46 @@ def _field_step_attempts(
         Число попыток; ноль — шаг ещё ни разу не задавался.
     """
     step_id = script.filled_by.get(field)
+    if not step_id and script.is_sales and field in {"city", "branch"}:
+        step_id = field
     if not step_id:
         return 0
     return int(progress.attempts.get(step_id, 0))
 
 
+def _step_fills_city(step: AnyStep | None) -> bool:
+    """Шаг собирает город: по fills (старый) или по id/знанию (продажи)."""
+    if step is None:
+        return False
+    if isinstance(step, SalesStep):
+        if step.id == "city":
+            return True
+        return "перечень городов сети" in step.knowledge.есть_в_базе
+    return bool(step.fills and "city" in step.fills)
+
+
+def _step_fills_branch(step: AnyStep | None) -> bool:
+    """Шаг собирает филиал: по fills (старый) или по id/знанию (продажи)."""
+    if step is None:
+        return False
+    if isinstance(step, SalesStep):
+        if step.id == "branch":
+            return True
+        return "филиалы города с адресами" in step.knowledge.есть_в_базе
+    return bool(step.fills and "branch" in step.fills)
+
+
+def _price_phrase_for(script: CompiledScript, price: Any) -> str | None:
+    """Готовая фраза о цене: из шаблонов скрипта или из базы (продажи)."""
+    if price is None:
+        return None
+    if script.is_sales:
+        return price_line_from_kb(price)
+    return price_line(price, script.params.price)
+
+
 def _step_needs_lookup(
-    step: Step | None,
+    step: AnyStep | None,
     state: CallState,
     *,
     city_asked: bool = True,
@@ -217,14 +250,13 @@ def _step_needs_lookup(
     """
     if step is None:
         return False
-    if step.needs:
+    if needs_of(step):
         return True
-    if city_asked and step.fills and "city" in step.fills and not state.get("city_slug"):
+    if city_asked and _step_fills_city(step) and not state.get("city_slug"):
         return True
     if (
         branch_asked
-        and step.fills
-        and "branch" in step.fills
+        and _step_fills_branch(step)
         and state.get("city_slug")
         and not state.get("branch_slug")
     ):
@@ -232,7 +264,7 @@ def _step_needs_lookup(
     return False
 
 
-def _head_steps(state: CallState) -> list[Step]:
+def _head_steps(state: CallState) -> list[AnyStep]:
     """Шапка шагов этого хода."""
     script = _script_of(state)
     ids = state.get("head_steps") or []
@@ -533,7 +565,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     # Город: только если шаг city уже задавался и слага ещё нет —
     # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
-    fills_city = bool(step and step.fills and "city" in step.fills)
+    fills_city = _step_fills_city(step)
     if city_asked and fills_city and user_text:
         search_text: str | None = user_text
     elif city_asked and profile_city:
@@ -570,7 +602,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
             _note({"call": "get_city", "slug": resolution.slug, "ok": city_meta is not None})
             price_phrase = None
             if city_meta and city_meta.get("price") is not None:
-                price_phrase = price_line(city_meta.get("price"), script.params.price)
+                price_phrase = _price_phrase_for(script, city_meta.get("price"))
             if city_meta:
                 ctx = merge_static(
                     ctx,
@@ -603,7 +635,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
         and city_slug
         and not (state.get("branch_slug") or ctx.branch_slug)
         and step
-        and "branch" in (step.fills or [])
+        and _step_fills_branch(step)
         and user_text
     ):
         if allow_filler and not spoken_filler:
@@ -819,7 +851,9 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     for item in result.get("understood") or []:
         key = str(item.get("key", "")).strip()
         value = str(item.get("value", "")).strip()
-        if key in script.profile_fields and value:
+        # В формате продаж форма не объявлена — пишем любые имена полей.
+        allowed = script.is_sales or key in script.profile_fields
+        if allowed and value:
             if key in {"caller_name", "student_name"}:
                 value = given_name(value) or value
             profile[key] = value
@@ -837,7 +871,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         if record is not None:
             asides_done.append(str(aside_id))
             for key, value in getattr(record, "sets", {}).items():
-                if key in script.profile_fields:
+                if script.is_sales or key in script.profile_fields:
                     profile[key] = value
 
     spoken_text = "".join(list(state.get("spoken") or [])).strip()

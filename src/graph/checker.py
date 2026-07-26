@@ -20,8 +20,8 @@ from pydantic import BaseModel, Field
 
 from core.config import settings
 from graph.history import last_user_text
-from script.build import CompiledScript
-from script.models import Step
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep, Step
 from script.planner import exhausted, is_closed, iter_available, profile_has, render_step_text
 from script.source import registry
 from script.store import ScriptProgress, progress_from_state
@@ -74,14 +74,16 @@ class CheckerClient(Protocol):
         *,
         history_slice: str,
         client_reply: str,
-        step: Step,
+        step: AnyStep,
         step_text: str | None,
     ) -> CheckerVerdict | None:
         """Оценивает один шаг. None — модель не ответила."""
 
 
-def closure_criterion(step: Step) -> str:
+def closure_criterion(step: AnyStep) -> str:
     """Человекочитаемый критерий закрытия для вида шага."""
+    if isinstance(step, SalesStep):
+        return "требования шага выполнены по диалогу"
     return _KIND_CRITERIA.get(step.kind, "задача шага решена")
 
 
@@ -93,7 +95,7 @@ class LlmCheckerClient:
         *,
         history_slice: str,
         client_reply: str,
-        step: Step,
+        step: AnyStep,
         step_text: str | None,
     ) -> CheckerVerdict | None:
         """Вызывает модель; при сбое возвращает None."""
@@ -110,24 +112,36 @@ class LlmCheckerClient:
             "- inform_check — клиент ответил на проверочный вопрос;\n"
             "- action — результат виден в диалоге: время встречи, анкета,"
             " удержанное место.\n"
+            "- шаг продаж (requirements) — требования шага выполнены по диалогу.\n"
             "«Потом скажу», уклонение, шутка, ответ не по теме шага —"
             " step_closed=false.\n"
             "client_asks_inform=true, если клиент просит рассказать про обучение,"
             " условия, стоимость, сроки, теорию/практику или состав пакета.\n"
             "Идентификатор шага не возвращай."
         )
-        human_parts = [
-            f"### Срез истории\n{history_slice or '(пусто)'}",
-            f"### Реплика клиента\n{client_reply or '(пусто)'}",
-            "### Шаг",
-            f"id (служебно, не возвращай): {step.id}",
-            f"Вид: {step.kind}",
-            f"Критерий закрытия: {criterion}",
-            f"Задача: {step.goal}",
-            f"Формулировка: {step_text or step.text or '—'}",
-        ]
-        if step.kind == "inform_check" and step.check_question:
-            human_parts.append(f"Проверочный вопрос: {step.check_question}")
+        if isinstance(step, SalesStep):
+            human_parts = [
+                f"### Срез истории\n{history_slice or '(пусто)'}",
+                f"### Реплика клиента\n{client_reply or '(пусто)'}",
+                "### Шаг",
+                f"id (служебно, не возвращай): {step.id}",
+                f"Название: {step.name}",
+                f"Критерий закрытия: {criterion}",
+                f"Требования:\n{step.requirements}",
+            ]
+        else:
+            human_parts = [
+                f"### Срез истории\n{history_slice or '(пусто)'}",
+                f"### Реплика клиента\n{client_reply or '(пусто)'}",
+                "### Шаг",
+                f"id (служебно, не возвращай): {step.id}",
+                f"Вид: {step.kind}",
+                f"Критерий закрытия: {criterion}",
+                f"Задача: {step.goal}",
+                f"Формулировка: {step_text or step.text or '—'}",
+            ]
+            if step.kind == "inform_check" and step.check_question:
+                human_parts.append(f"Проверочный вопрос: {step.check_question}")
         human = "\n".join(human_parts)
         schema = response_format_from(CheckerVerdict, name="vector_checker")
         try:
@@ -166,7 +180,7 @@ def _message_text(message: BaseMessage) -> str:
 def history_slice_for(
     messages: Sequence[BaseMessage],
     *,
-    steps: Sequence[Step],
+    steps: Sequence[AnyStep],
     progress: ScriptProgress,
     turn: int,
     reply: str | None = None,
@@ -277,7 +291,8 @@ async def check_pass(
         if is_closed(updated.status.get(step.id)):
             continue
         if (
-            step.kind == "question"
+            isinstance(step, Step)
+            and step.kind == "question"
             and step.fills
             and int(updated.attempts.get(step.id, 0)) > 0
             and any(profile_has(profile, key) for key in step.fills)
@@ -287,11 +302,14 @@ async def check_pass(
 
     # inform закрывает код по доставке — в pending чекера не отдаём.
     # Включаем и шаги на пороге счётчика: модель смотрит раньше счётчика.
-    pending = [
-        step
-        for step in iter_available(script, status=updated.status, profile=profile)
-        if int(updated.attempts.get(step.id, 0)) > 0 and step.kind != "inform"
-    ]
+    # В формате продаж видов нет — все висящие идут в чекер.
+    pending = []
+    for step in iter_available(script, status=updated.status, profile=profile):
+        if int(updated.attempts.get(step.id, 0)) <= 0:
+            continue
+        if isinstance(step, Step) and step.kind == "inform":
+            continue
+        pending.append(step)
     if pending and reply.strip():
         client = judge or LlmCheckerClient()
         history = history_slice_for(
@@ -404,6 +422,10 @@ def close_delivered_inform(
     step = script.steps.get(pending_step)
     if step is None:
         return updated
-    if step.kind == "inform" and int(updated.attempts.get(step.id, 0)) > 0:
+    if (
+        isinstance(step, Step)
+        and step.kind == "inform"
+        and int(updated.attempts.get(step.id, 0)) > 0
+    ):
         updated.status[step.id] = "closed"
     return updated

@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Mapping
 
 from pydantic import BaseModel, Field
 
@@ -159,7 +159,7 @@ class ScriptParams(BaseModel):
 
 
 class RawScript(BaseModel):
-    """Скрипт разговора как он лежит в источнике.
+    """Скрипт разговора как он лежит в источнике (формат v1–v3).
 
     Персона и правила речи живут в настройках агента, не в скрипте.
     Лишние ключи вроде ``persona`` / ``rules`` из v1–v2 молча игнорируются.
@@ -175,3 +175,57 @@ class RawScript(BaseModel):
     helps: list[Help] = Field(default_factory=list)
     objections: list[Objection] = Field(default_factory=list)
     params: ScriptParams
+
+
+class StepKnowledge(BaseModel):
+    """Знания шага: что уже есть в справочнике и чего ещё нет.
+
+    Оба списка могут быть пустыми. ``нужно_завести`` в прогрев не берётся —
+    этих фактов в базе нет.
+    """
+
+    есть_в_базе: list[str] = Field(default_factory=list)
+    нужно_завести: list[str] = Field(default_factory=list)
+
+
+class SalesStep(BaseModel):
+    """Шаг скрипта продаж (новый формат): ровно шесть полей.
+
+    Название уходит в промпт вместе с требованиями — даёт модели контекст
+    этапа продажи. Технических полей (счётчик, закрытие, fills) в файле нет.
+    """
+
+    id: str
+    name: str
+    order: int
+    requirements: str
+    examples: list[str]
+    knowledge: StepKnowledge = Field(default_factory=StepKnowledge)
+
+
+class RawSalesScript(BaseModel):
+    """Скрипт продаж как у заказчика: только идентификатор, версия и шаги.
+
+    Формат определяется по наличию у шагов поля ``requirements``.
+    Справки, заглушки и форма профиля живут в настройках / базе, не здесь.
+    """
+
+    id: str
+    version: str
+    steps: list[SalesStep] = Field(default_factory=list)
+
+
+def is_sales_payload(payload: Mapping[str, object]) -> bool:
+    """Определяет формат скрипта по наличию ``requirements`` у шагов.
+
+    Args:
+        payload: сырой JSON-словарь.
+
+    Returns:
+        True, если это скрипт продаж (новый формат).
+    """
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return False
+    first = steps[0]
+    return isinstance(first, Mapping) and "requirements" in first

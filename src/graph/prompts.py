@@ -18,8 +18,8 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from core.config import settings
 from graph.context import DYN_MISSING, DYN_NEED_CITY
 from graph.names import given_name
-from script.build import CompiledScript
-from script.models import Step
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep
 from script.planner import render_step_text
 
 #: Сколько последних реплик отдаём модели.
@@ -193,6 +193,9 @@ def persona_block() -> str:
 def profile_block(script: CompiledScript, profile: Mapping[str, str]) -> str:
     """Показывает, что уже известно о собеседнике.
 
+    В формате продаж форма профиля не объявляется: показываем то, что уже
+    записано в профиль по именам полей из требований шагов.
+
     Args:
         script: скомпилированный скрипт.
         profile: собранный профиль.
@@ -202,6 +205,18 @@ def profile_block(script: CompiledScript, profile: Mapping[str, str]) -> str:
     """
     known: list[str] = []
     unknown: list[str] = []
+
+    if script.is_sales:
+        for key, raw_value in sorted(profile.items()):
+            raw = str(raw_value).strip()
+            if not raw:
+                continue
+            value = given_name(raw) if key in {"caller_name", "student_name"} else raw
+            known.append(f"- {key}: {value}")
+        parts = ["Что уже известно:"]
+        parts.append("\n".join(known) if known else "- пока ничего")
+        return "\n".join(parts)
+
     for key, field in script.profile_fields.items():
         whose = "звонящий" if field.role == "caller" else "будущий курсант"
         raw = str(profile.get(key, "")).strip()
@@ -237,13 +252,79 @@ def context_block(context_text: str) -> str:
     )
 
 
+#: Пометка к образцам формулировок шага продаж.
+_EXAMPLES_PREFIX = "Образцы формулировок (не зачитывать дословно, это форма фразы, а не текст):"
+
+
+def _context_has_fact(context_text: str, facts: Mapping[str, Any], fact: str) -> bool:
+    """Есть ли факт в контексте или фактах хода (грубый поиск по подстроке)."""
+    needle = fact.strip().lower()
+    if not needle:
+        return True
+    haystack = (context_text or "").lower()
+    if needle in haystack:
+        return True
+    # Короткие ключевые слова из названия факта.
+    tokens = [t for t in needle.replace(":", " ").split() if len(t) >= 4]
+    if tokens and all(t in haystack for t in tokens[:2]):
+        return True
+    body = json.dumps(facts, ensure_ascii=False).lower() if facts else ""
+    return bool(tokens) and all(t in body for t in tokens[:2])
+
+
+def _missing_knowledge_line(
+    step: SalesStep,
+    *,
+    context_text: str,
+    facts: Mapping[str, Any],
+) -> str | None:
+    """Строка о нехватке данных из ``нужно_завести``, если их нет в контексте."""
+    missing = [
+        fact
+        for fact in step.knowledge.нужно_завести
+        if fact.strip() and not _context_has_fact(context_text, facts, fact)
+    ]
+    if not missing:
+        return None
+    joined = "; ".join(missing)
+    return (
+        f"В контексте нет данных: {joined}. "
+        "Вести шаг без чисел и конкретных величин, не выдумывать."
+    )
+
+
+def _describe_sales_step(
+    step: SalesStep,
+    *,
+    heading: str,
+    attempts: int = 0,
+    context_text: str = "",
+    facts: Mapping[str, Any] | None = None,
+) -> list[str]:
+    """Собирает строки описания шага продаж: название, требования, образцы."""
+    asked = "уже спрашивали, ответа нет" if attempts > 0 else "новый вопрос"
+    lines = [
+        f"{heading}: {step.id} ({asked}).",
+        f"Название: {step.name}",
+        f"Требования:\n{step.requirements}",
+    ]
+    if step.examples:
+        lines.append(_EXAMPLES_PREFIX)
+        lines.extend(step.examples)
+    gap = _missing_knowledge_line(step, context_text=context_text, facts=facts or {})
+    if gap:
+        lines.append(gap)
+    return lines
+
+
 def _describe_step(
-    step: Step,
+    step: AnyStep,
     profile: Mapping[str, str],
     facts: Mapping[str, Any],
     *,
     heading: str,
     attempts: int = 0,
+    context_text: str = "",
 ) -> list[str]:
     """Собирает строки описания одного шага для промпта.
 
@@ -253,10 +334,20 @@ def _describe_step(
         facts: факты хода для подстановки.
         heading: заголовок строки («Шаг»).
         attempts: сколько раз шаг уже брали.
+        context_text: документ контекста (для проверки ``нужно_завести``).
 
     Returns:
         Список строк описания.
     """
+    if isinstance(step, SalesStep):
+        return _describe_sales_step(
+            step,
+            heading=heading,
+            attempts=attempts,
+            context_text=context_text,
+            facts=facts,
+        )
+
     asked = "уже спрашивали, ответа нет" if attempts > 0 else "новый вопрос"
     lines = [f"{heading}: {step.id} ({step.kind}, {asked}).", f"Задача: {step.goal}"]
     if step.why:
@@ -270,7 +361,7 @@ def _describe_step(
             else:
                 lines.append("Опорная формулировка (можно сказать своими словами):\n" + filled)
     if step.examples:
-        lines.append("Образцы формулировок (не зачитывать дословно, это форма фразы, а не текст):")
+        lines.append(_EXAMPLES_PREFIX)
         lines.extend(step.examples)
     if step.avoid:
         lines.append(f"На этом шаге нельзя: {step.avoid}")
@@ -290,11 +381,12 @@ def _describe_step(
 
 
 def steps_block(
-    steps: Sequence[Step],
+    steps: Sequence[AnyStep],
     profile: Mapping[str, str],
     facts: Mapping[str, Any],
     *,
     attempts: Mapping[str, int],
+    context_text: str = "",
 ) -> str:
     """Описывает шапку: уже заданные и один новый.
 
@@ -303,6 +395,7 @@ def steps_block(
         profile: профиль.
         facts: факты хода (без перечня городов).
         attempts: счётчики попыток.
+        context_text: документ контекста для проверки нехватки знаний.
 
     Returns:
         Текстовый блок.
@@ -328,18 +421,20 @@ def steps_block(
                 facts,
                 heading="Шаг",
                 attempts=int(attempts.get(step.id, 0)),
+                context_text=context_text,
             )
         )
     return "\n".join(lines)
 
 
 def step_block(
-    step: Step,
+    step: AnyStep,
     profile: Mapping[str, str],
     facts: Mapping[str, Any],
     *,
-    next_step: Step | None = None,
+    next_step: AnyStep | None = None,
     attempts: Mapping[str, int] | None = None,
+    context_text: str = "",
 ) -> str:
     """Совместимая обёртка: текущий и следующий как шапка из одного-двух шагов.
 
@@ -349,15 +444,16 @@ def step_block(
         facts: факты хода.
         next_step: следующий шаг или None.
         attempts: счётчики попыток.
+        context_text: документ контекста.
 
     Returns:
         Текстовый блок шапки.
     """
     counts = attempts or {}
-    bundle = [step]
+    bundle: list[AnyStep] = [step]
     if next_step is not None:
         bundle.append(next_step)
-    return steps_block(bundle, profile, facts, attempts=counts)
+    return steps_block(bundle, profile, facts, attempts=counts, context_text=context_text)
 
 
 def facts_block(facts: Mapping[str, Any]) -> str:
@@ -474,13 +570,13 @@ def unknown_block(script: CompiledScript) -> str:
 def build_turn_messages(
     *,
     script: CompiledScript,
-    steps: Sequence[Step] | None = None,
-    step: Step | None = None,
+    steps: Sequence[AnyStep] | None = None,
+    step: AnyStep | None = None,
     profile: Mapping[str, str],
     facts: Mapping[str, Any],
     history: Sequence[BaseMessage],
     asides_done: Sequence[str],
-    next_step: Step | None = None,
+    next_step: AnyStep | None = None,
     context_text: str = "",
     spoken_filler: str | None = None,
     attempts: Mapping[str, int] | None = None,
@@ -512,7 +608,7 @@ def build_turn_messages(
         Список сообщений: одно системное и хвост истории.
     """
     counts = dict(attempts or {})
-    head: list[Step]
+    head: list[AnyStep]
     if steps is not None:
         head = list(steps)
     elif step is not None:
@@ -531,18 +627,21 @@ def build_turn_messages(
     status_note = dynamic_status_block(status=dynamic_status, searching_retry=searching_retry)
     if status_note:
         blocks.append(status_note)
+    ctx_for_steps = ""
     if context_text and not searching_retry:
         ctx = context_block(context_text)
         if ctx:
             blocks.append(ctx)
+        ctx_for_steps = context_text
     blocks.append(profile_block(script, profile))
 
     facts_text = facts_block(facts)
     if facts_text:
         blocks.append(facts_text)
 
-    blocks.append(steps_block(head, profile, facts, attempts=counts))
-    blocks.append(aside_block(script, asides_done))
+    blocks.append(steps_block(head, profile, facts, attempts=counts, context_text=ctx_for_steps))
+    if not script.is_sales:
+        blocks.append(aside_block(script, asides_done))
     filler = filler_spoken_block(spoken_filler)
     if filler:
         blocks.append(filler)

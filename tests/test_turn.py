@@ -646,7 +646,7 @@ async def test_пустая_версия_из_env_берёт_последнюю(
     model["result"] = {"understood": [], "reply": "Слушаю."}
     state = await graph.ainvoke({"messages": [{"role": "human", "content": "Здравствуйте"}]})
     assert nodes_module.settings.script_version is None
-    assert state["script_version"] == "3"
+    assert state["script_version"] == "4"
 
 
 async def test_заглушка_города_без_модели_и_видна_генератору(

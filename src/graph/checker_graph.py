@@ -41,7 +41,7 @@ from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
 from kb.client import vector_kb
 from script.planner import peek_next_step, pick_step
-from script.price import price_line
+from script.price import price_line, price_line_from_kb
 from script.source import registry
 from script.store import PROGRESS_FIELDS_CHECKER
 
@@ -141,11 +141,14 @@ async def _warmup_next_step(
 
     needs = set(needs_of(nxt))
     city_slug = state.get("city_slug") or ctx.city_slug or None
-    # Город из профиля ещё без слага — мета не греется, это ок.
-    if not city_slug:
-        return ctx
 
     try:
+        if "city_choices" in needs:
+            await vector_kb.list_cities()
+        # Город из профиля ещё без слага — мета не греется, это ок.
+        if not city_slug:
+            return ctx
+
         want_city = ("city_meta" in needs or "price" in needs) and not ctx.city_slug
         want_price = "price" in needs
         want_branches = "branches" in needs
@@ -157,7 +160,10 @@ async def _warmup_next_step(
                 )
                 price_phrase = None
                 if want_price and city_meta.get("price") is not None:
-                    price_phrase = price_line(city_meta.get("price"), script.params.price)
+                    if script.is_sales:
+                        price_phrase = price_line_from_kb(city_meta.get("price"))
+                    else:
+                        price_phrase = price_line(city_meta.get("price"), script.params.price)
                 ctx = merge_static(
                     ctx,
                     city_slug=city_slug,
@@ -167,6 +173,10 @@ async def _warmup_next_step(
                 )
         if want_branches:
             await vector_kb.list_branches(city_slug)
+        if "branch_meta" in needs:
+            branch_slug = state.get("branch_slug") or ctx.branch_slug
+            if branch_slug:
+                await vector_kb.get_branch(branch_slug)
     except Exception as exc:  # noqa: BLE001
         log.warning("Прогрев под шаг %s не удался: %s", nxt.id, exc)
     return ctx

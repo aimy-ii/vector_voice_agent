@@ -13,7 +13,7 @@ from script.source import JsonScriptSource, ScriptRegistry
 
 def test_последняя_версия_берётся_без_указания(data_dir):
     raw = JsonScriptSource(data_dir).fetch("vector_ru", None)
-    assert raw.version == "3"
+    assert raw.version == "4"
 
 
 def test_точная_версия_v1_поднимается(data_dir):
