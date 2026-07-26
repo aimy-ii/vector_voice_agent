@@ -152,7 +152,13 @@ async def _warmup_next_step(
         want_city = ("city_meta" in needs or "price" in needs) and not ctx.city_slug
         want_price = "price" in needs
         want_branches = "branches" in needs
-        if want_city or want_price or not ctx.city_faq:
+        # Статику города подшиваем один раз: повторный merge при уже
+        # зафиксированном city_slug не нужен (merge_static и так no-op).
+        if (
+            want_city
+            or (want_price and not ctx.city_slug)
+            or (not ctx.city_faq and not ctx.city_slug)
+        ):
             city_meta = await vector_kb.get_city(city_slug)
             if city_meta:
                 city_name = (
@@ -187,8 +193,10 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
 
     Точка отсчёта сбрасывается при смене ``partial_utterance_id`` от бота —
     не по знаку прироста длины. Порог ``checker_min_growth_chars``
-    применяется только к приросту внутри одной реплики относительно
-    ``last_checked_partial``. Первый проход новой реплики порогом не режется.
+    применяется только к промежуточным кускам внутри одной реплики
+    относительно ``last_checked_partial``. Финальная реплика
+    (``partial_is_final``) разбирается всегда, в том числе при нулевом
+    приросте. Первый проход новой реплики порогом не режется.
     Иначе дозаполняет профиль, зовёт ``check_pass``, ``run_contexter``
     и прогрев под предстоящий шаг.
     """
@@ -197,6 +205,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     utterance_id = str(state.get("partial_utterance_id") or "")
     last_utterance_id = str(state.get("last_checked_utterance_id") or "")
     previous = str(state.get("last_checked_partial") or "")
+    is_final = bool(state.get("partial_is_final"))
     min_growth = settings.checker_min_growth_chars
     new_utterance = is_new_utterance(utterance_id, last_utterance_id)
     if new_utterance:
@@ -209,12 +218,14 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         )
     growth = len(reply) - len(previous)
     if not new_utterance:
+        kind = "финал" if is_final else "прирост"
         stage(
             "live-check",
-            f"накоплено {len(reply)} симв., прирост с прошлого прохода {growth} симв.",
+            f"накоплено {len(reply)} симв., {kind} с прошлого прохода {growth} симв.",
             "start",
         )
-    if growth_below_threshold(reply, previous, min_growth=min_growth):
+    # Порог только для промежуточных; финал — всегда разбирать.
+    if not is_final and growth_below_threshold(reply, previous, min_growth=min_growth):
         stage(
             "live-check",
             f"прирост {growth} < порога {min_growth}, пропуск",

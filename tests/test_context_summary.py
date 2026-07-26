@@ -86,6 +86,50 @@ def test_контекст_статика_один_раз_цена_фразой(f
     again = merge_static(ctx, city_slug="spb", city_name="Питер", city_meta=city)
     assert again.city_slug == "perm"
     assert again.city_name == "Пермь"
+    assert again.static_text.count("Статика разговора") == 1
+    assert again.static_text == ctx.static_text
+
+
+def test_статика_города_в_системном_сообщении_один_раз(script):
+    """Повторная подшивка merge_static не дублирует блок города в промпте."""
+    from graph.prompts import build_turn_messages
+
+    city_meta = {
+        "categories": [{"code": "B", "duration": "2.5 мес"}],
+        "vehicles": {"manual": ["Лада"], "automatic": []},
+    }
+    ctx = ConversationContext()
+    ctx = merge_static(
+        ctx,
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta=city_meta,
+        price_line="Стоимость обучения — от 43900 рублей.",
+    )
+    ctx = merge_static(
+        ctx,
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta=city_meta,
+        price_line="Стоимость обучения — от 43900 рублей.",
+    )
+    assert ctx.render().count("Статика разговора") == 1
+    assert ctx.render().count("Город: Пермь") == 1
+
+    step = script.step("city")
+    messages = build_turn_messages(
+        script=script,
+        history=[],
+        profile={"caller_name": "Андрей", "city": "Пермь"},
+        facts={},
+        steps=[step],
+        attempts={"city": 1},
+        context_text=ctx.render(),
+        asides_done=[],
+    )
+    system = str(messages[0].content)
+    assert system.count("Статика разговора") == 1
+    assert system.count("Город: Пермь") == 1
 
 
 def test_format_city_static_без_рекламы_словарей_и_ключей():

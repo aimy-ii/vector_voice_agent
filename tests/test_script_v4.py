@@ -16,12 +16,12 @@ from script.planner import script_head
 from script.source import JsonScriptSource
 
 
-def test_v4_собирается_27_шагов_по_шесть_полей(script_v4):
+def test_v4_собирается_26_шагов_по_шесть_полей(script_v4):
     """Скрипт v4 собирается; у каждого шага ровно шесть полей."""
     assert script_v4.is_sales
     assert script_v4.version == "4"
-    assert len(script_v4.steps) == 27
-    assert len(script_v4.step_order) == 27
+    assert len(script_v4.steps) == 26
+    assert len(script_v4.step_order) == 26
     for step in script_v4.steps.values():
         dumped = step.model_dump()
         assert set(dumped) == {
@@ -40,7 +40,7 @@ def test_v4_порядок_по_order(script_v4):
     orders = [script_v4.step(sid).order for sid in script_v4.step_order]
     assert orders == sorted(orders)
     assert script_v4.step_order[0] == "greeting"
-    assert script_v4.step_order[1] == "name"
+    assert script_v4.step_order[1] == "city"
 
 
 @pytest.mark.parametrize(
@@ -117,18 +117,18 @@ def test_шапка_v4_по_order_и_потолок(script_v4):
     head = script_head(script_v4, status={}, attempts={}, profile={}, pending_soft_cap=4)
     assert [s.id for s in head] == ["greeting"]
 
-    attempts = {"greeting": 1, "name": 1, "city": 1}
+    attempts = {"greeting": 1, "city": 1, "who_studies": 1}
     head = script_head(script_v4, status={}, attempts=attempts, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["greeting", "name", "city", "who_studies"]
+    assert [s.id for s in head] == ["greeting", "city", "who_studies", "experience"]
 
-    attempts = {"greeting": 1, "name": 1, "city": 1, "who_studies": 1}
+    attempts = {"greeting": 1, "city": 1, "who_studies": 1, "experience": 1}
     head = script_head(script_v4, status={}, attempts=attempts, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["greeting", "name", "city", "who_studies"]
-    assert "experience" not in {s.id for s in head}
+    assert [s.id for s in head] == ["greeting", "city", "who_studies", "experience"]
+    assert "transmission" not in {s.id for s in head}
 
-    status = {"greeting": "closed", "name": "closed"}
+    status = {"greeting": "closed", "city": "closed"}
     head = script_head(script_v4, status=status, attempts={}, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["city"]
+    assert [s.id for s in head] == ["who_studies"]
 
 
 def test_v1_v2_v3_собираются_как_раньше(script, script_v1, script_v3, data_dir):

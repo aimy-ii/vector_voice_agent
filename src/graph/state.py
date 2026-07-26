@@ -83,6 +83,8 @@ class CallState(TypedDict, total=False):
             клиента; вход служебного графа ``vector_checker``.
         partial_utterance_id: идентификатор текущей реплики от бота;
             смена значения — новая реплика, точка отсчёта прироста сбрасывается.
+        partial_is_final: финальный кусок реплики; при True лайв-канал
+            разбирает всегда, порог прироста не применяется.
         last_checked_partial: текст последнего служебного прохода чекера
             (порог прироста внутри текущей реплики).
         last_checked_utterance_id: ``partial_utterance_id``, к которому
@@ -134,6 +136,7 @@ class CallState(TypedDict, total=False):
     call_finished: bool
     partial_reply: str
     partial_utterance_id: str
+    partial_is_final: bool
     last_checked_partial: str
     last_checked_utterance_id: str
 
@@ -176,6 +179,7 @@ def new_state_defaults() -> dict[str, Any]:
         "call_finished": False,
         "partial_reply": "",
         "partial_utterance_id": "",
+        "partial_is_final": False,
         "last_checked_partial": "",
         "last_checked_utterance_id": "",
     }

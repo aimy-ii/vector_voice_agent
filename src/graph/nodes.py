@@ -2,12 +2,12 @@
 
 ::
 
-    ingest ─┬─► check  ─┐
-            └─► lookup ─┴─► plan ──► respond ──► commit
+    ingest → lookup → plan → respond → commit
 
-Чекер и резолвер идут параллельно; plan ждёт обоих. Чекер — единственная
-точка закрытия шагов; генератор плюсует счётчик ведущему шагу в момент
-взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
+Модельный чекер живёт только в лайв-канале. Plan читает закрытия из
+Redis-кеша и не ждёт лайв. Генератор плюсует счётчик ведущему шагу в
+момент взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок —
+в тред.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from core.config import settings
-from graph.checker import CheckerClient, check_pass, close_delivered_inform
+from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
     DYN_SEARCHING,
     context_from_state,
@@ -35,7 +35,6 @@ from graph.history import (
     strip_system,
 )
 from graph.log_fmt import (
-    format_check_done,
     format_lookup_done,
     format_plan_done,
     format_spoken_preview,
@@ -388,13 +387,19 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     return patch
 
 
-async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Синхронный чекер в начале хода: закрывает шаги по счётчику и диалогу."""
+async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
+    """Берёт шапку из кеша, плюсует счётчик ведущему шагу, выбирает маршрут.
+
+    Закрытия шагов делает только лайв-канал; здесь читаем уже записанный
+    прогресс и закрываем ``inform`` по факту доставки прошлой реплики.
+    Ждать лайв-канал нельзя: что не успел — увидим следующим ходом.
+    """
     script = _script_of(state)
     progress = await _load_progress(state)
     profile = _merge_profile(state, progress)
-    closures: list[tuple[str, str]] = []
+    turn = int(state.get("turn") or 0)
 
+    # Inform закрывается кодом по доставке — это не модельный чекер.
     delivered_step = state.get("delivered_step")
     if delivered_step and state.get("last_delivered", True):
         before = dict(progress.status)
@@ -408,32 +413,7 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
             progress.status.get(delivered_step) == "closed"
             and before.get(delivered_step) != "closed"
         ):
-            closures.append((delivered_step, "доставка"))
-
-    # Профиль из кеша должен быть виден check_pass (закрытие по fills).
-    state_for_check: dict[str, Any] = {**state, "profile": profile}
-    progress, checked, asks_inform = await check_pass(
-        state_for_check,
-        reply=last_user_text(state.get("messages") or []),
-        judge=_checker_client,
-        progress=progress,
-    )
-    closures.extend(checked)
-    patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
-    if progress.profile:
-        profile = {**profile, **progress.profile}
-    patch["profile"] = profile
-    patch["client_asks_inform"] = asks_inform
-    stage("check", format_check_done(closures), "done")
-    return patch
-
-
-async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Берёт шапку, плюсует счётчик ведущему шагу, выбирает маршрут."""
-    script = _script_of(state)
-    progress = await _load_progress(state)
-    profile = _merge_profile(state, progress)
-    turn = int(state.get("turn") or 0)
+            await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
 
     inform_reason = bool(state.get("client_asks_inform")) or answered_inform_check(
         script,

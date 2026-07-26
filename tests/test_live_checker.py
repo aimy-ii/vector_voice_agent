@@ -60,6 +60,7 @@ def _state(
     last_checked: str = "",
     utterance_id: str = "",
     last_utterance_id: str = "",
+    is_final: bool = False,
 ) -> dict[str, Any]:
     """Собирает минимальное состояние для ``check_pass`` / live_check."""
     prog = progress or _name_progress()
@@ -75,6 +76,7 @@ def _state(
         "turn": turn,
         "partial_reply": partial,
         "partial_utterance_id": utterance_id,
+        "partial_is_final": is_final,
         "last_checked_partial": last_checked,
         "last_checked_utterance_id": last_utterance_id,
     }
@@ -200,6 +202,51 @@ async def test_служебный_ниже_порога_модель_не_зов
     assert patch_out == {}
     assert client.calls == []
     assert not store.saved
+
+
+async def test_финальная_реплика_при_нулевом_приросте_разбирается(script):
+    """partial_is_final=True — порог игнорируется, даже прирост 0."""
+    # Текст без fills: иначе имя закрывается кодом до модели.
+    text = "пока думаю как ответить на вопрос"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        last_checked=text,
+        utterance_id="u1",
+        last_utterance_id="u1",
+        is_final=True,
+    )
+    assert growth_below_threshold(text, text, min_growth=10)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert patch_out != {}
+    assert client.calls
+    assert client.calls[0]["client_reply"] == text
+    assert patch_out.get("last_checked_partial") == text
 
 
 async def test_служебный_с_приростом_как_синхронный(script):
