@@ -19,6 +19,7 @@ from graph.facts import (
 )
 from graph.prompts import (
     _NO_MECHANICS,
+    SPEECH_RULES,
     _describe_step,
     aside_block,
     build_turn_messages,
@@ -31,6 +32,9 @@ from graph.prompts import (
     step_block,
     steps_block,
 )
+
+#: Число правил речи до правки реакции и хвостов.
+_SPEECH_RULES_BEFORE = 17
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -119,8 +123,45 @@ def test_системное_сообщение_содержит_ключевые
     assert "Открытых вопросов не задавать" in content
     assert "когда человек сам прощается словами" in content
     assert "Тон разговорный, не рекламный" in content
-    assert "Связка с предыдущей репликой делается по существу" in content
+    assert "Реплика состоит из двух частей" in content
     assert "Если реплика клиента бессвязна, оборвана или не отвечает" in content
+
+
+def test_системное_сообщение_содержит_правила_реакции_и_хвостов(script):
+    """Реакция, дежурные хвосты и канцелярит — в системном сообщении; связка снята."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "Реплика состоит из двух частей" in content
+    assert "Голый вопрос без реакции — ошибка" in content
+    assert "Проверочный вопрос в конце рассказа" in content
+    assert "дежурной формулой" in content
+    assert "Вопрос задаётся по-человечески" in content
+    assert "без служебных оборотов" in content
+    assert "Связка с предыдущей репликой делается по существу" not in content
+    assert len(SPEECH_RULES) <= _SPEECH_RULES_BEFORE + 2
+
+
+def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
+    """Скрипты v1–v4 по-прежнему собирают системное сообщение с правилами."""
+    for compiled in (script_v1, script, script_v3, script_v4):
+        first = next(iter(compiled.steps))
+        messages = build_turn_messages(
+            script=compiled,
+            steps=[compiled.step(first)],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )
+        assert isinstance(messages[0], SystemMessage)
+        assert "Реплика состоит из двух частей" in messages[0].content
 
 
 def test_профиль_разделяет_роли(script):
