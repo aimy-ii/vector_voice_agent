@@ -56,8 +56,9 @@ def format_plan_done(
     head: Sequence[tuple[str, int]],
     city_slug: str | None,
     branch_slug: str | None,
+    call_id: str | None = None,
 ) -> str:
-    """Итог plan: шаг, маршрут, счётчики шапки, фиксации.
+    """Итог plan: шаг, маршрут, счётчики шапки, звонок, фиксации.
 
     Args:
         step_id: ведущий шаг или None.
@@ -65,6 +66,7 @@ def format_plan_done(
         head: пары ``(step_id, счётчик_попыток)`` в порядке шапки.
         city_slug: зафиксированный город.
         branch_slug: зафиксированный филиал.
+        call_id: идентификатор звонка для ключа прогресса.
 
     Returns:
         Строка для ``[plan|done]``.
@@ -76,9 +78,67 @@ def format_plan_done(
         head_text = "[]"
     city = city_slug or "—"
     branch = branch_slug or "—"
+    call = call_id or "—"
     return (
-        f"шаг {step_id or '—'}, маршрут {route}, шапка {head_text}, город={city}, филиал={branch}"
+        f"шаг {step_id or '—'}, маршрут {route}, шапка {head_text}, "
+        f"звонок {call}, город={city}, филиал={branch}"
     )
+
+
+def format_live_check_state(
+    *,
+    attempts: Mapping[str, int],
+    status: Mapping[str, str],
+    profile: Mapping[str, str],
+) -> str:
+    """Снимок прогресса, который увидел лайв-чекер после загрузки.
+
+    Args:
+        attempts: счётчики попыток шагов.
+        status: статусы шагов.
+        profile: профиль; в лог — только имена заполненных полей.
+
+    Returns:
+        Строка для ``[live-check|state]``.
+    """
+    filled = sorted(key for key, value in profile.items() if value and str(value).strip())
+    profile_text = ", ".join(filled) if filled else "—"
+    return f"счётчики {dict(attempts)}, статусы {dict(status)}, профиль: {profile_text}"
+
+
+def format_check_pending(
+    *,
+    pending: Sequence[tuple[str, int]],
+    rejected: Sequence[tuple[str, str]],
+    available: Sequence[tuple[str, int]] | None = None,
+) -> str:
+    """Состав висящих перед вызовом модели и причины отсева.
+
+    Args:
+        pending: пары ``(step_id, счётчик)`` на проверку.
+        rejected: пары ``(step_id, причина)`` — почему шаг не попал.
+        available: при пустом ``pending`` — доступные шаги со счётчиками.
+
+    Returns:
+        Строка для ``[check|pending]``.
+    """
+    if pending:
+        pending_bits = ", ".join(f"{sid}({count})" for sid, count in pending)
+        pending_text = f"[{pending_bits}]"
+    else:
+        pending_text = "пусто"
+    if rejected:
+        rejected_text = ", ".join(f"{sid} — {reason}" for sid, reason in rejected)
+    else:
+        rejected_text = "—"
+    text = f"на проверку: {pending_text}; отсеяно: {rejected_text}"
+    if not pending and available is not None:
+        if available:
+            avail_bits = ", ".join(f"{sid}({count})" for sid, count in available)
+            text += f"; доступны: [{avail_bits}]"
+        else:
+            text += "; доступны: []"
+    return text
 
 
 def format_spoken_preview(text: str, *, limit: int = SPOKEN_PREVIEW_LEN) -> str:

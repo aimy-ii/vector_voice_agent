@@ -1,10 +1,8 @@
 r"""Служебный граф чекера в реальном времени.
 
-Вторая точка входа на том же состоянии и треде, что основной ход.
-Принимает накопленный распознанный текст (``partial_reply``), гоняет
-``check_pass``, затем ``run_contexter`` — чтобы к моменту основного хода
-справка/статус уже были в контексте. В ``messages`` не пишет, реплик
-в эфир не выдаёт.
+Лайв-канал: закрывает шаги, дозаполняет базовый профиль, греет контекст
+под предстоящий шаг. В ``messages`` не пишет, реплик в эфир не выдаёт.
+Прогрев не на пути хода генератора — ошибка только в лог.
 
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
@@ -19,6 +17,8 @@ r"""Служебный граф чекера в реальном времени.
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 from langgraph.graph import StateGraph
@@ -26,21 +26,40 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
-from graph.context import context_from_state
+from graph.context import context_from_state, merge_static
 from graph.contexter import run_contexter
-from graph.nodes import _checker_client, _load_progress, _save_progress
+from graph.facts import needs_of
+from graph.log_fmt import format_live_check_state
+from graph.nodes import (
+    _call_id,
+    _checker_client,
+    _load_progress,
+    _merge_profile,
+    _save_progress,
+)
+from graph.profile_fill import fill_basic_profile
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
+from kb.client import vector_kb
+from script.planner import peek_next_step, pick_step
+from script.price import price_line, price_line_from_kb
 from script.source import registry
+from script.store import PROGRESS_FIELDS_CHECKER
+
+log = logging.getLogger(__name__)
 
 
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
-    """Прирост текста меньше порога и это не первый проход.
+    """Прирост текста меньше порога внутри текущей реплики.
+
+    Точку отсчёта при новой реплике сбрасывают снаружи по
+    ``partial_utterance_id``; сюда доходит только прирост внутри одной
+    реплики. Пустой ``previous`` — первый проход, порог не применяется.
 
     Args:
         reply: накопленный текст текущего прохода.
-        previous: текст прошлого отработанного прохода.
+        previous: текст прошлого отработанного прохода в этой же реплике.
         min_growth: порог прироста в символах.
 
     Returns:
@@ -48,7 +67,29 @@ def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> boo
     """
     if not previous:
         return False
-    return len(reply) - len(previous) < min_growth
+    growth = len(reply) - len(previous)
+    # Укорочение текста (переразметка ASR) — не пропуск по порогу.
+    if growth < 0:
+        return False
+    return growth < min_growth
+
+
+def is_new_utterance(
+    utterance_id: str,
+    last_utterance_id: str,
+) -> bool:
+    """Новая ли реплика по идентификатору от бота.
+
+    Args:
+        utterance_id: ``partial_utterance_id`` из полезной нагрузки.
+        last_utterance_id: идентификатор, к которому относится точка отсчёта.
+
+    Returns:
+        True — точка отсчёта прироста должна быть сброшена.
+    """
+    if not utterance_id:
+        return False
+    return utterance_id != last_utterance_id
 
 
 def _script_of(state: CallState):
@@ -59,23 +100,136 @@ def _script_of(state: CallState):
     )
 
 
+async def _warmup_next_step(
+    state: CallState,
+    *,
+    progress,
+    profile: dict[str, str],
+    ctx,
+    asks_inform: bool,
+) -> Any:
+    """Прогревает мету города / филиалы / цену под предстоящий шаг.
+
+    Ошибки только в лог — ход лайв-канала не роняют.
+    """
+    script = _script_of(state)
+    current_id = state.get("current_step")
+    current = script.steps.get(current_id) if current_id else None
+    try:
+        if current is None:
+            nxt = pick_step(
+                script,
+                status=progress.status,
+                profile=profile,
+                attempts=progress.attempts,
+                inform_reason=asks_inform,
+                pending_soft_cap=settings.pending_steps_soft_cap,
+            )
+        else:
+            nxt = peek_next_step(
+                script,
+                current=current,
+                status=progress.status,
+                profile=profile,
+                attempts=progress.attempts,
+                inform_reason=asks_inform,
+                pending_soft_cap=settings.pending_steps_soft_cap,
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Прогрев: peek_next_step не удался: %s", exc)
+        return ctx
+    if nxt is None:
+        return ctx
+
+    needs = set(needs_of(nxt))
+    city_slug = state.get("city_slug") or ctx.city_slug or None
+
+    try:
+        if "city_choices" in needs:
+            await vector_kb.list_cities()
+        # Город из профиля ещё без слага — мета не греется, это ок.
+        if not city_slug:
+            return ctx
+
+        want_city = ("city_meta" in needs or "price" in needs) and not ctx.city_slug
+        want_price = "price" in needs
+        want_branches = "branches" in needs
+        # Статику города подшиваем один раз: повторный merge при уже
+        # зафиксированном city_slug не нужен (merge_static и так no-op).
+        if (
+            want_city
+            or (want_price and not ctx.city_slug)
+            or (not ctx.city_faq and not ctx.city_slug)
+        ):
+            city_meta = await vector_kb.get_city(city_slug)
+            if city_meta:
+                city_name = (
+                    state.get("city_name") or profile.get("city") or ctx.city_name or city_slug
+                )
+                price_phrase = None
+                if want_price and city_meta.get("price") is not None:
+                    if script.is_sales:
+                        price_phrase = price_line_from_kb(city_meta.get("price"))
+                    else:
+                        price_phrase = price_line(city_meta.get("price"), script.params.price)
+                ctx = merge_static(
+                    ctx,
+                    city_slug=city_slug,
+                    city_name=str(city_name),
+                    city_meta=city_meta,
+                    price_line=price_phrase,
+                )
+        if want_branches:
+            await vector_kb.list_branches(city_slug)
+        if "branch_meta" in needs:
+            branch_slug = state.get("branch_slug") or ctx.branch_slug
+            if branch_slug:
+                await vector_kb.get_branch(branch_slug)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Прогрев под шаг %s не удался: %s", nxt.id, exc)
+    return ctx
+
+
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Один служебный проход чекера и контекстера по ``partial_reply``.
 
-    При приросте меньше порога (и не первый проход) тихо выходит без
-    вызова модели. Иначе зовёт ``check_pass``, затем ``run_contexter``,
-    сохраняет прогресс и обновлённый контекст.
+    Точка отсчёта сбрасывается при смене ``partial_utterance_id`` от бота —
+    не по знаку прироста длины. Порог ``checker_min_growth_chars``
+    применяется только к промежуточным кускам внутри одной реплики
+    относительно ``last_checked_partial``. Финальная реплика
+    (``partial_is_final``) разбирается всегда, в том числе при нулевом
+    приросте. Первый проход новой реплики порогом не режется.
+    Иначе дозаполняет профиль, зовёт ``check_pass``, ``run_contexter``
+    и прогрев под предстоящий шаг.
     """
+    started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
+    utterance_id = str(state.get("partial_utterance_id") or "")
+    last_utterance_id = str(state.get("last_checked_utterance_id") or "")
     previous = str(state.get("last_checked_partial") or "")
-    growth = len(reply) - len(previous)
+    is_final = bool(state.get("partial_is_final"))
     min_growth = settings.checker_min_growth_chars
-    stage(
-        "live-check",
-        f"накоплено {len(reply)} симв., прирост с прошлого прохода {growth} симв.",
-        "start",
-    )
-    if growth_below_threshold(reply, previous, min_growth=min_growth):
+    call_id = _call_id()
+    new_utterance = is_new_utterance(utterance_id, last_utterance_id)
+    if new_utterance:
+        previous = ""
+        stage(
+            "live-check",
+            f"накоплено {len(reply)} симв., utterance {utterance_id} — "
+            f"новая реплика, сброс точки отсчёта, звонок {call_id}",
+            "start",
+        )
+    growth = len(reply) - len(previous)
+    if not new_utterance:
+        kind = "финал" if is_final else "прирост"
+        stage(
+            "live-check",
+            f"накоплено {len(reply)} симв., {kind} с прошлого прохода {growth} симв., "
+            f"звонок {call_id}",
+            "start",
+        )
+    # Порог только для промежуточных; финал — всегда разбирать.
+    if not is_final and growth_below_threshold(reply, previous, min_growth=min_growth):
         stage(
             "live-check",
             f"прирост {growth} < порога {min_growth}, пропуск",
@@ -84,14 +238,36 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         return {}
 
     progress = await _load_progress(state)
-    progress, closures = await check_pass(
-        state,
+    profile = _merge_profile(state, progress)
+    stage(
+        "live-check",
+        format_live_check_state(
+            attempts=progress.attempts,
+            status=progress.status,
+            profile=profile,
+        ),
+        "state",
+    )
+
+    # Фон: базовые поля из уже сказанного — до check_pass, чтобы fills закрылись.
+    filled = fill_basic_profile(reply, profile)
+    if filled:
+        profile = {**profile, **filled}
+        progress.profile = {**progress.profile, **filled}
+
+    state_for_check: dict[str, Any] = {**state, "profile": profile}
+    progress, closures, asks_inform = await check_pass(
+        state_for_check,
         reply=reply,
         judge=_checker_client,
         progress=progress,
     )
-    patch = await _save_progress(progress)
+    patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
     patch["last_checked_partial"] = reply
+    if utterance_id:
+        patch["last_checked_utterance_id"] = utterance_id
+    patch["client_asks_inform"] = asks_inform
+    patch["profile"] = profile
 
     # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
     script = _script_of(state)
@@ -102,15 +278,25 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         tools=build_context_tools(script),
         objections=script.objections,
     )
+
+    # Прогрев под предстоящий шаг — не на пути хода, ошибки только в лог.
+    ctx = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=asks_inform,
+    )
     patch["conversation_context"] = ctx.model_dump()
 
     if closures:
         checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)
     else:
         checker_text = "ничего"
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
     stage(
         "live-check",
-        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}",
+        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}; {elapsed_ms} мс",
         "done",
     )
     return patch

@@ -5,6 +5,17 @@ from __future__ import annotations
 from core.config import Settings
 
 
+def test_персона_агента_дефолты():
+    """Персона одна на агента; значения по умолчанию из кода."""
+    assert Settings.model_fields["agent_name"].default == "Дарья"
+    assert Settings.model_fields["agent_company"].default == "Вектор"
+    assert Settings.model_fields["agent_role"].default == ("менеджер федеральной академии вождения")
+    assert Settings.model_fields["agent_tone"].default == (
+        "живой, доброжелательный, уважительный, без канцелярита"
+    )
+    assert Settings.model_fields["agent_gender"].default == "female"
+
+
 def test_пустая_script_version_даёт_none():
     assert Settings(script_version="").script_version is None
 
@@ -69,6 +80,11 @@ def test_чекер_настройки_дефолты():
     assert s.checker_assistant_id == "vector_checker"
     assert s.checker_run_strategy == "interrupt"
     assert s.agent_run_strategy == "enqueue"
+
+
+def test_live_thread_suffix_дефолт():
+    """Суффикс лайв-треда по умолчанию — ``-live``."""
+    assert Settings.model_fields["live_thread_suffix"].default == "-live"
 
 
 def test_прокси_выключен_при_заполненных_полях():

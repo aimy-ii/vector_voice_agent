@@ -9,7 +9,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.checker import CheckerVerdict, check_pass, history_slice_for, run_checker
-from graph.checker_graph import growth_below_threshold, live_check_node
+from graph.checker_graph import (
+    growth_below_threshold,
+    is_new_utterance,
+    live_check_node,
+)
 from script.planner import script_head
 from script.store import ScriptProgress, progress_to_state
 
@@ -54,6 +58,9 @@ def _state(
     profile: dict[str, str] | None = None,
     turn: int = 2,
     last_checked: str = "",
+    utterance_id: str = "",
+    last_utterance_id: str = "",
+    is_final: bool = False,
 ) -> dict[str, Any]:
     """Собирает минимальное состояние для ``check_pass`` / live_check."""
     prog = progress or _name_progress()
@@ -68,7 +75,10 @@ def _state(
         "profile": profile or {},
         "turn": turn,
         "partial_reply": partial,
+        "partial_utterance_id": utterance_id,
+        "partial_is_final": is_final,
         "last_checked_partial": last_checked,
+        "last_checked_utterance_id": last_utterance_id,
     }
     state.update(progress_to_state(prog))
     return state
@@ -85,7 +95,7 @@ async def test_check_pass_одинаков_для_полной_и_partial(script
     else:
         state = _state(script, partial=text, progress=progress)
 
-    updated, closures = await check_pass(
+    updated, closures, _asks = await check_pass(
         state,
         reply=text,
         judge=client,
@@ -169,10 +179,10 @@ async def test_служебный_ниже_порога_модель_не_зов
         def __init__(self) -> None:
             self.saved = False
 
-        async def load(self, thread_id: str):
+        async def load(self, call_id: str):
             return progress
 
-        async def save(self, thread_id: str, prog):
+        async def save(self, call_id: str, prog):
             self.saved = True
             return True
 
@@ -194,6 +204,51 @@ async def test_служебный_ниже_порога_модель_не_зов
     assert not store.saved
 
 
+async def test_финальная_реплика_при_нулевом_приросте_разбирается(script):
+    """partial_is_final=True — порог игнорируется, даже прирост 0."""
+    # Текст без fills: иначе имя закрывается кодом до модели.
+    text = "пока думаю как ответить на вопрос"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        last_checked=text,
+        utterance_id="u1",
+        last_utterance_id="u1",
+        is_final=True,
+    )
+    assert growth_below_threshold(text, text, min_growth=10)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert patch_out != {}
+    assert client.calls
+    assert client.calls[0]["client_reply"] == text
+    assert patch_out.get("last_checked_partial") == text
+
+
 async def test_служебный_с_приростом_как_синхронный(script):
     """Достаточный прирост → те же закрытия, что дал бы sync на том же тексте."""
     text = "Меня зовут Андрей Петров"
@@ -201,7 +256,7 @@ async def test_служебный_с_приростом_как_синхронн�
     profile = {"caller_name": "Андрей"}
     progress = _name_progress()
 
-    live_updated, live_closures = await check_pass(
+    live_updated, live_closures, _asks = await check_pass(
         _state(script, partial=text, progress=progress, profile=profile),
         reply=text,
         judge=FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)]),
@@ -232,7 +287,7 @@ async def test_закрытия_служебного_видны_в_шапке(sc
         taken_turn={"name": 1},
     )
     profile = {"caller_name": "Андрей"}
-    updated, _ = await check_pass(
+    updated, _, _asks = await check_pass(
         _state(script, partial="Меня зовут Андрей", progress=progress, profile=profile),
         reply="Меня зовут Андрей",
         judge=FakeChecker([]),
@@ -255,38 +310,260 @@ async def test_первый_проход_не_режется_порогом():
     assert growth_below_threshold("коротко+", "коротко", min_growth=10)
 
 
-async def test_live_check_с_приростом_зовёт_чекер_и_пишет_last_checked(script):
-    """Достаточный прирост: чекер отрабатывает, last_checked_partial обновляется."""
-    text = "Меня зовут Андрей"
+def test_новая_реплика_по_utterance_id():
+    """Смена идентификатора от бота — новая реплика, независимо от длины."""
+    assert is_new_utterance("u2", "u1")
+    assert is_new_utterance("u1", "")
+    assert not is_new_utterance("u1", "u1")
+    assert not is_new_utterance("", "u1")
+
+
+async def test_прирост_внутри_реплики_от_разобранного_ранее():
+    """Внутри одной реплики порог считается от last_checked этой же реплики."""
+    previous = "Меня зовут"
+    # +2 символа — ниже порога.
+    assert growth_below_threshold(previous + " А", previous, min_growth=10)
+    # +12 — выше порога.
+    assert not growth_below_threshold(previous + " Андрей Петр", previous, min_growth=10)
+
+
+async def test_live_check_новая_реплика_сбрасывает_точку_независимо_от_знака(script):
+    """Новый utterance_id сбрасывает точку отсчёта даже при положительном приросте."""
+    # Новая реплика длиннее прошлого last_checked — без сброса прирост был бы +8 < 10.
+    previous = "xxx"
+    text = previous + "12345678"
+    assert len(text) - len(previous) == 8
+    assert growth_below_threshold(text, previous, min_growth=10)
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = _name_progress()
     state = _state(
         script,
         partial=text,
         progress=progress,
-        last_checked="Меня",  # прирост >> 10
+        last_checked=previous,
+        utterance_id="u2",
+        last_utterance_id="u1",
     )
 
     async def fake_load(_state):
         return progress
 
-    async def fake_save(prog, *, persist_state=True):
+    async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
 
     with (
         patch("graph.checker_graph._checker_client", client),
         patch("graph.checker_graph._load_progress", side_effect=fake_load),
         patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert client.calls
     assert client.calls[0]["client_reply"] == text
     assert patch_out.get("last_checked_partial") == text
+    assert patch_out.get("last_checked_utterance_id") == "u2"
+
+
+async def test_live_check_прирост_внутри_реплики_сравнивается_с_порогом(script):
+    """Тот же utterance_id: прирост ниже порога — тихий пропуск."""
+    previous = "Меня зовут"
+    reply = previous + " А"
+    assert growth_below_threshold(reply, previous, min_growth=10)
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=reply,
+        progress=progress,
+        last_checked=previous,
+        utterance_id="u1",
+        last_utterance_id="u1",
+    )
+
+    class _MemStore:
+        def __init__(self) -> None:
+            self.saved = False
+
+        async def load(self, call_id: str):
+            return progress
+
+        async def save(self, call_id: str, prog):
+            self.saved = True
+            return True
+
+    store = _MemStore()
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=lambda s: store.load("t")),
+        patch(
+            "graph.checker_graph._save_progress",
+            side_effect=lambda p, **kw: store.save("t", p) or {},
+        ),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert patch_out == {}
+    assert client.calls == []
+    assert not store.saved
+
+
+async def test_live_check_done_содержит_длительность_мс(script):
+    """В [live-check|done] есть длительность прохода в миллисекундах."""
+    text = "пока ещё думаю над ответом длинный"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    stages: list[tuple] = []
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    def _stage(name, text, kind="done", **kwargs):
+        stages.append((name, text, kind))
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.stage", side_effect=_stage),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    done = [t for n, t, k in stages if n == "live-check" and k == "done"]
+    assert done
+    assert " мс" in done[0]
+
+
+async def test_live_check_с_приростом_зовёт_чекер_и_пишет_last_checked(script):
+    """Достаточный прирост: чекер отрабатывает, last_checked_partial обновляется."""
+    # Текст без имени — иначе фон закроет name по fills без модели.
+    text = "пока ещё думаю над ответом длинный"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        last_checked="пока",  # прирост >> 10
+    )
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert client.calls
+    assert client.calls[0]["client_reply"] == text
+    assert patch_out.get("last_checked_partial") == text
+
+
+async def test_логи_не_роняют_ход_при_пустом_прогрессе(script, caplog):
+    """Пустой прогресс и профиль: [live-check|state] и [check|pending] без падения."""
+    import logging
+
+    text = "пока ещё думаю что ответить на вопрос"
+    client = FakeChecker([])
+    progress = ScriptProgress()
+    state = _state(script, partial=text, progress=progress, profile={}, last_checked="")
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        caplog.at_level(logging.INFO),
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph._call_id", return_value="diag-call"),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert patch_out != {}
+    assert client.calls == []
+    messages = [rec.message for rec in caplog.records]
+    assert any("[live-check|state]" in m and "счётчики {}" in m for m in messages)
+    assert any("[live-check|start]" in m and "звонок diag-call" in m for m in messages)
+    assert any("[check|pending]" in m and "на проверку: пусто" in m for m in messages)
+
+
+async def test_check_pass_логирует_висящие_перед_моделью(script, caplog):
+    """[check|pending] показывает шаг со счётчиком до вызова модели."""
+    import logging
+
+    text = "В городе Санкт-Петербург"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(
+        status={"name": "closed", "city": "pending"},
+        attempts={"name": 1, "city": 1},
+        taken_turn={"name": 1, "city": 2},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"caller_name": "Андрей"},
+        turn=3,
+    )
+    with caplog.at_level(logging.INFO, logger="graph.checker"):
+        await check_pass(state, reply=text, judge=client, progress=progress)
+
+    assert client.calls
+    pending_logs = [r.message for r in caplog.records if "[check|pending]" in r.message]
+    assert pending_logs
+    assert "на проверку: [city(1)]" in pending_logs[0]
+    assert "name — исчерпан" in pending_logs[0]
 
 
 async def test_live_check_контекстер_кладёт_справку_в_контекст(script):
@@ -307,7 +584,7 @@ async def test_live_check_контекстер_кладёт_справку_в_к
     async def fake_load(_state):
         return progress
 
-    async def fake_save(prog, *, persist_state=True):
+    async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
 
     with (

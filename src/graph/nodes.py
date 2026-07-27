@@ -2,11 +2,12 @@
 
 ::
 
-    ingest → check → plan ─┬─► lookup ──► respond ──► commit
-                           └─► respond ─────────────► commit
+    ingest → lookup → plan → respond → commit
 
-Чекер — единственная точка закрытия шагов; генератор плюсует счётчик ведущему
-шагу в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка слепок — в тред.
+Модельный чекер живёт только в лайв-канале. Plan читает закрытия из
+Redis-кеша и не ждёт лайв. Генератор плюсует счётчик всем шагам шапки
+в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка
+слепок — в тред.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from langgraph.config import get_config
 from langgraph.runtime import Runtime
 
 from core.config import settings
-from graph.checker import CheckerClient, check_pass, close_delivered_inform
+from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
     DYN_SEARCHING,
     context_from_state,
@@ -34,12 +35,12 @@ from graph.history import (
     strip_system,
 )
 from graph.log_fmt import (
-    format_check_done,
     format_lookup_done,
     format_plan_done,
     format_spoken_preview,
 )
 from graph.names import given_name
+from graph.profile_fill import fill_basic_profile
 from graph.progress import say, stage
 from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
@@ -50,23 +51,30 @@ from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from graph.tools_registry import build_context_tools
 from kb.client import vector_kb
-from script.build import CompiledScript
-from script.models import Step
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep
 from script.planner import (
     answered_inform_check,
-    client_asks_inform,
     peek_next_step,
     script_head,
 )
-from script.price import price_line
+from script.price import price_line, price_line_from_kb
 from script.source import registry
 from script.store import (
+    PROGRESS_FIELDS_CHECKER,
+    PROGRESS_FIELDS_GENERATOR,
     ScriptProgress,
+    merge_progress_fields,
     progress_from_state,
     progress_to_state,
     script_store,
 )
-from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
+from utils.llm_gen import (
+    LLMTurnFailed,
+    astream_structured,
+    get_llm,
+    response_format_from,
+)
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +97,27 @@ def _thread_id() -> str:
         return "local"
 
 
+def _call_id() -> str:
+    """Идентификатор звонка для ключа скрипта в кеше.
+
+    Берёт непустой ``call_id`` из конфига; иначе ``thread_id`` без суффикса
+    лайв-треда. Без конфига — ``local``.
+    """
+    try:
+        config = get_config()
+        configurable = config.get("configurable") or {}
+        call_id = configurable.get("call_id")
+        if call_id:
+            return str(call_id)
+        thread_id = str(configurable.get("thread_id") or "local")
+        suffix = settings.live_thread_suffix
+        if suffix and thread_id.endswith(suffix):
+            return thread_id[: -len(suffix)]
+        return thread_id
+    except Exception:  # noqa: BLE001
+        return "local"
+
+
 def _script_of(state: CallState) -> CompiledScript:
     """Достаёт скомпилированный скрипт звонка из реестра."""
     return registry.get(
@@ -97,7 +126,7 @@ def _script_of(state: CallState) -> CompiledScript:
     )
 
 
-def _current_step(state: CallState) -> Step | None:
+def _current_step(state: CallState) -> AnyStep | None:
     """Возвращает ведущий шаг хода."""
     step_id = state.get("current_step")
     if not step_id:
@@ -105,7 +134,136 @@ def _current_step(state: CallState) -> Step | None:
     return _script_of(state).steps.get(step_id)
 
 
-def _head_steps(state: CallState) -> list[Step]:
+def _lead_from_progress(
+    state: CallState,
+    *,
+    progress: ScriptProgress,
+    profile: dict[str, str],
+) -> tuple[list[AnyStep], AnyStep | None]:
+    """Считает шапку и ведущий шаг по прогрессу — без инкремента счётчика.
+
+    Args:
+        state: состояние хода.
+        progress: прогресс из кеша или зеркала.
+        profile: слитый профиль.
+
+    Returns:
+        Шапка и ведущий шаг (или None).
+    """
+    script = _script_of(state)
+    inform_reason = bool(state.get("client_asks_inform")) or answered_inform_check(
+        script,
+        status=progress.status,
+        pending_step=state.get("pending_step") or state.get("delivered_step"),
+    )
+    head = script_head(
+        script,
+        status=progress.status,
+        attempts=progress.attempts,
+        profile=profile,
+        inform_reason=inform_reason,
+        pending_soft_cap=settings.pending_steps_soft_cap,
+    )
+    step = head[0] if head else None
+    if state.get("resume_step") and state["resume_step"] in script.steps:
+        resume = script.step(state["resume_step"])
+        if any(s.id == resume.id for s in head):
+            step = resume
+    return head, step
+
+
+def _field_step_attempts(
+    script: CompiledScript,
+    progress: ScriptProgress,
+    field: str,
+) -> int:
+    """Счётчик попыток шага, который заполняет поле профиля.
+
+    Args:
+        script: скомпилированный скрипт.
+        progress: прогресс звонка.
+        field: ключ поля профиля (``city``, ``branch``).
+
+    Returns:
+        Число попыток; ноль — шаг ещё ни разу не задавался.
+    """
+    step_id = script.filled_by.get(field)
+    if not step_id and script.is_sales and field in {"city", "branch"}:
+        step_id = field
+    if not step_id:
+        return 0
+    return int(progress.attempts.get(step_id, 0))
+
+
+def _step_fills_city(step: AnyStep | None) -> bool:
+    """Шаг собирает город: по fills (старый) или по id/знанию (продажи)."""
+    if step is None:
+        return False
+    if isinstance(step, SalesStep):
+        if step.id == "city":
+            return True
+        return "перечень городов сети" in step.knowledge
+    return bool(step.fills and "city" in step.fills)
+
+
+def _step_fills_branch(step: AnyStep | None) -> bool:
+    """Шаг собирает филиал: по fills (старый) или по id/знанию (продажи)."""
+    if step is None:
+        return False
+    if isinstance(step, SalesStep):
+        if step.id == "branch":
+            return True
+        return "филиалы города с адресами" in step.knowledge
+    return bool(step.fills and "branch" in step.fills)
+
+
+def _price_phrase_for(script: CompiledScript, price: Any) -> str | None:
+    """Готовая фраза о цене: из шаблонов скрипта или из базы (продажи)."""
+    if price is None:
+        return None
+    if script.is_sales:
+        return price_line_from_kb(price)
+    return price_line(price, script.params.price)
+
+
+def _step_needs_lookup(
+    step: AnyStep | None,
+    state: CallState,
+    *,
+    city_asked: bool = True,
+    branch_asked: bool = True,
+) -> bool:
+    """Нужен ли справочник на этом ведущем шаге.
+
+    Город и филиал ищем только если шаг, который их заполняет, уже
+    задавался (счётчик попыток > 0).
+
+    Args:
+        step: ведущий шаг или None.
+        state: состояние хода (слаги города/филиала).
+        city_asked: шаг city уже был в шапке.
+        branch_asked: шаг branch уже был в шапке.
+
+    Returns:
+        True — резолвер/факты имеют смысл; иначе узел может выйти сразу.
+    """
+    if step is None:
+        return False
+    if needs_of(step):
+        return True
+    if city_asked and _step_fills_city(step) and not state.get("city_slug"):
+        return True
+    if (
+        branch_asked
+        and _step_fills_branch(step)
+        and state.get("city_slug")
+        and not state.get("branch_slug")
+    ):
+        return True
+    return False
+
+
+def _head_steps(state: CallState) -> list[AnyStep]:
     """Шапка шагов этого хода."""
     script = _script_of(state)
     ids = state.get("head_steps") or []
@@ -117,16 +275,48 @@ def _head_steps(state: CallState) -> list[Step]:
 
 async def _load_progress(state: CallState) -> ScriptProgress:
     """Читает прогресс из Redis; при промахе — из состояния треда."""
-    stored = await script_store.load(_thread_id())
+    stored = await script_store.load(_call_id())
     if stored is not None:
         return stored
     return progress_from_state(state)
 
 
-async def _save_progress(progress: ScriptProgress, *, persist_state: bool = True) -> dict[str, Any]:
-    """Пишет прогресс в Redis и возвращает правки состояния."""
-    await script_store.save(_thread_id(), progress)
-    return progress_to_state(progress) if persist_state else {}
+async def _save_progress(
+    progress: ScriptProgress,
+    *,
+    persist_state: bool = True,
+    fields: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    """Пишет прогресс в Redis и возвращает правки состояния.
+
+    Args:
+        progress: локальный прогресс канала.
+        persist_state: класть ли зеркало прогресса в правки состояния.
+        fields: набор полей для точечной записи. ``None`` — прежнее
+            поведение: сохранить объект целиком без слияния.
+
+    Returns:
+        Правки ``CallState`` с зеркалом прогресса (если ``persist_state``).
+    """
+    to_save = progress
+    if fields is not None:
+        cached = await script_store.load(_call_id())
+        # Промах кеша: базой берём локальный прогресс (из state), иначе
+        # точечная запись на пустой объект затрёт чужие поля.
+        base = cached if cached is not None else progress
+        to_save = merge_progress_fields(base, progress, fields)
+    await script_store.save(_call_id(), to_save)
+    return progress_to_state(to_save) if persist_state else {}
+
+
+def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]:
+    """Сливает профиль состояния с профилем из кеша прогресса."""
+    merged = dict(state.get("profile") or {})
+    for key, value in progress.profile.items():
+        text = str(value).strip()
+        if text and key not in merged:
+            merged[key] = text
+    return merged
 
 
 def call_summary(state: CallState) -> dict[str, Any]:
@@ -197,12 +387,25 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     return patch
 
 
-async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Синхронный чекер в начале хода: закрывает шаги по счётчику и диалогу."""
+async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
+    """Берёт шапку из кеша, плюсует счётчик всем её шагам, выбирает маршрут.
+
+    Закрытия шагов делает только лайв-канал; здесь читаем уже записанный
+    прогресс и закрываем ``inform`` по факту доставки прошлой реплики.
+    Ждать лайв-канал нельзя: что не успел — увидим следующим ходом.
+
+    Счётчик растёт у каждого шага шапки: генератор мог отработать любой
+    из них, и для чекера шаг считается заданным. Побочный эффект — висящий
+    шаг тратит попытку каждый ход, пока висит; при потолке в две попытки
+    он уходит из шапки быстрее. Если на прогоне шаги вылетают слишком рано,
+    поднимают ``STEP_ATTEMPT_LIMIT`` настройкой, без правки кода.
+    """
     script = _script_of(state)
     progress = await _load_progress(state)
-    closures: list[tuple[str, str]] = []
+    profile = _merge_profile(state, progress)
+    turn = int(state.get("turn") or 0)
 
+    # Inform закрывается кодом по доставке — это не модельный чекер.
     delivered_step = state.get("delivered_step")
     if delivered_step and state.get("last_delivered", True):
         before = dict(progress.status)
@@ -216,69 +419,27 @@ async def check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[st
             progress.status.get(delivered_step) == "closed"
             and before.get(delivered_step) != "closed"
         ):
-            closures.append((delivered_step, "доставка"))
+            await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
 
-    progress, checked = await check_pass(
-        state,
-        reply=last_user_text(state.get("messages") or []),
-        judge=_checker_client,
-        progress=progress,
-    )
-    closures.extend(checked)
-    patch = await _save_progress(progress)
-    stage("check", format_check_done(closures), "done")
-    return patch
-
-
-async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Берёт шапку, плюсует счётчик ведущему шагу, выбирает маршрут."""
-    script = _script_of(state)
-    progress = await _load_progress(state)
-    profile = dict(state.get("profile") or {})
-    turn = int(state.get("turn") or 0)
-    user_text = last_user_text(state.get("messages") or [])
-
-    inform_reason = client_asks_inform(user_text) or answered_inform_check(
+    inform_reason = bool(state.get("client_asks_inform")) or answered_inform_check(
         script,
         status=progress.status,
         pending_step=state.get("pending_step") or state.get("delivered_step"),
     )
 
-    head = script_head(
-        script,
-        status=progress.status,
-        attempts=progress.attempts,
-        profile=profile,
-        inform_reason=inform_reason,
-        pending_soft_cap=settings.pending_steps_soft_cap,
-    )
+    head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    step = head[0] if head else None
-    if state.get("resume_step") and state["resume_step"] in script.steps:
-        resume = script.step(state["resume_step"])
-        if any(s.id == resume.id for s in head):
-            step = resume
+    # Шаг попал в шапку — генератор мог его отработать, для чекера задан.
+    for head_step in head:
+        prev = int(progress.attempts.get(head_step.id, 0))
+        progress.attempts[head_step.id] = prev + 1
+        if head_step.id not in progress.taken_turn:
+            progress.taken_turn[head_step.id] = turn
+        progress.status.setdefault(head_step.id, "pending")
 
-    # Счётчик — только ведущему шагу хода. Висящие в шапке попытку не тратят.
-    if step is not None:
-        prev = int(progress.attempts.get(step.id, 0))
-        progress.attempts[step.id] = prev + 1
-        if step.id not in progress.taken_turn:
-            progress.taken_turn[step.id] = turn
-        progress.status.setdefault(step.id, "pending")
+    progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
 
-    progress_patch = await _save_progress(progress)
-
-    if step is None:
-        route = ROUTE_RESPOND
-    elif step.needs or (step.fills and "city" in step.fills and not state.get("city_slug")):
-        route = ROUTE_LOOKUP
-    elif (
-        step.fills
-        and "branch" in step.fills
-        and state.get("city_slug")
-        and not state.get("branch_slug")
-    ):
+    if _step_needs_lookup(step, state):
         route = ROUTE_LOOKUP
     else:
         route = ROUTE_RESPOND
@@ -306,6 +467,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
             or context_from_state(state.get("conversation_context")).city_slug,
             branch_slug=state.get("branch_slug")
             or context_from_state(state.get("conversation_context")).branch_slug,
+            call_id=_call_id(),
         ),
         "done",
         step=step.id if step else None,
@@ -313,6 +475,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     )
     return {
         **progress_patch,
+        "profile": profile,
         "current_step": step.id if step is not None else None,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
@@ -321,12 +484,47 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
 
 async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Резолверы города/филиала и факты справочника; заглушки без модели."""
+    """Резолверы города/филиала и факты справочника; заглушки без модели.
+
+    Идёт параллельно с чекером: ведущий шаг считает сам по прогрессу.
+    Если искать нечего — сразу пустой патч. Ошибка не роняет ход.
+    """
+    try:
+        return await _lookup_body(state, runtime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("lookup не удался: %s", exc)
+        stage("lookup", f"ошибка, пропуск: {exc}", "done")
+        return {}
+
+
+async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
+    """Тело резолвера; исключения ловит ``lookup_node``."""
     script = _script_of(state)
-    step = _current_step(state)
-    needs = needs_of(step)
-    profile = dict(state.get("profile") or {})
+    progress = await _load_progress(state)
+    profile = _merge_profile(state, progress)
+    # Фон: базовые поля из реплики — чтобы city из текста резолвился
+    # даже когда ведущий шаг ещё не city (параллельно с чекером).
     user_text = last_user_text(state.get("messages") or [])
+    filled = fill_basic_profile(user_text, profile)
+    if filled:
+        profile = {**profile, **filled}
+
+    _head, step = _lead_from_progress(state, progress=progress, profile=profile)
+    ctx = context_from_state(state.get("conversation_context"))
+    profile_city = str(profile.get("city") or "").strip()
+    city_asked = _field_step_attempts(script, progress, "city") > 0
+    branch_asked = _field_step_attempts(script, progress, "branch") > 0
+    # Резолвер нужен по шагу либо когда в профиле уже есть город без слага
+    # и шаг city уже задавался (иначе вхолостую не ищем).
+    needs_lookup = _step_needs_lookup(
+        step, state, city_asked=city_asked, branch_asked=branch_asked
+    ) or bool(city_asked and profile_city and not (state.get("city_slug") or ctx.city_slug))
+    if not needs_lookup:
+        # Нечего искать — не ждём справочник и не зовём контекстер.
+        stage("lookup", "нечего искать, пропуск", "done")
+        return {}
+
+    needs = needs_of(step)
     facts: dict[str, Any] = {}
     journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
     turn_calls: list[dict[str, Any]] = []
@@ -339,7 +537,6 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     allow_filler = settings.lookup_fillers_enabled and not (
         last_filler_turn > 0 and last_filler_turn == turn - 1
     )
-    ctx = context_from_state(state.get("conversation_context"))
 
     def _speak_filler(phrase: str | None) -> None:
         nonlocal spoken_filler
@@ -353,13 +550,12 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         journal.append(entry)
         turn_calls.append(entry)
 
-    # Город: резолвер только при пустом слаге и поводе — ведущий шаг
-    # собирает city (ищем в реплике) либо в профиле уже есть имя (ищем по нему).
-    fills_city = bool(step and step.fills and "city" in step.fills)
-    profile_city = str(profile.get("city") or "").strip()
-    if fills_city and user_text:
+    # Город: только если шаг city уже задавался и слага ещё нет —
+    # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
+    fills_city = _step_fills_city(step)
+    if city_asked and fills_city and user_text:
         search_text: str | None = user_text
-    elif profile_city:
+    elif city_asked and profile_city:
         search_text = profile_city
     else:
         search_text = None
@@ -393,7 +589,7 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             _note({"call": "get_city", "slug": resolution.slug, "ok": city_meta is not None})
             price_phrase = None
             if city_meta and city_meta.get("price") is not None:
-                price_phrase = price_line(city_meta.get("price"), script.params.price)
+                price_phrase = _price_phrase_for(script, city_meta.get("price"))
             if city_meta:
                 ctx = merge_static(
                     ctx,
@@ -420,12 +616,13 @@ async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     city_slug = patch.get("city_slug") or state.get("city_slug") or ctx.city_slug
 
-    # Филиал: отбор до трёх; мета только после выбора.
+    # Филиал: только если шаг branch уже задавался; отбор до трёх.
     if (
-        city_slug
+        branch_asked
+        and city_slug
         and not (state.get("branch_slug") or ctx.branch_slug)
         and step
-        and "branch" in (step.fills or [])
+        and _step_fills_branch(step)
         and user_text
     ):
         if allow_filler and not spoken_filler:
@@ -591,7 +788,8 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 purpose="генератор",
             )
     except LLMTurnFailed as exc:
-        log.warning("Ход отдан в заглушку: %s", exc)
+        reason = str(exc) or "неизвестная причина"
+        log.warning("Подстановка фолбэка: %s", reason)
         if not spoken:
             say(script.params.fallback)
             spoken.append(script.params.fallback)
@@ -640,7 +838,9 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     for item in result.get("understood") or []:
         key = str(item.get("key", "")).strip()
         value = str(item.get("value", "")).strip()
-        if key in script.profile_fields and value:
+        # В формате продаж форма не объявлена — пишем любые имена полей.
+        allowed = script.is_sales or key in script.profile_fields
+        if allowed and value:
             if key in {"caller_name", "student_name"}:
                 value = given_name(value) or value
             profile[key] = value
@@ -658,10 +858,10 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         if record is not None:
             asides_done.append(str(aside_id))
             for key, value in getattr(record, "sets", {}).items():
-                if key in script.profile_fields:
+                if script.is_sales or key in script.profile_fields:
                     profile[key] = value
 
-    spoken_text = "".join(state.get("spoken") or []).strip()
+    spoken_text = "".join(list(state.get("spoken") or [])).strip()
     resume: str | None = None
     if step is not None and aside_id and result.get("resume_step", True):
         if progress.status.get(step.id) != "closed":
@@ -686,7 +886,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     )
     finished = not remaining and (bool(profile.get("outcome")) or all_closed or step is None)
 
-    progress_patch = await _save_progress(progress)
+    progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
     if finished:
         progress_patch["script_progress"] = progress.to_dict()
         progress_patch["call_finished"] = True

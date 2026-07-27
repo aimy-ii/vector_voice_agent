@@ -21,19 +21,29 @@ log = logging.getLogger(__name__)
 KEY_PREFIX = "vector:script:"
 
 
+#: Поля прогресса, которые пишет канал генератора.
+PROGRESS_FIELDS_GENERATOR: frozenset[str] = frozenset({"attempts", "taken_turn"})
+#: Поля прогресса, которые пишет канал чекера.
+PROGRESS_FIELDS_CHECKER: frozenset[str] = frozenset({"status", "profile"})
+#: Все поля прогресса (полная запись без слияния).
+PROGRESS_FIELDS_ALL: frozenset[str] = frozenset({"status", "attempts", "taken_turn", "profile"})
+
+
 @dataclass
 class ScriptProgress:
     """Прогресс скрипта одного звонка.
 
     Attributes:
         status: статус шага ``pending`` / ``closed``.
-        attempts: счётчик попыток задать шаг (раз ведущим в генерации).
+        attempts: счётчик попыток задать шаг (раз в шапке генерации).
         taken_turn: номер хода, когда шаг впервые ушёл в генерацию.
+        profile: базовые поля профиля, накопленные чекером в кеше.
     """
 
     status: dict[str, str] = field(default_factory=dict)
     attempts: dict[str, int] = field(default_factory=dict)
     taken_turn: dict[str, int] = field(default_factory=dict)
+    profile: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Сериализует прогресс в словарь."""
@@ -59,6 +69,7 @@ class ScriptProgress:
                 normalized[key] = "closed"
             else:
                 normalized[key] = "pending"
+        profile_raw = data.get("profile") or {}
         return cls(
             status=normalized,
             attempts={
@@ -66,16 +77,51 @@ class ScriptProgress:
                 for k, v in dict(data.get("attempts") or data.get("step_attempts") or {}).items()
             },
             taken_turn={str(k): int(v) for k, v in dict(data.get("taken_turn") or {}).items()},
+            profile={
+                str(k): str(v)
+                for k, v in dict(profile_raw).items()
+                if v is not None and str(v).strip()
+            },
         )
+
+
+def merge_progress_fields(
+    base: ScriptProgress,
+    overlay: ScriptProgress,
+    fields: frozenset[str],
+) -> ScriptProgress:
+    """Накладывает выбранные поля ``overlay`` на копию ``base``.
+
+    Args:
+        base: прогресс из кеша (актуальный).
+        overlay: локальные правки канала.
+        fields: какие поля накладывать.
+
+    Returns:
+        Новый прогресс со слиянием на уровне ключей словарей.
+    """
+    merged = ScriptProgress.from_mapping(base.to_dict())
+    if "status" in fields:
+        merged.status = {**merged.status, **overlay.status}
+    if "attempts" in fields:
+        merged.attempts = {**merged.attempts, **overlay.attempts}
+    if "taken_turn" in fields:
+        merged.taken_turn = {**merged.taken_turn, **overlay.taken_turn}
+    if "profile" in fields:
+        for key, value in overlay.profile.items():
+            text = str(value).strip()
+            if text:
+                merged.profile[key] = text
+    return merged
 
 
 class ScriptStore(Protocol):
     """Контракт хранилища прогресса скрипта."""
 
-    async def load(self, thread_id: str) -> ScriptProgress | None:
-        """Читает прогресс по треду или None при промахе."""
+    async def load(self, call_id: str) -> ScriptProgress | None:
+        """Читает прогресс по идентификатору звонка или None при промахе."""
 
-    async def save(self, thread_id: str, progress: ScriptProgress) -> bool:
+    async def save(self, call_id: str, progress: ScriptProgress) -> bool:
         """Пишет прогресс. True — записали, False — Redis недоступен."""
 
 
@@ -87,20 +133,20 @@ class MemoryScriptStore:
         self._data: dict[str, ScriptProgress] = {}
         self.fail: bool = False
 
-    async def load(self, thread_id: str) -> ScriptProgress | None:
+    async def load(self, call_id: str) -> ScriptProgress | None:
         """Читает прогресс или None при промахе/сбое."""
         if self.fail:
             return None
-        progress = self._data.get(thread_id)
+        progress = self._data.get(call_id)
         if progress is None:
             return None
         return ScriptProgress.from_mapping(progress.to_dict())
 
-    async def save(self, thread_id: str, progress: ScriptProgress) -> bool:
+    async def save(self, call_id: str, progress: ScriptProgress) -> bool:
         """Пишет прогресс; при ``fail`` притворяется, что Redis недоступен."""
         if self.fail:
             return False
-        self._data[thread_id] = ScriptProgress.from_mapping(progress.to_dict())
+        self._data[call_id] = ScriptProgress.from_mapping(progress.to_dict())
         return True
 
 
@@ -118,9 +164,9 @@ class RedisScriptStore:
         self._ttl = ttl_seconds if ttl_seconds is not None else settings.script_redis_ttl
         self._client: Any = None
 
-    def _key(self, thread_id: str) -> str:
-        """Ключ прогресса по треду."""
-        return f"{KEY_PREFIX}{thread_id}"
+    def _key(self, call_id: str) -> str:
+        """Ключ прогресса по идентификатору звонка."""
+        return f"{KEY_PREFIX}{call_id}"
 
     async def _get_client(self) -> Any:
         """Лениво открывает async-клиент Redis."""
@@ -130,11 +176,11 @@ class RedisScriptStore:
             self._client = Redis.from_url(self._url, decode_responses=True)
         return self._client
 
-    async def load(self, thread_id: str) -> ScriptProgress | None:
+    async def load(self, call_id: str) -> ScriptProgress | None:
         """Читает прогресс; при любой ошибке — None, ход не роняем."""
         try:
             client = await self._get_client()
-            raw = await client.get(self._key(thread_id))
+            raw = await client.get(self._key(call_id))
         except Exception as exc:  # noqa: BLE001
             log.warning("Redis недоступен при чтении скрипта: %s", exc)
             return None
@@ -146,12 +192,12 @@ class RedisScriptStore:
             log.warning("Битый слепок скрипта в Redis: %s", exc)
             return None
 
-    async def save(self, thread_id: str, progress: ScriptProgress) -> bool:
+    async def save(self, call_id: str, progress: ScriptProgress) -> bool:
         """Пишет прогресс с TTL; при ошибке возвращает False."""
         try:
             client = await self._get_client()
             await client.set(
-                self._key(thread_id),
+                self._key(call_id),
                 json.dumps(progress.to_dict(), ensure_ascii=False),
                 ex=self._ttl,
             )
@@ -184,6 +230,7 @@ def progress_from_state(state: Mapping[str, Any]) -> ScriptProgress:
             "status": state.get("step_status") or {},
             "attempts": state.get("step_attempts") or {},
             "taken_turn": state.get("step_taken_turn") or {},
+            "profile": state.get("profile") or {},
         }
     )
 
@@ -195,7 +242,8 @@ def progress_to_state(progress: ScriptProgress) -> dict[str, Any]:
         progress: текущий прогресс.
 
     Returns:
-        Правки для ``CallState``.
+        Правки для ``CallState``. Профиль сюда не кладём — его сливают
+        вызывающие узлы, чтобы не затереть поля, которых нет в кеше.
     """
     payload = progress.to_dict()
     return {

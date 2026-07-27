@@ -16,10 +16,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Mapping, Sequence
 
+from graph.tools_registry import needs_from_knowledge
 from kb.client import VectorKBClient
-from script.build import CompiledScript
-from script.models import Step
-from script.price import price_facts
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep
+from script.price import price_facts, price_facts_from_kb
 
 log = logging.getLogger(__name__)
 
@@ -126,8 +127,11 @@ def branch_summary(branch: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def needs_of(step: Step | None) -> list[str]:
+def needs_of(step: AnyStep | None) -> list[str]:
     """Что шаг просит принести из справочника.
+
+    Старый формат — поле ``needs``. Новый — весь список ``knowledge``
+    (чего в справочнике нет, то не мапится и не найдётся).
 
     Args:
         step: шаг этого хода или None.
@@ -135,7 +139,11 @@ def needs_of(step: Step | None) -> list[str]:
     Returns:
         Список потребностей шага.
     """
-    return list(step.needs) if step is not None else []
+    if step is None:
+        return []
+    if isinstance(step, SalesStep):
+        return needs_from_knowledge(step.knowledge)
+    return list(step.needs)
 
 
 async def collect_facts(
@@ -163,7 +171,7 @@ async def collect_facts(
     facts: dict[str, Any] = {}
     journal: list[dict[str, Any]] = []
 
-    if want_city_choices:
+    if want_city_choices or "city_choices" in needs:
         cities = await kb.list_cities()
         journal.append({"call": "list_cities", "found": len(cities)})
         if cities:
@@ -178,7 +186,10 @@ async def collect_facts(
 
     if "price" in needs:
         price = (city_meta or {}).get("price") if city_meta else None
-        facts["price"] = price_facts(price, script.params.price)
+        if script.is_sales:
+            facts["price"] = price_facts_from_kb(price)
+        else:
+            facts["price"] = price_facts(price, script.params.price)
         facts["price_line"] = facts["price"]["line"]
 
     if "branches" in needs and city_slug:

@@ -6,13 +6,13 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from graph import nodes as nodes_module
 from graph.checker import CheckerVerdict
 from graph.graph import graph
 from graph.resolvers import BranchResolution, CityResolution
-from script.store import MemoryScriptStore
+from script.store import MemoryScriptStore, ScriptProgress
 from utils.llm_gen import LLMTurnFailed
 
 
@@ -70,8 +70,8 @@ def spoken(monkeypatch) -> list[str]:
 
 @pytest.fixture()
 def use_v2(monkeypatch) -> None:
-    """Локальный .env может держать SCRIPT_VERSION=1 для идущих звонков."""
-    monkeypatch.setattr(nodes_module.settings, "script_version", None)
+    """Ход-тесты идут на v2; .env и «последняя» не должны подменять версию."""
+    monkeypatch.setattr(nodes_module.settings, "script_version", "2")
 
 
 @pytest.fixture()
@@ -156,12 +156,12 @@ async def test_город_фиксируется_резолвером(
         "resume_step": True,
         "reply": "Отлично, Пермь. Учиться будете сами?",
     }
-    # Имя уже закрыто, на шаге города.
+    # Имя уже закрыто, шаг city уже задавали.
     state = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -330,12 +330,15 @@ async def test_возражение_меняет_состояние(spoken, stor
 
 
 async def test_модель_не_ответила_в_эфир_идёт_заглушка(
-    spoken, store, checker, kb, resolvers, model, script, use_v2
+    spoken, store, checker, kb, resolvers, model, script, use_v2, caplog
 ):
     model["result"] = LLMTurnFailed("бюджет хода исчерпан")
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    with caplog.at_level("WARNING"):
+        state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
     assert script.params.fallback in "".join(spoken)
     assert state["last_error"]
+    assert any("Подстановка фолбэка" in rec.message for rec in caplog.records)
+    assert any("бюджет хода исчерпан" in rec.message for rec in caplog.records)
 
 
 async def test_версия_скрипта_фиксируется_в_состоянии(
@@ -433,6 +436,13 @@ async def test_город_из_профиля_точное_совпадение_
                 "experience": "closed",
                 "transmission": "closed",
             },
+            "step_attempts": {
+                "name": 1,
+                "city": 1,
+                "who_studies": 1,
+                "experience": 1,
+                "transmission": 1,
+            },
         }
     )
     assert state["city_slug"] == "perm"
@@ -463,13 +473,73 @@ async def test_ведущий_шаг_city_ищет_в_реплике(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
     assert state["city_slug"] == "perm"
     assert resolve_calls == ["Пермь"]
     assert resolvers[0].calls == 0
+
+
+async def test_заполнитель_города_не_зовётся_при_нулевых_попытках(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Шаг city ещё не задавался — resolve_city не вызывается."""
+    resolve_calls: list[str] = []
+    real = nodes_module.resolve_city
+
+    async def _spy(text: str, cities: Any, *, resolver: Any = None):
+        resolve_calls.append(text)
+        return await real(text, cities, resolver=resolver)
+
+    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Из какого города?",
+    }
+    await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Да, хорошо")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert resolve_calls == []
+    assert resolvers[0].calls == 0
+
+
+async def test_заполнитель_города_зовётся_когда_шаг_уже_задавали(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Счётчик city > 0 и поле пустое — резолвер ищет в реплике."""
+    resolve_calls: list[str] = []
+    real = nodes_module.resolve_city
+
+    async def _spy(text: str, cities: Any, *, resolver: Any = None):
+        resolve_calls.append(text)
+        return await real(text, cities, resolver=resolver)
+
+    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Учиться будете сами?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed", "city": "pending"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert resolve_calls == ["Пермь"]
+    assert state["city_slug"] == "perm"
 
 
 async def test_слаг_города_доживает_до_следующего_хода(
@@ -494,7 +564,7 @@ async def test_слаг_города_доживает_до_следующего_
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -576,7 +646,7 @@ async def test_пустая_версия_из_env_берёт_последнюю(
     model["result"] = {"understood": [], "reply": "Слушаю."}
     state = await graph.ainvoke({"messages": [{"role": "human", "content": "Здравствуйте"}]})
     assert nodes_module.settings.script_version is None
-    assert state["script_version"] == "2"
+    assert state["script_version"] == "4"
 
 
 async def test_заглушка_города_без_модели_и_видна_генератору(
@@ -588,6 +658,7 @@ async def test_заглушка_города_без_модели_и_видна_�
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
         }
     )
@@ -629,6 +700,7 @@ async def test_заглушка_не_два_хода_подряд(
         {
             "messages": [HumanMessage(content="Пермь")],
             "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
             "turn": 1,
             "last_filler_turn": 1,
@@ -767,10 +839,10 @@ async def test_реплика_по_существу_на_шаге_образца
     assert state["route"] in ("lookup", "respond")
 
 
-async def test_счётчик_только_у_ведущего_висящие_не_тратят(
+async def test_счётчик_растёт_у_всех_шагов_шапки(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """В шапке два висящих: плюс только ведущему, второй и свежий не растут."""
+    """В шапке два висящих и один свежий: плюс каждому из шапки."""
     model["result"] = {
         "understood": [],
         "aside_id": None,
@@ -788,8 +860,127 @@ async def test_счётчик_только_у_ведущего_висящие_н
     )
     attempts = state.get("step_attempts") or {}
     assert attempts.get("name") == 2
-    assert attempts.get("city") == 1
-    assert attempts.get("who_studies", 0) == 0
+    assert attempts.get("city") == 2
+    # Свежий who_studies тоже в шапке — счётчик с нуля.
+    assert attempts.get("who_studies") == 1
+    assert state["head_steps"] == ["name", "city", "who_studies"]
+
+
+async def test_taken_turn_всем_шапке_без_перезаписи(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """taken_turn проставляется всем шагам шапки и не перезаписывается."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state1 = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="ну не знаю")],
+            "step_status": {"name": "pending"},
+            "step_attempts": {"name": 1},
+            "step_taken_turn": {"name": 1},
+            "turn": 1,
+        }
+    )
+    taken1 = state1.get("step_taken_turn") or {}
+    assert taken1.get("name") == 1
+    assert taken1.get("city") == 2
+
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком городе планируете учиться?",
+    }
+    state2 = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="пока думаю")],
+            "turn": state1["turn"],
+        }
+    )
+    taken2 = state2.get("step_taken_turn") or {}
+    assert taken2.get("name") == 1
+    assert taken2.get("city") == 2
+
+
+async def test_pending_всем_шагам_шапки(spoken, store, checker, kb, resolvers, model, use_v2):
+    """Статус pending проставляется каждому шагу шапки, в том числе свежему."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="здравствуйте")],
+            "step_status": {"name": "pending"},
+            "step_attempts": {"name": 1},
+            "step_taken_turn": {"name": 1},
+        }
+    )
+    status = state.get("step_status") or {}
+    assert status.get("name") == "pending"
+    assert status.get("city") == "pending"
+    assert "city" in state["head_steps"]
+
+
+async def test_шаг_шапки_на_следующем_ходу_у_чекера(
+    spoken, store, checker, kb, resolvers, model, use_v2, script
+):
+    """Шаг, попавший в шапку свежим, на следующем ходу — в висящих чекера."""
+    from graph.checker import run_checker
+
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком городе планируете учиться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Андрей")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1},
+            "step_taken_turn": {"name": 1},
+            "profile": {"caller_name": "Андрей"},
+        }
+    )
+    assert int(state["step_attempts"].get("city", 0)) >= 1
+    assert "city" in state["head_steps"]
+
+    class CapturingChecker:
+        def __init__(self) -> None:
+            self.step_ids: list[str] = []
+
+        async def judge(self, *, step, **kwargs: Any) -> CheckerVerdict:
+            self.step_ids.append(step.id)
+            return CheckerVerdict(reply_usable=True, step_closed=False)
+
+    client = CapturingChecker()
+    progress = ScriptProgress.from_mapping(
+        {
+            "status": state.get("step_status") or {},
+            "attempts": state.get("step_attempts") or {},
+            "taken_turn": state.get("step_taken_turn") or {},
+        }
+    )
+    await run_checker(
+        script=script,
+        progress=progress,
+        messages=[
+            HumanMessage(content="Андрей"),
+            AIMessage(content=model["result"]["reply"]),
+            HumanMessage(content="В городе Санкт-Петербург"),
+        ],
+        profile={"caller_name": "Андрей"},
+        turn=int(state["turn"]) + 1,
+        client=client,
+    )
+    assert "city" in client.step_ids
 
 
 async def test_просьба_повторить_идёт_через_модель(
@@ -926,19 +1117,23 @@ async def test_просьба_рассказать_на_шаге_образца_
     assert model["calls"] == 1
 
 
-async def test_граф_без_узла_verbatim_всегда_respond_commit():
-    """Топология: узла verbatim нет; после respond всегда commit."""
+async def test_граф_без_узла_check_порядок_ingest_lookup_plan_respond_commit():
+    """Топология: ingest → lookup → plan → respond → commit; check нет."""
     from graph.graph import build_graph
 
     built = build_graph()
     nodes = set(built.nodes)
+    assert "check" not in nodes
     assert "verbatim" not in nodes
-    assert {"ingest", "check", "plan", "lookup", "respond", "commit"} <= nodes
+    assert nodes == {"ingest", "lookup", "plan", "respond", "commit"}
 
     edges = built.edges
-    assert ("lookup", "respond") in edges
+    assert ("ingest", "lookup") in edges
+    assert ("lookup", "plan") in edges
+    assert ("plan", "respond") in edges
     assert ("respond", "commit") in edges
-    assert not any(src == "verbatim" or tgt == "verbatim" for src, tgt in edges)
+    assert not any(src == "check" or tgt == "check" for src, tgt in edges)
+    assert not built.waiting_edges
 
 
 async def test_филиал_не_определился_контекст_пуст_шаг_ждёт(
@@ -1043,3 +1238,86 @@ async def test_слепок_в_конце_звонка(spoken, store, checker, k
     )
     assert state.get("script_progress")
     assert state.get("call_finished") is True or state["current_step"] in (None, "messenger")
+
+
+async def test_plan_читает_закрытия_лайв_из_кеша(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Plan берёт статусы из Redis: закрытое лайвом не в шапке, следующий шаг."""
+    from script.store import ScriptProgress
+
+    await store.save(
+        "local",
+        ScriptProgress(
+            status={"name": "closed"},
+            attempts={"name": 1},
+            taken_turn={"name": 1},
+            profile={"caller_name": "Мария"},
+        ),
+    )
+    model["result"] = {
+        "understood": [],
+        "reply": "В каком городе планируете обучение?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Мария")],
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert state.get("step_status", {}).get("name") == "closed"
+    assert state["current_step"] == "city"
+    assert "name" not in (state.get("head_steps") or [])
+
+
+async def test_основной_ход_не_ждёт_лайв_и_не_падает(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Лайв ещё не закрыл шаг — ход всё равно отрабатывает без ошибки."""
+    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert state["current_step"] == "name"
+    assert model["calls"] == 1
+    assert "".join(spoken) == model["result"]["reply"]
+    # Чекер основного хода не зовётся (узла check нет).
+    assert checker.calls == 0
+
+
+async def test_plan_получает_результаты_lookup(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """После lookup plan видит слаг города; закрытия — только из кеша лайва."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Отлично, Пермь. Учиться будете сами?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+        }
+    )
+    assert state["city_slug"] == "perm"
+    assert state["current_step"] in ("city", "who_studies")
+    assert state.get("step_status", {}).get("name") == "closed"
+    assert int(state.get("step_attempts", {}).get(state["current_step"], 0)) >= 1
+
+
+async def test_ошибка_lookup_не_роняет_ход(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Исключение в резолвере глотается; генератор отрабатывает."""
+
+    async def _boom(*args: Any, **kwargs: Any):
+        raise RuntimeError("справочник недоступен")
+
+    monkeypatch.setattr(nodes_module, "_lookup_body", _boom)
+    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
+    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert state["current_step"] == "name"
+    assert model["calls"] == 1
+    assert "".join(spoken) == model["result"]["reply"]

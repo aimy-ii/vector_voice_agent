@@ -1,15 +1,17 @@
-"""Тесты каркаса контекстера, справок и реестра инструментов."""
+"""Тесты каркаса контекстера, справок, FAQ и реестра инструментов."""
 
 from __future__ import annotations
 
 from graph.context import (
     DYN_MISSING,
+    DYN_NEED_CITY,
     DYN_NONE,
     DYN_READY,
     ConversationContext,
 )
 from graph.contexter import run_contexter
-from graph.tools_registry import HelpsTool, build_context_tools
+from graph.prompts import dynamic_status_block
+from graph.tools_registry import NEED_CITY_SIGNAL, FaqTool, HelpsTool, build_context_tools
 from script.models import Help, Objection
 
 
@@ -37,25 +39,43 @@ async def test_контекстер_нечего_добавлять_статус
     assert out.static_text == "Город: Пермь"
 
 
-async def test_контекстер_ответ_в_статике_готово_без_инструментов():
+async def test_контекстер_ответ_в_статике_не_требуется_без_инструментов():
+    """Ответ лежит в статике, реестр молчит — DYN_NONE, не «не нашлось»."""
     ctx = ConversationContext(
-        static_text=("Город: Пермь.\nЦена (готовая фраза): Стоимость обучения — от 43900 рублей.")
+        static_text=(
+            "Город: Пермь.\nАвтопарк: механика: Hyundai Solaris; автомат: Kia Rio.\n"
+            "Цена (готовая фраза): Стоимость обучения — от 43900 рублей."
+        )
     )
-    out = await run_contexter(ctx, reply="а сколько стоимость обучения?", tools=[])
-    assert out.dynamic_status == DYN_READY
+    out = await run_contexter(ctx, reply="а на каких машинах учат?", tools=[])
+    assert out.dynamic_status == DYN_NONE
     assert out.static_text == ctx.static_text
 
 
-async def test_контекстер_нет_в_статике_и_реестре_не_нашлось():
+async def test_контекстер_инструмент_пустая_строка_не_нашлось():
     ctx = ConversationContext(static_text="Город: Пермь. Автопарк: Solaris.")
+    fake = _FakeTool("x", "дайвинг", "")
     out = await run_contexter(
         ctx,
         reply="а как записаться на дайвинг?",
-        tools=[],
+        tools=[fake],
     )
     assert out.dynamic_status == DYN_MISSING
     assert out.situation_slug is None
     assert out.static_text == ctx.static_text
+
+
+async def test_контекстер_нужен_город_и_блок_статуса():
+    fake = _FakeTool("faq", "сколько", NEED_CITY_SIGNAL)
+    out = await run_contexter(
+        ConversationContext(),
+        reply="сколько стоит обучение?",
+        tools=[fake],
+    )
+    assert out.dynamic_status == DYN_NEED_CITY
+    block = dynamic_status_block(status=DYN_NEED_CITY)
+    assert "город" in block.lower()
+    assert "стоим" in block.lower() or "назвать" in block.lower()
 
 
 async def test_контекстер_статика_не_трогается_при_находке():
@@ -99,6 +119,59 @@ async def test_helps_tool_справка_без_текста_не_нашлось
     )
     assert out.dynamic_status == DYN_MISSING
     assert out.dynamic_text == ""
+
+
+async def test_faq_tool_находит_ответ_в_мете_города():
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_faq=[
+            {
+                "question": "Какие документы нужны для поступления",
+                "answer": "Паспорт и СНИЛС.",
+            }
+        ],
+    )
+    out = await FaqTool().try_answer("какие документы нужны?", ctx)
+    assert out == "Паспорт и СНИЛС."
+    full = await run_contexter(ctx, reply="какие документы нужны?", tools=[FaqTool()])
+    assert full.dynamic_status == DYN_READY
+    assert "Паспорт и СНИЛС" in full.dynamic_text
+
+
+async def test_faq_tool_пустой_faq_возвращает_none():
+    ctx = ConversationContext(city_slug="perm", city_faq=[])
+    assert await FaqTool().try_answer("сколько стоит?", ctx) is None
+
+
+async def test_faq_tool_без_города_нужен_город():
+    assert await FaqTool().try_answer("сколько стоит обучение?", ConversationContext()) == (
+        NEED_CITY_SIGNAL
+    )
+
+
+async def test_справки_скрипта_приоритетнее_faq(script):
+    """HelpsTool стоит раньше FaqTool — справка побеждает."""
+    tools = build_context_tools(script)
+    assert tools[0].name == "helps"
+    assert tools[1].name == "faq"
+    med = script.helps["medcheck"].text
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_faq=[
+            {
+                "question": "когда медкомиссию проходить",
+                "answer": "Ответ из FAQ города — не должен победить.",
+            }
+        ],
+    )
+    out = await run_contexter(
+        ctx,
+        reply="а когда медкомиссию проходить?",
+        tools=tools,
+    )
+    assert out.dynamic_status == DYN_READY
+    assert med in out.dynamic_text
+    assert "FAQ города" not in out.dynamic_text
 
 
 async def test_контекстер_возражение_не_трогает():
@@ -161,11 +234,10 @@ async def test_реестр_приоритет_первый_подходящий
     assert second.calls == []
 
 
-async def test_build_context_tools_включает_helps(script):
-    """Реестр по умолчанию содержит HelpsTool со справками скрипта."""
+async def test_build_context_tools_включает_helps_и_faq(script):
+    """Реестр по умолчанию: HelpsTool, затем FaqTool."""
     tools = build_context_tools(script)
-    assert len(tools) >= 1
-    assert tools[0].name == "helps"
+    assert [t.name for t in tools[:2]] == ["helps", "faq"]
     med = script.helps["medcheck"].text
     out = await run_contexter(
         ConversationContext(),

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from script.build import CompiledScript
+from script.models import Step
 from script.planner import is_closed
 
 
@@ -39,10 +40,15 @@ def build_summary(
         if not is_closed(step_status.get(step_id)):
             continue
         step = script.step(step_id)
-        values = {
-            key: profile[key] for key in step.fills if key in profile and str(profile[key]).strip()
-        }
-        steps[step_id] = values if values else {"closed": True}
+        if isinstance(step, Step) and step.fills:
+            values = {
+                key: profile[key]
+                for key in step.fills
+                if key in profile and str(profile[key]).strip()
+            }
+            steps[step_id] = values if values else {"closed": True}
+        else:
+            steps[step_id] = {"closed": True}
 
     city: dict[str, str] = {}
     if city_slug:

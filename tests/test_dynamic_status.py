@@ -213,17 +213,37 @@ async def test_контекстер_на_lookup_кладёт_справку_в_�
     med = script.helps["medcheck"].text
     fake = FakeKB(cities=[], city=None, branches=[], branch=None)
     monkeypatch.setattr(nodes_module, "vector_kb", fake)
+    closed = {
+        "name": "closed",
+        "city": "closed",
+        "who_studies": "closed",
+        "experience": "closed",
+        "transmission": "closed",
+        "terms": "closed",
+        "theory_format": "closed",
+        "included": "closed",
+        "practice": "closed",
+        "branch": "closed",
+    }
     state: dict[str, Any] = {
         **new_state_defaults(),
         "messages": [HumanMessage(content="а когда медкомиссию проходить?")],
         "script_id": "vector_ru",
         "script_version": "2",
-        "current_step": "price",
-        "head_steps": ["price"],
+        "step_status": closed,
+        "step_attempts": {sid: 1 for sid in closed},
         "city_slug": "perm",
         "city_name": "Пермь",
         "branch_slug": "perm_chernyshevskogo",
-        "profile": {"city": "Пермь", "branch": "perm_chernyshevskogo"},
+        "profile": {
+            "city": "Пермь",
+            "branch": "perm_chernyshevskogo",
+            "caller_name": "Мария",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
         "conversation_context": {
             "static_text": "Город: Пермь\nСтоимость обучения — от 43900 рублей.",
             "city_slug": "perm",

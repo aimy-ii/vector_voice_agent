@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import re
+
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from core.config import settings
 from graph.facts import (
     branch_choices,
     branch_summary,
@@ -16,6 +19,8 @@ from graph.facts import (
 )
 from graph.prompts import (
     _NO_MECHANICS,
+    SPEECH_RULES,
+    _describe_step,
     aside_block,
     build_turn_messages,
     context_block,
@@ -28,6 +33,20 @@ from graph.prompts import (
     steps_block,
 )
 
+#: Число правил речи — замена формулировок не увеличивает набор.
+_SPEECH_RULES_COUNT = 19
+
+#: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
+_TY_ADDRESS = re.compile(
+    r"(?i)(?<![\w])(ты|тебе|тебя|тобой|твой|твоя|твоё|твое|твои|твою|"
+    r"твоей|твоего|твоим|твоих|твоём|твоем)(?![\w])"
+)
+
+
+def _strip_guillemets(text: str) -> str:
+    """Убирает фрагменты в «ёлочках» — там примеры запрещённых форм, не обращение."""
+    return re.sub(r"«[^»]*»", "", text)
+
 
 def test_подстановка_фактов_в_текст():
     assert (
@@ -39,11 +58,158 @@ def test_неизвестный_плейсхолдер_не_роняет_ход(
     assert fill_facts("Адрес: {branch_address}", {}) == "Адрес:"
 
 
-def test_персона_и_правила_попадают_в_промпт(script):
-    block = persona_block(script)
-    assert "Дарья" in block
-    assert "Вектор" in block
-    assert "ты и есть менеджер" in block
+def test_персона_из_настроек(monkeypatch):
+    """persona_block берёт имя, компанию, роль и тон из настроек."""
+    monkeypatch.setattr(settings, "agent_name", "Анна")
+    monkeypatch.setattr(settings, "agent_company", "ТестКомпания")
+    monkeypatch.setattr(settings, "agent_role", "менеджер тестовой школы")
+    monkeypatch.setattr(settings, "agent_tone", "спокойный и чёткий")
+    block = persona_block()
+    assert "Анна" in block
+    assert "ТестКомпания" in block
+    assert "менеджер тестовой школы" in block
+    assert "спокойный и чёткий" in block
+    assert "Роль:" in block
+    assert "Ты —" not in block
+    assert "только на «Вы»" in block
+
+
+def test_правило_рода_из_agent_gender(monkeypatch):
+    """При female — женский род, при male — мужской."""
+    monkeypatch.setattr(settings, "agent_gender", "female")
+    female = persona_block()
+    assert "женском роде" in female
+    assert "поняла" in female
+    assert "мужском роде" not in female
+
+    monkeypatch.setattr(settings, "agent_gender", "male")
+    male = persona_block()
+    assert "мужском роде" in male
+    assert "понял" in male
+    assert "женском роде" not in male
+
+
+def test_системное_сообщение_на_вы_без_ты_к_модели(script):
+    """В системном сообщении есть правило на «Вы» и нет обращений к модели на «ты»."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "только на «Вы»" in content
+    cleaned = _strip_guillemets(content)
+    match = _TY_ADDRESS.search(cleaned)
+    assert match is None, f"обращение на «ты»: {match.group(0) if match else ''}"
+
+
+def test_системное_сообщение_содержит_ключевые_правила_речи(script):
+    """В SPEECH_RULES — шаг задачи, образцы, открытые вопросы, прощание, тон."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "только на «Вы»" in content
+    assert "шаг из текущей задачи" in content
+    assert "форма фразы, а не текст реплики" in content
+    assert "Открытых вопросов не задавать" in content
+    assert "когда человек сам прощается словами" in content
+    assert "Тон разговорный, не рекламный" in content
+    assert "Если по ответу человека есть что сказать по делу" in content
+    assert "Если реплика клиента бессвязна, оборвана или не отвечает" in content
+
+
+def test_системное_сообщение_содержит_правила_реакции_и_хвостов(script):
+    """Реакция по делу, конец реплики и запрет пустых проверок — замены, не дубли."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "Если по ответу человека есть что сказать по делу" in content
+    assert "без предисловия" in content
+    assert "Вежливые пустышки" in content
+    assert "Реплика всегда заканчивается передачей хода собеседнику" in content
+    assert "Что скажете?" in content
+    assert "Пока всё понятно?" in content
+    assert "Продолжу?" in content
+    assert "Молчать после рассказа нельзя" in content
+    assert "Спрашивать согласие с содержанием" in content
+    assert "пустая проверка, на которую человек отвечает «да»" in content
+    assert "Короткий возврат хода после рассказа" in content
+    assert "запретом не считается" in content
+    assert "рассказать и задать этот вопрос в одной реплике" in content
+    assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
+    assert "в живой речи не встречаются" in content
+    assert "Каждая реплика заканчивается вопросом или конкретным предложением" not in content
+    assert "Проверочный вопрос в конце рассказа спрашивает о том" not in content
+    assert "Спрашивать надо предметно" not in content
+    assert "Реплика состоит из двух частей" not in content
+    assert "Голый вопрос без реакции — ошибка" not in content
+    assert "дежурной формулой" not in content
+    assert "Вопрос задаётся по-человечески" not in content
+    assert "по коробке определились" not in content
+    assert "Связка с предыдущей репликой делается по существу" not in content
+    assert "закончить самим фактом" not in content
+    assert "Проверок после рассказа не бывает" not in content
+    assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
+
+
+def test_правила_передачи_хода_и_запрета_проверок_идут_подряд():
+    """Передача хода и запрет пустых проверок стоят рядом как одно целое."""
+    turn_idx = next(
+        i for i, rule in enumerate(SPEECH_RULES) if "передачей хода собеседнику" in rule
+    )
+    check_idx = next(
+        i
+        for i, rule in enumerate(SPEECH_RULES)
+        if "согласие с содержанием" in rule and "запретом не считается" in rule
+    )
+    assert check_idx == turn_idx + 1
+    turn_rule = SPEECH_RULES[turn_idx]
+    check_rule = SPEECH_RULES[check_idx]
+    assert "Что скажете?" in turn_rule
+    assert "Пока всё понятно?" in turn_rule
+    assert "Продолжу?" in turn_rule
+    assert "Молчать после рассказа нельзя" in turn_rule
+    assert "Короткий возврат хода после рассказа" in check_rule
+
+
+def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
+    """Скрипты v1–v4 по-прежнему собирают системное сообщение с правилами."""
+    for compiled in (script_v1, script, script_v3, script_v4):
+        first = next(iter(compiled.steps))
+        messages = build_turn_messages(
+            script=compiled,
+            steps=[compiled.step(first)],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )
+        assert isinstance(messages[0], SystemMessage)
+        content = messages[0].content
+        assert "Если по ответу человека есть что сказать по делу" in content
+        assert "Реплика всегда заканчивается передачей хода собеседнику" in content
+        assert "Спрашивать согласие с содержанием" in content
+        assert "запретом не считается" in content
+        assert "рассказать и задать этот вопрос в одной реплике" in content
+        assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
+        assert "Каждая реплика заканчивается вопросом или конкретным предложением" not in content
+        assert "Проверочный вопрос в конце рассказа спрашивает о том" not in content
+        assert "Реплика состоит из двух частей" not in content
 
 
 def test_профиль_разделяет_роли(script):
@@ -52,6 +218,35 @@ def test_профиль_разделяет_роли(script):
     assert "звонящий" in block
     assert "будущий курсант" in block
     assert "student_name" in block
+
+
+def test_describe_step_выводит_why_examples_avoid():
+    """Непустые why/examples/avoid попадают в описание; пустые метки не печатаются."""
+    from script.models import Step
+
+    filled = Step.model_validate(
+        {
+            "id": "city",
+            "kind": "question",
+            "goal": "узнать город",
+            "why": "без города факты наугад",
+            "examples": ["В каком городе удобнее?", "Где планируете учиться?"],
+            "avoid": "не зачитывать список городов",
+        }
+    )
+    lines = _describe_step(filled, {}, {}, heading="Шаг")
+    text = "\n".join(lines)
+    assert "Зачем: без города факты наугад" in text
+    assert "Образцы формулировок (не зачитывать дословно, это форма фразы, а не текст):" in text
+    assert "В каком городе удобнее?" in text
+    assert "Где планируете учиться?" in text
+    assert "На этом шаге нельзя: не зачитывать список городов" in text
+
+    bare = Step.model_validate({"id": "name", "kind": "question", "goal": "имя"})
+    bare_text = "\n".join(_describe_step(bare, {}, {}, heading="Шаг"))
+    assert "Зачем:" not in bare_text
+    assert "Образцы формулировок" not in bare_text
+    assert "На этом шаге нельзя:" not in bare_text
 
 
 def test_шаг_с_образцом_попадает_в_промпт(script):
@@ -99,7 +294,7 @@ def test_цена_образца_и_факт_в_промпте_генерато�
 def test_промпт_запрещает_восторги_и_разрешает_короткое_подтверждение(script):
     block = naturalness_block(ask_for_move=True)
     lowered = block.lower()
-    assert "не оценивай" in lowered and "выбор клиента" in lowered
+    assert "не оценивать" in lowered and "выбор клиента" in lowered
     assert "хороший выбор" in lowered
     assert "возраст подходит" in lowered
     assert "сложности" in lowered or "лёгкости" in lowered
@@ -114,7 +309,7 @@ def test_промпт_требует_живой_проверочный_вопр�
     assert "Образец смысла проверки" in block
     assert step.check_question in block
     assert f"«{step.check_question}»" in block
-    assert "не зачитывай дословно" in block.lower()
+    assert "не зачитывать дословно" in block.lower()
     natural = naturalness_block(ask_for_move=True).lower()
     assert "своими словами" in natural
     assert "каждый раз по-разному" in natural
@@ -131,7 +326,7 @@ def test_промпт_требует_живой_проверочный_вопр�
     )
     content = messages[0].content
     assert step.check_question in content
-    assert "не зачитывай" in content.lower()
+    assert "не зачитывать" in content.lower()
     assert "не сокращай" not in content.lower()
     assert "задай целиком" not in content.lower()
 
@@ -153,7 +348,7 @@ def test_промпт_видит_шапку_и_запрет_переспраши
     assert "незакрытые" in block.lower() or "незакрытая" in block.lower()
     assert "уже спрашивали, ответа нет" in block
     natural = naturalness_block(ask_for_move=True)
-    assert "не переспрашивай" in natural.lower()
+    assert "не переспрашивать" in natural.lower()
     assert "верно?" in natural.lower()
 
 
@@ -161,11 +356,11 @@ def test_промпт_держит_границы_шага_и_незакрыты
     """Модель не забегает вперёд и возвращается к незакрытому после побочного."""
     natural = naturalness_block(ask_for_move=True).lower()
     assert "только те вопросы" in natural
-    assert "не придумывай" in natural
-    assert "не забегай" in natural
+    assert "не придумывать" in natural
+    assert "не забегать" in natural
     assert "заодно" in natural
     assert "до конца" in natural
-    assert "вернись" in natural
+    assert "вернуться" in natural
     assert "незакрытое" in natural or "незакрытый вопрос" in natural
     assert "повторите" in natural
     assert "побочные вопросы — норма" not in natural
@@ -216,7 +411,7 @@ def test_шапка_с_образцом_тоже_требует_хода_к_со
     )
     content = messages[0].content.lower()
     assert "ходом к собеседнику" in content
-    assert "сформулируй в этом ключе" in content
+    assert "сформулировать в этом ключе" in content
 
 
 def test_шапка_с_висящими_и_образцом_одним_промптом(script):
@@ -244,7 +439,7 @@ def test_шапка_пуста_текст_завершения(script):
     messages = build_turn_messages(
         script=script, step=None, profile={}, facts={}, history=[], asides_done=[]
     )
-    assert "подводи разговор к завершению" in messages[0].content.lower()
+    assert "подводить разговор к завершению" in messages[0].content.lower()
 
 
 def test_запрет_механики_ровно_один_раз(script):
@@ -278,9 +473,9 @@ def test_порядок_блоков_персона_профиль_шапка(sc
     assert persona_i < profile_i < steps_i
 
 
-def test_промпт_запрещает_озвучивать_механику(script):
-    block = persona_block(script)
-    assert "не проговаривай" in block.lower()
+def test_промпт_запрещает_озвучивать_механику():
+    block = persona_block()
+    assert "не проговаривается" in block.lower()
     assert _NO_MECHANICS in block
 
 

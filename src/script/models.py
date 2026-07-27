@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Mapping
 
 from pydantic import BaseModel, Field
 
@@ -31,15 +31,6 @@ StepKind = Literal["question", "inform", "inform_check", "action"]
 #: Ходим всегда, когда положено по шагу, а не когда модель сочтёт нужным —
 #: это и есть механизм, которым бот перестаёт выдумывать факты.
 NeedKind = Literal["city_meta", "branches", "branch_meta", "price"]
-
-
-class Persona(BaseModel):
-    """Кого отыгрывает бот."""
-
-    agent_name: str
-    company: str
-    role: str
-    tone: str
 
 
 class ProfileField(BaseModel):
@@ -87,8 +78,14 @@ class Step(BaseModel):
 
     #: Задача шага человеческим языком — уходит в промпт.
     goal: str = ""
+    #: Зачем шаг нужен в разговоре; помогает модели выбрать акцент.
+    why: str = ""
     #: Готовый текст (для `inform` и дословных блоков).
     text: str | None = None
+    #: Образцы формулировок: форма фразы, не зачитывать дословно.
+    examples: list[str] = Field(default_factory=list)
+    #: Что на шаге делать нельзя, включая поведение при отсутствии данных.
+    avoid: str = ""
     #: Ветки текста по значению поля профиля.
     branches: StepBranches | None = None
     #: Проверочный вопрос для `inform_check`.
@@ -122,6 +119,8 @@ class Objection(BaseModel):
     id: str
     triggers: list[str] = Field(default_factory=list)
     text: str
+    #: Зачем возражение нужно в разговоре; помогает модели выбрать акцент.
+    why: str = ""
     #: Что выставить в профиле при срабатывании.
     sets: dict[str, str] = Field(default_factory=dict)
 
@@ -160,15 +159,63 @@ class ScriptParams(BaseModel):
 
 
 class RawScript(BaseModel):
-    """Скрипт разговора как он лежит в источнике."""
+    """Скрипт разговора как он лежит в источнике (формат v1–v3).
+
+    Персона и правила речи живут в настройках агента, не в скрипте.
+    Лишние ключи вроде ``persona`` / ``rules`` из v1–v2 молча игнорируются.
+    """
+
+    model_config = {"extra": "ignore"}
 
     id: str
     version: str
-    persona: Persona
     opening_line: str = ""
-    rules: list[str] = Field(default_factory=list)
     profile_fields: list[ProfileField] = Field(default_factory=list)
     steps: list[Step] = Field(default_factory=list)
     helps: list[Help] = Field(default_factory=list)
     objections: list[Objection] = Field(default_factory=list)
     params: ScriptParams
+
+
+class SalesStep(BaseModel):
+    """Шаг скрипта продаж (новый формат): ровно шесть полей.
+
+    Название уходит в промпт вместе с требованиями — даёт модели контекст
+    этапа продажи. Технических полей (счётчик, закрытие, fills) в файле нет.
+    ``knowledge`` — факты, которые шаг ищет в базе; пустой список — искать нечего.
+    """
+
+    id: str
+    name: str
+    order: int
+    requirements: str
+    examples: list[str]
+    knowledge: list[str] = Field(default_factory=list)
+
+
+class RawSalesScript(BaseModel):
+    """Скрипт продаж как у заказчика: только идентификатор, версия и шаги.
+
+    Формат определяется по наличию у шагов поля ``requirements``.
+    Справки, заглушки и форма профиля живут в настройках / базе, не здесь.
+    """
+
+    id: str
+    version: str
+    steps: list[SalesStep] = Field(default_factory=list)
+
+
+def is_sales_payload(payload: Mapping[str, object]) -> bool:
+    """Определяет формат скрипта по наличию ``requirements`` у шагов.
+
+    Args:
+        payload: сырой JSON-словарь.
+
+    Returns:
+        True, если это скрипт продаж (новый формат).
+    """
+    steps = payload.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return False
+    first = steps[0]
+    return isinstance(first, Mapping) and "requirements" in first

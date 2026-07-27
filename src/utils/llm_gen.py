@@ -242,10 +242,21 @@ async def astream_structured(
                 async with _llm_semaphore:
                     result = await asyncio.wait_for(_run(), timeout=limit)
                 if result:
-                    return result
-                last = LLMTurnFailed("Пустой ответ модели")
+                    if text_field is not None:
+                        value = result.get(text_field)
+                        if not isinstance(value, str) or not value.strip():
+                            last = LLMTurnFailed("Пустой ответ модели")
+                        else:
+                            return result
+                    else:
+                        return result
+                else:
+                    last = LLMTurnFailed("Пустой ответ модели")
             except TimeoutError as exc:
-                log.warning("Модель не уложилась в бюджет хода %.1f с", limit)
+                log.warning(
+                    "Подстановка фолбэка: таймаут, модель не уложилась в бюджет хода %.1f с",
+                    limit,
+                )
                 raise LLMTurnFailed("Бюджет хода исчерпан") from exc
             except _RETRYABLE as exc:
                 last = exc
@@ -253,10 +264,12 @@ async def astream_structured(
                 if attempt < LLM_RETRY_ATTEMPTS:
                     await asyncio.sleep(LLM_RETRY_DELAY)
             except Exception as exc:  # noqa: BLE001
-                log.error("Ошибка вызова модели: %s", exc)
+                log.warning("Подстановка фолбэка: ошибка вызова модели: %s", exc)
                 raise LLMTurnFailed(str(exc)) from exc
 
-        raise LLMTurnFailed(str(last))
+        reason = str(last) if last is not None else "Пустой ответ модели"
+        log.warning("Подстановка фолбэка: %s", reason)
+        raise LLMTurnFailed(reason)
     finally:
         if purpose:
             elapsed_ms = int((time.perf_counter() - started) * 1000)

@@ -22,18 +22,21 @@ from typing import Protocol
 
 from core.config import settings
 from script.build import CompiledScript, ScriptError, build_script
-from script.models import RawScript
+from script.models import RawSalesScript, RawScript, is_sales_payload
 
 log = logging.getLogger(__name__)
 
 #: Имя файла скрипта: `<идентификатор>.v<версия>.json`.
 _FILE_RE = re.compile(r"^(?P<id>[a-z0-9_]+)\.v(?P<version>[a-z0-9_.-]+)\.json$")
 
+#: Сырой скрипт: старый формат или продажи.
+RawAnyScript = RawScript | RawSalesScript
+
 
 class ScriptSource(Protocol):
     """Откуда берутся сырые скрипты."""
 
-    def fetch(self, script_id: str, version: str | None) -> RawScript:
+    def fetch(self, script_id: str, version: str | None) -> RawAnyScript:
         """Отдаёт сырой скрипт.
 
         Args:
@@ -71,7 +74,7 @@ class JsonScriptSource:
                 found.append((match.group("version"), path))
         return sorted(found, key=lambda item: _version_key(item[0]))
 
-    def fetch(self, script_id: str, version: str | None) -> RawScript:
+    def fetch(self, script_id: str, version: str | None) -> RawAnyScript:
         """Читает скрипт из файла.
 
         Args:
@@ -104,8 +107,14 @@ class JsonScriptSource:
         except (OSError, json.JSONDecodeError) as exc:
             raise ScriptError(f"Скрипт {path} не читается: {exc}") from exc
 
+        if not isinstance(payload, dict):
+            raise ScriptError(f"Скрипт {path} должен быть JSON-объектом")
+
         try:
-            raw = RawScript.model_validate(payload)
+            if is_sales_payload(payload):
+                raw: RawAnyScript = RawSalesScript.model_validate(payload)
+            else:
+                raw = RawScript.model_validate(payload)
         except Exception as exc:  # noqa: BLE001
             raise ScriptError(f"Скрипт {path} не проходит разбор: {exc}") from exc
 

@@ -20,8 +20,9 @@ from pydantic import BaseModel, Field
 
 from core.config import settings
 from graph.history import last_user_text
-from script.build import CompiledScript
-from script.models import Step
+from graph.log_fmt import format_check_pending
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep, Step
 from script.planner import exhausted, is_closed, iter_available, profile_has, render_step_text
 from script.source import registry
 from script.store import ScriptProgress, progress_from_state
@@ -57,6 +58,13 @@ class CheckerVerdict(BaseModel):
             "Закрывается ли шаг по критерию своего вида. «Потом скажу» — ответ есть, шаг не закрыт."
         ),
     )
+    client_asks_inform: bool = Field(
+        default=False,
+        description=(
+            "Просит ли клиент рассказать про обучение, условия, стоимость, "
+            "состав пакета или как проходит учёба — то есть нужен информирующий блок."
+        ),
+    )
 
 
 class CheckerClient(Protocol):
@@ -67,30 +75,17 @@ class CheckerClient(Protocol):
         *,
         history_slice: str,
         client_reply: str,
-        step: Step,
+        step: AnyStep,
         step_text: str | None,
     ) -> CheckerVerdict | None:
         """Оценивает один шаг. None — модель не ответила."""
 
 
-def closure_criterion(step: Step) -> str:
+def closure_criterion(step: AnyStep) -> str:
     """Человекочитаемый критерий закрытия для вида шага."""
+    if isinstance(step, SalesStep):
+        return "требования шага выполнены по диалогу"
     return _KIND_CRITERIA.get(step.kind, "задача шага решена")
-
-
-def accept_model_closure(
-    step: Step,
-    *,
-    profile: Mapping[str, str],
-) -> bool:
-    """Можно ли принять вердикт модели о закрытии.
-
-    ``question`` с непустым ``fills`` не закрываем, пока ни одно из его
-    полей профиля не заполнилось — модели в этом случае не верим.
-    """
-    if step.kind == "question" and step.fills:
-        return any(profile_has(profile, key) for key in step.fills)
-    return True
 
 
 class LlmCheckerClient:
@@ -101,7 +96,7 @@ class LlmCheckerClient:
         *,
         history_slice: str,
         client_reply: str,
-        step: Step,
+        step: AnyStep,
         step_text: str | None,
     ) -> CheckerVerdict | None:
         """Вызывает модель; при сбое возвращает None."""
@@ -110,7 +105,7 @@ class LlmCheckerClient:
             "Ты проверяешь, закрылся ли шаг скрипта телефонного разговора.\n"
             "Тебе даны ТРИ РАЗДЕЛЬНЫХ блока: срез истории, реплика клиента и шаг.\n"
             "Не склеивай их мысленно как один текст: реплика — отдельный блок.\n"
-            "Ответь только по схеме: reply_usable и step_closed.\n"
+            "Ответь только по схеме: reply_usable, step_closed и client_asks_inform.\n"
             "step_closed=true только если выполнен критерий закрытия для вида шага.\n"
             "Критерии по виду:\n"
             "- question — клиент ответил по существу вопроса шага;\n"
@@ -118,22 +113,36 @@ class LlmCheckerClient:
             "- inform_check — клиент ответил на проверочный вопрос;\n"
             "- action — результат виден в диалоге: время встречи, анкета,"
             " удержанное место.\n"
+            "- шаг продаж (requirements) — требования шага выполнены по диалогу.\n"
             "«Потом скажу», уклонение, шутка, ответ не по теме шага —"
             " step_closed=false.\n"
+            "client_asks_inform=true, если клиент просит рассказать про обучение,"
+            " условия, стоимость, сроки, теорию/практику или состав пакета.\n"
             "Идентификатор шага не возвращай."
         )
-        human_parts = [
-            f"### Срез истории\n{history_slice or '(пусто)'}",
-            f"### Реплика клиента\n{client_reply or '(пусто)'}",
-            "### Шаг",
-            f"id (служебно, не возвращай): {step.id}",
-            f"Вид: {step.kind}",
-            f"Критерий закрытия: {criterion}",
-            f"Задача: {step.goal}",
-            f"Формулировка: {step_text or step.text or '—'}",
-        ]
-        if step.kind == "inform_check" and step.check_question:
-            human_parts.append(f"Проверочный вопрос: {step.check_question}")
+        if isinstance(step, SalesStep):
+            human_parts = [
+                f"### Срез истории\n{history_slice or '(пусто)'}",
+                f"### Реплика клиента\n{client_reply or '(пусто)'}",
+                "### Шаг",
+                f"id (служебно, не возвращай): {step.id}",
+                f"Название: {step.name}",
+                f"Критерий закрытия: {criterion}",
+                f"Требования:\n{step.requirements}",
+            ]
+        else:
+            human_parts = [
+                f"### Срез истории\n{history_slice or '(пусто)'}",
+                f"### Реплика клиента\n{client_reply or '(пусто)'}",
+                "### Шаг",
+                f"id (служебно, не возвращай): {step.id}",
+                f"Вид: {step.kind}",
+                f"Критерий закрытия: {criterion}",
+                f"Задача: {step.goal}",
+                f"Формулировка: {step_text or step.text or '—'}",
+            ]
+            if step.kind == "inform_check" and step.check_question:
+                human_parts.append(f"Проверочный вопрос: {step.check_question}")
         human = "\n".join(human_parts)
         schema = response_format_from(CheckerVerdict, name="vector_checker")
         try:
@@ -172,7 +181,7 @@ def _message_text(message: BaseMessage) -> str:
 def history_slice_for(
     messages: Sequence[BaseMessage],
     *,
-    steps: Sequence[Step],
+    steps: Sequence[AnyStep],
     progress: ScriptProgress,
     turn: int,
     reply: str | None = None,
@@ -241,11 +250,15 @@ async def check_pass(
     judge: CheckerClient | None = None,
     progress: ScriptProgress | None = None,
     attempt_limit: int | None = None,
-) -> tuple[ScriptProgress, list[tuple[str, str]]]:
+) -> tuple[ScriptProgress, list[tuple[str, str]], bool]:
     """Один проход чекера по заданному тексту реплики.
 
     Общее ядро для синхронного узла основного хода и служебного графа.
     Источник текста (полная реплика или накопленный partial) роли не играет.
+
+    Порядок: сначала модельный проход (и закрытие по fills), затем
+    счётчиковое закрытие — чтобы шаг на последней попытке закрылся
+    основанием «диалог», а не «счётчик».
 
     Args:
         state: состояние звонка (скрипт, профиль, история, turn).
@@ -255,32 +268,32 @@ async def check_pass(
         attempt_limit: порог попыток; пусто — из настроек.
 
     Returns:
-        Обновлённый прогресс и список закрытий ``(step_id, основание)``.
+        Обновлённый прогресс, список закрытий ``(step_id, основание)``
+        и признак «клиент просит рассказать про обучение».
     """
     script = _script_from_state(state)
     updated = ScriptProgress.from_mapping(
         (progress if progress is not None else progress_from_state(state)).to_dict()
     )
     profile = dict(state.get("profile") or {})
+    # Профиль из кеша прогресса — для закрытия по fills.
+    for key, value in updated.profile.items():
+        if value and key not in profile:
+            profile[key] = value
     turn = int(state.get("turn") or 0)
     messages = list(state.get("messages") or [])
     limit = attempt_limit if attempt_limit is not None else settings.step_attempt_limit
     closures: list[tuple[str, str]] = []
+    asks_inform = False
 
-    # 1. Счётчик исчерпан — без модели.
-    for step in iter_available(script, status=updated.status, profile=profile):
-        if exhausted(step, updated.attempts, limit=limit):
-            updated.status[step.id] = "closed"
-            closures.append((step.id, "счётчик"))
-
-    # 1b. question: fills уже в профиле (с прошлого commit) — закрываем кодом,
-    # иначе after-зависимости не откроются.
+    # 1. question: fills уже в профиле — закрываем кодом до модели.
     for step_id in script.step_order:
         step = script.step(step_id)
         if is_closed(updated.status.get(step.id)):
             continue
         if (
-            step.kind == "question"
+            isinstance(step, Step)
+            and step.kind == "question"
             and step.fills
             and int(updated.attempts.get(step.id, 0)) > 0
             and any(profile_has(profile, key) for key in step.fills)
@@ -289,45 +302,77 @@ async def check_pass(
             closures.append((step.id, "диалог"))
 
     # inform закрывает код по доставке — в pending чекера не отдаём.
-    pending = [
-        step
-        for step in iter_available(script, status=updated.status, profile=profile)
-        if int(updated.attempts.get(step.id, 0)) > 0
-        and not exhausted(step, updated.attempts, limit=limit)
-        and step.kind != "inform"
-    ]
-    if not pending or not reply.strip():
-        return updated, closures
-
-    client = judge or LlmCheckerClient()
-    history = history_slice_for(
-        messages,
-        steps=pending,
-        progress=updated,
-        turn=turn,
-        reply=reply,
-    )
-    history_text = _format_history(history)
-
-    for step in pending:
-        verdict = await client.judge(
-            history_slice=history_text,
-            client_reply=reply,
-            step=step,
-            step_text=render_step_text(step, profile),
-        )
-        if verdict is None:
-            # Модель не ответила — шаги не трогаем, ход продолжается.
-            break
-        if not verdict.reply_usable:
-            break
-        if verdict.step_closed and accept_model_closure(step, profile=profile):
-            updated.status[step.id] = "closed"
-            closures.append((step.id, "диалог"))
+    # Включаем и шаги на пороге счётчика: модель смотрит раньше счётчика.
+    # В формате продаж видов нет — все висящие идут в чекер.
+    available = iter_available(script, status=updated.status, profile=profile)
+    pending = []
+    rejected: list[tuple[str, str]] = []
+    for step in available:
+        count = int(updated.attempts.get(step.id, 0))
+        if count <= 0:
+            rejected.append((step.id, "счётчик ноль"))
             continue
-        break
+        if isinstance(step, Step) and step.kind == "inform":
+            rejected.append((step.id, "inform"))
+            continue
+        pending.append(step)
+    # Закрытые с ненулевым счётчиком — «исчерпан»: в available их уже нет.
+    pending_ids = {step.id for step in pending}
+    for step_id, count in updated.attempts.items():
+        if count <= 0 or step_id in pending_ids:
+            continue
+        if any(sid == step_id for sid, _ in rejected):
+            continue
+        if is_closed(updated.status.get(step_id)):
+            rejected.append((step_id, "исчерпан"))
+    pending_pairs = [(step.id, int(updated.attempts.get(step.id, 0))) for step in pending]
+    available_pairs = [(step.id, int(updated.attempts.get(step.id, 0))) for step in available]
+    log.info(
+        "[check|pending] %s",
+        format_check_pending(
+            pending=pending_pairs,
+            rejected=rejected,
+            available=available_pairs if not pending else None,
+        ),
+    )
+    if pending and reply.strip():
+        client = judge or LlmCheckerClient()
+        history = history_slice_for(
+            messages,
+            steps=pending,
+            progress=updated,
+            turn=turn,
+            reply=reply,
+        )
+        history_text = _format_history(history)
 
-    return updated, closures
+        for step in pending:
+            verdict = await client.judge(
+                history_slice=history_text,
+                client_reply=reply,
+                step=step,
+                step_text=render_step_text(step, profile),
+            )
+            if verdict is None:
+                # Модель не ответила — шаги не трогаем, ход продолжается.
+                break
+            if verdict.client_asks_inform:
+                asks_inform = True
+            if not verdict.reply_usable:
+                break
+            if verdict.step_closed:
+                updated.status[step.id] = "closed"
+                closures.append((step.id, "диалог"))
+                continue
+            break
+
+    # 2. Счётчик — после модели, только ещё открытые.
+    for step in iter_available(script, status=updated.status, profile=profile):
+        if exhausted(step, updated.attempts, limit=limit):
+            updated.status[step.id] = "closed"
+            closures.append((step.id, "счётчик"))
+
+    return updated, closures, asks_inform
 
 
 async def run_checker(
@@ -365,13 +410,14 @@ async def run_checker(
         "profile": profile,
         "turn": turn,
     }
-    return await check_pass(
+    updated, closures, _asks = await check_pass(
         state,
         reply=reply,
         judge=client,
         progress=progress,
         attempt_limit=attempt_limit,
     )
+    return updated, closures
 
 
 def close_delivered_inform(
@@ -401,6 +447,10 @@ def close_delivered_inform(
     step = script.steps.get(pending_step)
     if step is None:
         return updated
-    if step.kind == "inform" and int(updated.attempts.get(step.id, 0)) > 0:
+    if (
+        isinstance(step, Step)
+        and step.kind == "inform"
+        and int(updated.attempts.get(step.id, 0)) > 0
+    ):
         updated.status[step.id] = "closed"
     return updated

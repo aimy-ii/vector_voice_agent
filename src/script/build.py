@@ -9,18 +9,35 @@
 он не кладётся**: в состоянии лежат только идентификатор и версия, а тексты
 достаются отсюда по идентификатору. Состояние получается маленьким и дешёвым,
 скрипт — тяжёлым и общим.
+
+Новый формат (скрипт продаж) определяется по полю ``requirements`` у шагов:
+у шага шесть полей, зависимостей и технических счётчиков в файле нет.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Mapping
 
-from script.models import Help, Objection, ProfileField, RawScript, ScriptParams, Step
+from core.config import settings
+from script.models import (
+    Help,
+    Objection,
+    ProfileField,
+    RawSalesScript,
+    RawScript,
+    SalesStep,
+    ScriptParams,
+    Step,
+)
 
 
 class ScriptError(ValueError):
     """Скрипт не проходит проверку и не может быть собран."""
+
+
+#: Тип шага в скомпилированном скрипте: старый или продажи.
+AnyStep = Step | SalesStep
 
 
 @dataclass(frozen=True)
@@ -30,30 +47,33 @@ class CompiledScript:
     Неизменяемый: словари и списки внутри собраны один раз при сборке и
     больше не трогаются. Один и тот же объект обслуживает все звонки,
     идущие на этой версии.
+
+    ``is_sales`` — True для нового формата (шаги с ``requirements``).
     """
 
     id: str
     version: str
-    persona: Any
     opening_line: str
-    rules: tuple[str, ...]
     params: ScriptParams
-    steps: Mapping[str, Step]
-    #: Порядок объявления — тай-брейк при равном приоритете.
+    steps: Mapping[str, AnyStep]
+    #: Порядок объявления — тай-брейк при равном приоритете; для продаж —
+    #: порядок по возрастанию ``order``.
     step_order: tuple[str, ...]
     profile_fields: Mapping[str, ProfileField]
     helps: Mapping[str, Help]
     objections: Mapping[str, Objection]
     #: Поле профиля → шаг, который его заполняет. Нужно планировщику, чтобы
-    #: понять, кто закроет недостающее требование.
+    #: понять, кто закроет недостающее требование. В формате продаж пусто.
     filled_by: Mapping[str, str] = field(default_factory=dict)
+    #: Новый формат: список шагов продаж, без kind/fills/needs.
+    is_sales: bool = False
 
     @property
     def key(self) -> tuple[str, str]:
         """Ключ кэша: идентификатор и версия."""
         return (self.id, self.version)
 
-    def step(self, step_id: str) -> Step:
+    def step(self, step_id: str) -> AnyStep:
         """Возвращает шаг по идентификатору.
 
         Args:
@@ -77,6 +97,23 @@ class CompiledScript:
             Найденная запись или None.
         """
         return self.helps.get(aside_id) or self.objections.get(aside_id)
+
+
+def params_from_settings() -> ScriptParams:
+    """Собирает параметры скрипта из настроек агента.
+
+    Для нового формата в файле скрипта params нет: заглушки и фраза при
+    сбое живут рядом с персоной. Формулировки цены для продаж приходят
+    из базы вместе со стоимостью — сюда кладутся запасные шаблоны.
+    """
+    return ScriptParams(
+        price=settings.agent_price_texts,
+        fillers=list(settings.agent_fillers),
+        city_fillers=list(settings.agent_city_fillers),
+        branch_fillers=list(settings.agent_branch_fillers),
+        unknown=settings.agent_unknown,
+        fallback=settings.agent_fallback,
+    )
 
 
 def _check_unique_ids(raw: RawScript) -> None:
@@ -126,7 +163,7 @@ def _check_references(raw: RawScript) -> None:
 def _check_texts(raw: RawScript) -> None:
     """Проверяет, что у дословных блоков и информирования есть что произнести."""
     for step in raw.steps:
-        has_text = bool(step.text) or step.branches is not None
+        has_text = bool(step.text) or step.branches is not None or bool(step.examples)
         if step.verbatim and not has_text:
             raise ScriptError(f"Дословный шаг {step.id!r} без текста")
         if step.kind in ("inform", "inform_check") and not has_text:
@@ -171,22 +208,8 @@ def _check_reachable(raw: RawScript) -> None:
         raise ScriptError(f"Шаги замкнуты в цикл ожидания: {sorted(pending)}")
 
 
-def build_script(raw: RawScript) -> CompiledScript:
-    """Собирает скомпилированный скрипт из сырых данных.
-
-    Чистая функция: одинаковый вход даёт одинаковый выход, сети и диска здесь
-    нет. Всё, что может быть не так со скриптом, выясняется тут — на загрузке,
-    а не в середине звонка.
-
-    Args:
-        raw: разобранные данные скрипта.
-
-    Returns:
-        Неизменяемый скомпилированный скрипт.
-
-    Raises:
-        ScriptError: скрипт не проходит одну из проверок.
-    """
+def _build_legacy(raw: RawScript) -> CompiledScript:
+    """Собирает скрипт старого формата (v1–v3)."""
     if not raw.steps:
         raise ScriptError("В скрипте нет ни одного шага")
     if not raw.version:
@@ -200,9 +223,7 @@ def build_script(raw: RawScript) -> CompiledScript:
     return CompiledScript(
         id=raw.id,
         version=raw.version,
-        persona=raw.persona,
         opening_line=raw.opening_line,
-        rules=tuple(raw.rules),
         params=raw.params,
         steps={s.id: s for s in raw.steps},
         step_order=tuple(s.id for s in raw.steps),
@@ -210,4 +231,77 @@ def build_script(raw: RawScript) -> CompiledScript:
         helps={h.id: h for h in raw.helps},
         objections={o.id: o for o in raw.objections},
         filled_by={f: s.id for s in raw.steps for f in s.fills},
+        is_sales=False,
     )
+
+
+def _check_sales_steps(raw: RawSalesScript) -> None:
+    """Проверяет шаги скрипта продаж: уникальность и непустоту полей."""
+    seen_ids: set[str] = set()
+    seen_orders: set[int] = set()
+    for step in raw.steps:
+        if step.id in seen_ids:
+            raise ScriptError(f"Повтор идентификатора шага: {step.id!r}")
+        seen_ids.add(step.id)
+        if step.order in seen_orders:
+            raise ScriptError(f"Повтор порядка шага (order): {step.order}")
+        seen_orders.add(step.order)
+        if not step.name.strip():
+            raise ScriptError(f"У шага {step.id!r} пустое название (name)")
+        if not step.requirements.strip():
+            raise ScriptError(f"У шага {step.id!r} пустые требования (requirements)")
+        if not step.examples:
+            raise ScriptError(f"У шага {step.id!r} пустой список образцов (examples)")
+        for example in step.examples:
+            if not str(example).strip():
+                raise ScriptError(f"У шага {step.id!r} пустой образец в examples")
+
+
+def _build_sales(raw: RawSalesScript) -> CompiledScript:
+    """Собирает скрипт продаж: шаги по ``order``, params из настроек."""
+    if not raw.steps:
+        raise ScriptError("В скрипте нет ни одного шага")
+    if not raw.version:
+        raise ScriptError("У скрипта не указана версия")
+
+    _check_sales_steps(raw)
+
+    ranked = sorted(raw.steps, key=lambda s: s.order)
+    steps: dict[str, SalesStep] = {
+        step.id: step.model_copy(update={"knowledge": list(step.knowledge)}) for step in ranked
+    }
+
+    return CompiledScript(
+        id=raw.id,
+        version=raw.version,
+        opening_line="",
+        params=params_from_settings(),
+        steps=steps,
+        step_order=tuple(s.id for s in ranked),
+        profile_fields={},
+        helps={},
+        objections={},
+        filled_by={},
+        is_sales=True,
+    )
+
+
+def build_script(raw: RawScript | RawSalesScript) -> CompiledScript:
+    """Собирает скомпилированный скрипт из сырых данных.
+
+    Чистая функция: одинаковый вход даёт одинаковый выход, сети и диска здесь
+    нет. Всё, что может быть не так со скриптом, выясняется тут — на загрузке,
+    а не в середине звонка.
+
+    Args:
+        raw: разобранные данные скрипта (старый или продажи).
+
+    Returns:
+        Неизменяемый скомпилированный скрипт.
+
+    Raises:
+        ScriptError: скрипт не проходит одну из проверок.
+    """
+    if isinstance(raw, RawSalesScript):
+        return _build_sales(raw)
+    return _build_legacy(raw)

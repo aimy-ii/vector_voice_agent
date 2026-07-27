@@ -11,11 +11,10 @@
 
 from __future__ import annotations
 
-import re
 from typing import Literal, Mapping
 
-from script.build import CompiledScript
-from script.models import Step
+from script.build import AnyStep, CompiledScript
+from script.models import SalesStep, Step
 
 #: Статус шага в состоянии звонка.
 #:
@@ -31,44 +30,6 @@ _LEGACY_CLOSED: frozenset[str] = frozenset({"done", "refused", "skipped", "close
 
 #: Виды шагов, которые рассказывают, а не спрашивают.
 _INFORM_KINDS: frozenset[str] = frozenset({"inform", "inform_check"})
-
-#: Признаки: клиент сам спросил про обучение / условия / состав пакета.
-_INFORM_ASK_MARKERS: frozenset[str] = frozenset(
-    {
-        "обучение",
-        "обучения",
-        "обучении",
-        "условия",
-        "что входит",
-        "стоимость",
-        "сколько стоит",
-        "срок",
-        "как проходит",
-        "теория",
-        "теорию",
-        "практика",
-        "практику",
-        "практики",
-        "пакет",
-        "под ключ",
-        "что включено",
-        "что включены",
-    }
-)
-
-
-def _normalize_reply(text: str) -> str:
-    """Нормализует реплику для сравнения с признаками.
-
-    Args:
-        text: исходный текст.
-
-    Returns:
-        Нижний регистр, «ё»→«е», без знаков, пробелы схлопнуты.
-    """
-    lowered = text.strip().lower().replace("ё", "е")
-    without_marks = re.sub(r"[^\w\s]+", " ", lowered, flags=re.UNICODE)
-    return re.sub(r"\s+", " ", without_marks).strip()
 
 
 def is_closed(status: str | None) -> bool:
@@ -98,12 +59,16 @@ def profile_has(profile: Mapping[str, str], key: str) -> bool:
 
 
 def is_available(
-    step: Step,
+    step: AnyStep,
     *,
     status: Mapping[str, str],
     profile: Mapping[str, str],
 ) -> bool:
     """Доступен ли шаг прямо сейчас.
+
+    В формате продаж зависимостей нет: шаг доступен, пока не закрыт.
+    Возражения — обычные шаги; условие включения читает модель из
+    ``requirements``, а не код.
 
     Args:
         step: описание шага.
@@ -115,6 +80,8 @@ def is_available(
     """
     if is_closed(status.get(step.id)):
         return False
+    if isinstance(step, SalesStep):
+        return True
     if not all(is_closed(status.get(dep)) for dep in step.after):
         return False
     return all(profile_has(profile, key) for key in step.requires)
@@ -125,8 +92,8 @@ def iter_available(
     *,
     status: Mapping[str, str],
     profile: Mapping[str, str],
-) -> list[Step]:
-    """Доступные шаги в порядке приоритета и объявления.
+) -> list[AnyStep]:
+    """Доступные шаги в порядке приоритета (старый) или ``order`` (продажи).
 
     Args:
         script: скомпилированный скрипт.
@@ -136,35 +103,24 @@ def iter_available(
     Returns:
         Список доступных шагов с верхушки.
     """
+    if script.is_sales:
+        result: list[AnyStep] = []
+        for step_id in script.step_order:
+            step = script.step(step_id)
+            if is_available(step, status=status, profile=profile):
+                result.append(step)
+        return result
+
     ranked: list[tuple[int, int, Step]] = []
     for order, step_id in enumerate(script.step_order):
         step = script.step(step_id)
+        if not isinstance(step, Step):
+            continue
         if not is_available(step, status=status, profile=profile):
             continue
         ranked.append((step.priority, order, step))
     ranked.sort(key=lambda item: item[:2])
     return [item[2] for item in ranked]
-
-
-def client_asks_inform(text: str) -> bool:
-    """Клиент сам спросил про обучение, условия или состав пакета.
-
-    Детерминированный признак из набора — не разбор смысла моделью.
-    Сравнение на границах слов, как у просьбы повторить.
-
-    Args:
-        text: реплика клиента.
-
-    Returns:
-        True, если сработал признак повода для информирующего блока.
-    """
-    haystack = _normalize_reply(text)
-    if not haystack:
-        return False
-    return any(
-        re.search(rf"(?:^|\s){re.escape(marker)}(?:\s|$)", haystack)
-        for marker in _INFORM_ASK_MARKERS
-    )
 
 
 def answered_inform_check(
@@ -183,10 +139,10 @@ def answered_inform_check(
     Returns:
         True, если прошлый ``inform_check`` только что закрыт.
     """
-    if not pending_step:
+    if script.is_sales or not pending_step:
         return False
     step = script.steps.get(pending_step)
-    if step is None or step.kind != "inform_check":
+    if step is None or not isinstance(step, Step) or step.kind != "inform_check":
         return False
     return is_closed(status.get(pending_step))
 
@@ -202,6 +158,8 @@ def _fresh_questions_left(
     for step in iter_available(script, status=status, profile=profile):
         if int(attempts.get(step.id, 0)) > 0:
             continue
+        if isinstance(step, SalesStep):
+            return True
         if step.kind not in _INFORM_KINDS:
             return True
     return False
@@ -215,12 +173,15 @@ def script_head(
     profile: Mapping[str, str],
     inform_reason: bool = False,
     pending_soft_cap: int,
-) -> list[Step]:
+) -> list[AnyStep]:
     """Шапка для генератора: все уже заданные и один новый с верхушки.
 
-    Информирующий шаг попадает в шапку как новый только по поводу: клиент
-    спросил сам, ответил на проверочный вопрос предыдущего блока, либо
-    вопросов среди доступных больше нет. Иначе ждёт, берём вопрос.
+    Старый формат: информирующий шаг попадает в шапку как новый только по
+    поводу (вопрос клиента, ответ на проверку, либо вопросов больше нет).
+
+    Новый формат: незакрытые по ``order``; висящие — со счётчиком > 0;
+    плюс один новый с верхушки; мягкий потолок висящих как раньше.
+    Зависимостей между шагами нет.
 
     Если висящих уже ``pending_soft_cap`` или больше, новый шаг с верхушки
     в этот ход не берём — генератор дорабатывает висящее.
@@ -236,8 +197,8 @@ def script_head(
     Returns:
         Список шагов: сначала со счётчиком больше нуля, затем один с нулём.
     """
-    asked: list[Step] = []
-    fresh: Step | None = None
+    asked: list[AnyStep] = []
+    fresh: AnyStep | None = None
     questions_left = _fresh_questions_left(
         script, status=status, attempts=attempts, profile=profile
     )
@@ -253,7 +214,12 @@ def script_head(
         # Висящих уже потолок — новый шаг не добираем, дорабатываем висящее.
         if len(asked) >= pending_soft_cap:
             continue
-        if step.kind in _INFORM_KINDS and not allow_inform:
+        if (
+            not script.is_sales
+            and isinstance(step, Step)
+            and step.kind in _INFORM_KINDS
+            and not allow_inform
+        ):
             continue
         fresh = step
 
@@ -271,7 +237,7 @@ def pick_step(
     attempts: Mapping[str, int] | None = None,
     inform_reason: bool = False,
     pending_soft_cap: int,
-) -> Step | None:
+) -> AnyStep | None:
     """Выбирает ведущий шаг хода (первый из шапки или resume).
 
     Args:
@@ -306,13 +272,13 @@ def pick_step(
 def peek_next_step(
     script: CompiledScript,
     *,
-    current: Step,
+    current: AnyStep,
     status: Mapping[str, str],
     profile: Mapping[str, str],
     attempts: Mapping[str, int] | None = None,
     inform_reason: bool = False,
     pending_soft_cap: int,
-) -> Step | None:
+) -> AnyStep | None:
     """Какой шаг откроется, если текущий закроется прямо сейчас.
 
     Args:
@@ -331,9 +297,10 @@ def peek_next_step(
     preview_status[current.id] = "closed"
 
     preview_profile = dict(profile)
-    for key in current.fills:
-        if not profile_has(preview_profile, key):
-            preview_profile[key] = "_"
+    if isinstance(current, Step):
+        for key in current.fills:
+            if not profile_has(preview_profile, key):
+                preview_profile[key] = "_"
 
     return pick_step(
         script,
@@ -347,7 +314,7 @@ def peek_next_step(
 
 def blocked_by(
     script: CompiledScript,
-    step: Step,
+    step: AnyStep,
     *,
     status: Mapping[str, str],
     profile: Mapping[str, str],
@@ -363,6 +330,8 @@ def blocked_by(
     Returns:
         Список причин человеческим текстом.
     """
+    if isinstance(step, SalesStep):
+        return []
     reasons: list[str] = []
     for dep in step.after:
         if not is_closed(status.get(dep)):
@@ -374,7 +343,7 @@ def blocked_by(
     return reasons
 
 
-def render_step_text(step: Step, profile: Mapping[str, str]) -> str | None:
+def render_step_text(step: AnyStep, profile: Mapping[str, str]) -> str | None:
     """Собирает текст шага с учётом ветвления по значению профиля.
 
     Args:
@@ -384,6 +353,8 @@ def render_step_text(step: Step, profile: Mapping[str, str]) -> str | None:
     Returns:
         Текст шага или None, если текста у шага нет.
     """
+    if isinstance(step, SalesStep):
+        return None
     if step.branches is not None:
         value = str(profile.get(step.branches.field, "")).strip().lower()
         for case, text in step.branches.cases.items():
@@ -406,11 +377,11 @@ def next_attempt(attempts: Mapping[str, int], step_id: str) -> int:
     return int(attempts.get(step_id, 0)) + 1
 
 
-def exhausted(step: Step, attempts: Mapping[str, int], *, limit: int) -> bool:
+def exhausted(step: AnyStep, attempts: Mapping[str, int], *, limit: int) -> bool:
     """Исчерпан ли порог попыток задать шаг.
 
-    Счётчик — сколько раз шаг был ведущим в генерации, а не сколько ходов
-    провисел в шапке. Порог задаётся окружением; закрытие делает чекер.
+    Счётчик — сколько раз шаг был в шапке генерации. Порог задаётся
+    окружением; закрытие делает чекер.
 
     Args:
         step: описание шага.

@@ -100,3 +100,47 @@ def price_facts(price: Mapping[str, Any] | None, texts: PriceTexts) -> dict[str,
         "line": price_line(price, texts),
         "may_name_amount": branch != "no_amount",
     }
+
+
+def price_line_from_kb(price: Mapping[str, Any] | None) -> str:
+    """Готовая фраза о цене из ответа справочника (формат продаж).
+
+    Если в ответе уже есть ``phrase`` / ``line`` — берём её. Иначе собираем
+    короткую фразу из суммы и признака ``reliable``.
+
+    Args:
+        price: раздел ``price`` из меты города.
+
+    Returns:
+        Фраза для произнесения.
+    """
+    if not price:
+        return "Точную сумму зафиксируем при оформлении."
+    for key in ("phrase", "line", "text"):
+        ready = str(price.get(key) or "").strip()
+        if ready:
+            return ready
+    branch = pick_branch(price)
+    if branch == "no_amount":
+        return "Точную сумму зафиксируем при оформлении."
+    amount = format_amount(int(price["amount"]))
+    if branch == "reliable":
+        return f"Стоимость обучения — {amount} рублей."
+    return f"Стоимость обучения — от {amount} рублей."
+
+
+def price_facts_from_kb(price: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Блок о цене для промпта, когда формулировка приходит из базы.
+
+    Args:
+        price: раздел ``price`` из меты города.
+
+    Returns:
+        Словарь с веткой, фразой и признаком «число называть можно».
+    """
+    branch = pick_branch(price)
+    return {
+        "branch": branch,
+        "line": price_line_from_kb(price),
+        "may_name_amount": branch != "no_amount",
+    }
