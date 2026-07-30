@@ -9,9 +9,10 @@ import pytest
 from langchain_core.messages import HumanMessage
 
 from graph import nodes as nodes_module
-from graph.context import DYN_MISSING, DYN_NONE, DYN_READY, DYN_SEARCHING
+from graph.context import DYN_MISSING, DYN_NONE, DYN_READY, DYN_SEARCHING, ConversationContext
+from graph.context_agent import ContextDecision
+from graph.context_store import MemoryContextStore
 from graph.prompts import build_turn_messages, dynamic_status_block
-from graph.situations import load_situations
 from graph.state import new_state_defaults
 from script.store import MemoryScriptStore
 
@@ -33,6 +34,13 @@ def use_v2(monkeypatch) -> None:
 def store(monkeypatch) -> MemoryScriptStore:
     mem = MemoryScriptStore()
     monkeypatch.setattr(nodes_module, "script_store", mem)
+    return mem
+
+
+@pytest.fixture()
+def ctx_store(monkeypatch) -> MemoryContextStore:
+    mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", mem)
     return mem
 
 
@@ -108,41 +116,44 @@ def test_промпт_готово_и_не_требуется_как_обычн�
         assert "пауза-заглушка уже звучала" not in messages[0].content.lower()
 
 
-async def test_генератор_в_поиске_отдаёт_фразу_и_ставит_флаг(
-    spoken, store, model, use_v2, monkeypatch
+async def test_генератор_в_поиске_отдаёт_заглушку_с_предметом(
+    spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
     model["result"] = {"understood": [], "reply": "Продолжаем."}
-    catalog = load_situations()
 
     async def _keep_searching(context, **kwargs: Any):
         return context
 
     monkeypatch.setattr(nodes_module, "run_contexter", _keep_searching)
+    reply = "а медкомиссия?"
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        dynamic_status=DYN_SEARCHING,
+        situation_slug="медкомиссия",
+        filler_spoken=False,
+        dynamic_reply="",
+    )
+    await ctx_store.save("local", ctx)
     state: dict[str, Any] = {
         **new_state_defaults(),
-        "messages": [HumanMessage(content="а медкомиссия?")],
+        "messages": [HumanMessage(content=reply)],
         "script_id": "vector_ru",
         "script_version": "2",
         "current_step": "name",
         "head_steps": ["name"],
-        "conversation_context": {
-            "static_text": "Город: Пермь",
-            "dynamic_status": DYN_SEARCHING,
-            "situation_slug": "default",
-            "filler_spoken": False,
-        },
+        "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     filler = out.get("spoken_filler") or ""
     assert filler
-    assert filler in catalog["default"]
+    assert "медкомиссия" in filler
     assert out["conversation_context"]["filler_spoken"] is True
     assert any(filler in chunk for chunk in spoken)
     assert model["calls"] == 1
 
 
 async def test_генератор_повторный_в_поиске_фразу_не_повторяет(
-    spoken, store, model, use_v2, monkeypatch
+    spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
     model["result"] = {"understood": [], "reply": "Давайте дальше."}
     calls: list[str] = []
@@ -156,20 +167,24 @@ async def test_генератор_повторный_в_поиске_фразу_
 
     monkeypatch.setattr(nodes_module, "pick_filler", _no_pick)
     monkeypatch.setattr(nodes_module, "run_contexter", _keep_searching)
+    reply = "ну что там?"
+    ctx = ConversationContext(
+        static_text="Город: Пермь\nСекрет",
+        dynamic_status=DYN_SEARCHING,
+        situation_slug="филиалы",
+        filler_spoken=True,
+        dynamic_reply="",
+    )
+    await ctx_store.save("local", ctx)
     state: dict[str, Any] = {
         **new_state_defaults(),
-        "messages": [HumanMessage(content="ну что там?")],
+        "messages": [HumanMessage(content=reply)],
         "script_id": "vector_ru",
         "script_version": "2",
         "current_step": "name",
         "head_steps": ["name"],
-        "fillers_used": ["так… секунду"],
-        "conversation_context": {
-            "static_text": "Город: Пермь\nСекрет",
-            "dynamic_status": DYN_SEARCHING,
-            "situation_slug": "default",
-            "filler_spoken": True,
-        },
+        "fillers_used": ["так, по филиалы… секундочку"],
+        "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert calls == []
@@ -180,12 +195,28 @@ async def test_генератор_повторный_в_поиске_фразу_
     assert "пауза-заглушка уже звучала" in prompt.lower()
 
 
-async def test_контекстер_до_respond_кладёт_справку_в_динамику(
-    spoken, store, model, use_v2, script
+async def test_контекстер_до_respond_кладёт_динамику(
+    spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
-    """Контекстер вызывается до генерации; справка уже в промпте."""
+    """Контекстер вызывается до генерации; ответ инструмента уже в промпте."""
     model["result"] = {"understood": [], "aside_id": None, "reply": "Медкомиссия отдельно."}
-    med = script.helps["medcheck"].text
+    fact = "Медкомиссия понадобится к началу практики."
+
+    class _Tool:
+        name = "city_faq"
+        description = "faq"
+
+        async def run(self, query: str, context: ConversationContext) -> str:
+            return fact
+
+    async def _decide(*a, **k):
+        return ContextDecision(
+            need=True, tool="city_faq", query="медкомиссия", subject="медкомиссия"
+        )
+
+    monkeypatch.setattr(nodes_module, "build_context_tools", lambda script: [_Tool()])
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+
     state: dict[str, Any] = {
         **new_state_defaults(),
         "messages": [HumanMessage(content="а когда медкомиссию проходить?")],
@@ -198,21 +229,35 @@ async def test_контекстер_до_respond_кладёт_справку_в_
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     ctx = out["conversation_context"]
     assert ctx["dynamic_status"] == DYN_READY
-    assert med in ctx["dynamic_text"]
+    assert fact in ctx["dynamic_text"]
     prompt = model["messages"][0].content
-    assert med in prompt
+    assert fact in prompt
     assert model["calls"] == 1
 
 
-async def test_контекстер_на_lookup_кладёт_справку_в_динамику(
-    spoken, store, use_v2, script, monkeypatch
-):
+async def test_контекстер_на_lookup_кладёт_динамику(spoken, store, ctx_store, use_v2, monkeypatch):
     """На маршруте lookup контекстер тоже наполняет динамику до respond."""
     from tests.conftest import FakeKB
 
-    med = script.helps["medcheck"].text
+    fact = "Медкомиссия понадобится к началу практики."
     fake = FakeKB(cities=[], city=None, branches=[], branch=None)
     monkeypatch.setattr(nodes_module, "vector_kb", fake)
+
+    class _Tool:
+        name = "city_faq"
+        description = "faq"
+
+        async def run(self, query: str, context: ConversationContext) -> str:
+            return fact
+
+    async def _decide(*a, **k):
+        return ContextDecision(
+            need=True, tool="city_faq", query="медкомиссия", subject="медкомиссия"
+        )
+
+    monkeypatch.setattr(nodes_module, "build_context_tools", lambda script: [_Tool()])
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+
     closed = {
         "name": "closed",
         "city": "closed",
@@ -255,4 +300,4 @@ async def test_контекстер_на_lookup_кладёт_справку_в_�
     out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
     ctx = out["conversation_context"]
     assert ctx["dynamic_status"] == DYN_READY
-    assert med in ctx["dynamic_text"]
+    assert fact in ctx["dynamic_text"]

@@ -14,8 +14,25 @@ from graph.checker_graph import (
     is_new_utterance,
     live_check_node,
 )
+from graph.context_agent import ContextDecision
+from graph.context_store import MemoryContextStore
 from script.planner import script_head
 from script.store import ScriptProgress, progress_to_state
+
+
+@pytest.fixture(autouse=True)
+def _offline_context(monkeypatch):
+    """Офлайн: кеш контекста в памяти, агент контекста не зовёт модель."""
+    from graph import nodes as nodes_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", mem)
+
+    async def _no_need(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _no_need)
+    return mem
 
 
 class FakeChecker:
@@ -566,11 +583,12 @@ async def test_check_pass_логирует_висящие_перед_модел�
     assert "name — исчерпан" in pending_logs[0]
 
 
-async def test_live_check_контекстер_кладёт_справку_в_контекст(script):
-    """После чекера контекстер печёт справку в conversation_context."""
-    from graph.context import DYN_READY
+async def test_live_check_контекстер_пишет_динамику_в_кеш(script, monkeypatch, _offline_context):
+    """Лайв-канал читает контекст из кеша с городом и пишет только динамику."""
+    from graph.context import DYN_READY, ConversationContext
 
-    text = "а когда медкомиссию проходить?"
+    text = "какие филиалы у Ленина?"
+    fact = "Филиалы под запрос: ул. Ленина, 1."
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = _name_progress()
     state = _state(
@@ -579,7 +597,26 @@ async def test_live_check_контекстер_кладёт_справку_в_к
         progress=progress,
         last_checked="",
     )
-    state["conversation_context"] = {"static_text": "Город: Пермь"}
+
+    ctx_store = _offline_context
+    seeded = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        city_name="Пермь",
+        frozen=False,
+    )
+    await ctx_store.save("local", seeded)
+
+    class _Tool:
+        name = "branches"
+        description = "филиалы"
+
+        async def run(self, query: str, context: ConversationContext) -> str:
+            assert context.city_slug == "perm"
+            return fact
+
+    async def _decide(*a, **k):
+        return ContextDecision(need=True, tool="branches", query="Ленина", subject="филиалы")
 
     async def fake_load(_state):
         return progress
@@ -587,10 +624,13 @@ async def test_live_check_контекстер_кладёт_справку_в_к
     async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
 
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+
     with (
         patch("graph.checker_graph._checker_client", client),
         patch("graph.checker_graph._load_progress", side_effect=fake_load),
         patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.build_context_tools", lambda script: [_Tool()]),
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
@@ -600,5 +640,14 @@ async def test_live_check_контекстер_кладёт_справку_в_к
 
     ctx = patch_out.get("conversation_context") or {}
     assert ctx.get("dynamic_status") == DYN_READY
-    assert script.helps["medcheck"].text in ctx.get("dynamic_text", "")
+    assert fact in ctx.get("dynamic_text", "")
+    assert ctx.get("city_slug") == "perm"
+    assert ctx.get("static_text") == "Город: Пермь"
     assert patch_out.get("last_checked_partial") == text
+
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert fact in loaded.dynamic_text
+    assert loaded.city_slug == "perm"
+    assert loaded.static_text == "Город: Пермь"

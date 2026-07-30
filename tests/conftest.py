@@ -15,6 +15,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from graph.context_store import MemoryContextStore  # noqa: E402
 from script.build import CompiledScript, build_script  # noqa: E402
 from script.models import RawSalesScript, RawScript  # noqa: E402
 from script.source import JsonScriptSource, ScriptRegistry  # noqa: E402
@@ -85,8 +86,14 @@ def registry(data_dir: Path) -> ScriptRegistry:
 
 @pytest.fixture()
 def memory_store() -> MemoryScriptStore:
-    """Заглушка Redis в памяти."""
+    """Заглушка Redis прогресса скрипта в памяти."""
     return MemoryScriptStore()
+
+
+@pytest.fixture()
+def memory_context_store() -> MemoryContextStore:
+    """Заглушка Redis контекста разговора в памяти."""
+    return MemoryContextStore()
 
 
 class FakeKB:

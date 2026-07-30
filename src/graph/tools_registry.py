@@ -1,21 +1,18 @@
 """Реестр инструментов контекстера.
 
 Новый источник (вектор, карты, полнотекст) = класс по ``ContextTool``
-и одна строка в ``build_context_tools``. Контекстер реестр только
-перебирает — сам про источники не знает.
+и одна строка в ``build_context_tools``. Агент выбирает инструмент по
+описанию; код инструмента сам ходит в справочник.
 """
 
 from __future__ import annotations
 
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol, Sequence
 
-from graph.context import ConversationContext
-from graph.history import find_aside, matches_triggers
+from graph.context import ConversationContext, format_branch_static
+from graph.resolvers import resolve_branch
+from kb.client import vector_kb
 from script.build import CompiledScript
-from script.models import Help
-
-#: Признак: инструмент подошёл, но без города клиента ответить нельзя.
-NEED_CITY_SIGNAL = "\0need_city"
 
 #: Человекочитаемые факты из ``knowledge`` → потребности справочника.
 #: Чего в справочнике нет — просто не найдётся, шаг отработает без чисел.
@@ -56,171 +53,132 @@ def needs_from_knowledge(knowledge: Sequence[str]) -> list[str]:
 
 
 class ContextTool(Protocol):
-    """Инструмент контекстера.
-
-    Единый интерфейс для всех источников — справки, FAQ города, в будущем
-    вектор, полнотекст, карты.
-    """
+    """Инструмент контекстера: агент выбирает его по описанию."""
 
     name: str
+    description: str
 
-    async def try_answer(self, reply: str, context: ConversationContext) -> str | None:
-        """Ответ инструмента на реплику, либо None, если не по адресу.
-
-        None — инструмент не подходит под этот вопрос, пробуем следующий.
-        Пустая строка — подошёл, но ответа нет (статус «не нашлось»).
-        ``NEED_CITY_SIGNAL`` — подошёл, но нужен город клиента.
-        """
+    async def run(self, query: str, context: ConversationContext) -> str:
+        """Ответ инструмента текстом для динамики; пустая строка — не нашлось."""
         ...
 
 
-class HelpsTool:
-    """Справки из скрипта — приоритетнее FAQ города."""
+class BranchesTool:
+    """Подбор филиалов по району, улице, ориентиру или перечень «какие есть»."""
 
-    name = "helps"
+    name = "branches"
+    description = (
+        "Подобрать филиалы по району, улице, ориентиру или перечислить, "
+        "когда клиент спрашивает «а какие есть»."
+    )
 
-    def __init__(self, helps: Mapping[str, Help] | CompiledScript) -> None:
-        """Принимает скрипт или готовый словарь справок.
+    async def run(self, query: str, context: ConversationContext) -> str:
+        """Отбирает до трёх филиалов города по запросу.
 
         Args:
-            helps: скомпилированный скрипт либо ``id → Help``.
-        """
-        if isinstance(helps, CompiledScript):
-            self._helps: Mapping[str, Help] = helps.helps
-        else:
-            self._helps = helps
-
-    async def try_answer(self, reply: str, context: ConversationContext) -> str | None:
-        """Ищет справку по триггерам; ``None`` — реплика не про справки."""
-        if not self._helps:
-            return None
-        catalogue: dict[str, Sequence[str]] = {
-            item_id: item.triggers for item_id, item in self._helps.items()
-        }
-        help_id = find_aside(reply, catalogue)
-        if help_id is None:
-            return None
-        item = self._helps.get(help_id)
-        return (item.text if item else "").strip()
-
-
-class FaqTool:
-    """FAQ из меты города — резерв после справок скрипта."""
-
-    name = "faq"
-
-    async def try_answer(self, reply: str, context: ConversationContext) -> str | None:
-        """Ищет ответ в FAQ города.
-
-        Без города — ``NEED_CITY_SIGNAL``, если реплика похожа на вопрос
-        из типичного FAQ (есть «?» или вопросительные маркеры). Пустой
-        FAQ при известном городе — ``None``. Совпадение без текста ответа —
-        пустая строка.
-        """
-        text = (reply or "").strip()
-        if not text:
-            return None
-
-        if not context.city_slug:
-            if self._looks_like_faq_question(text):
-                return NEED_CITY_SIGNAL
-            return None
-
-        faq = list(context.city_faq or [])
-        if not faq:
-            return None
-
-        catalogue: dict[str, Sequence[str]] = {}
-        answers: dict[str, str] = {}
-        for index, item in enumerate(faq):
-            question = str(item.get("question") or "").strip()
-            if not question:
-                continue
-            item_id = f"faq_{index}"
-            # Признаки — слова вопроса длиннее трёх букв.
-            triggers = [w for w in question.lower().split() if len(w) >= 4]
-            if not triggers:
-                triggers = [question.lower()]
-            catalogue[item_id] = triggers
-            answers[item_id] = str(item.get("answer") or "").strip()
-
-        if not catalogue:
-            return None
-
-        # Сначала точное вхождение вопроса / триггеров через find_aside.
-        matched = find_aside(text, catalogue)
-        if matched is None:
-            # Запас: реплика содержит существенную часть вопроса.
-            matched = self._match_by_overlap(text, faq)
-            if matched is None:
-                return None
-            return matched
-
-        return answers.get(matched, "")
-
-    @staticmethod
-    def _looks_like_faq_question(reply: str) -> bool:
-        """Грубая проверка: реплика похожа на справочный вопрос без города."""
-        lowered = reply.lower()
-        if "?" in reply:
-            return True
-        markers = (
-            "сколько",
-            "как ",
-            "где ",
-            "какой",
-            "какая",
-            "какие",
-            "что ",
-            "есть ли",
-            "нужн",
-            "документ",
-            "рассроч",
-            "стоим",
-            "цена",
-            "оплат",
-        )
-        return any(marker in lowered for marker in markers)
-
-    @staticmethod
-    def _match_by_overlap(reply: str, faq: Sequence[Mapping[str, str]]) -> str | None:
-        """Совпадение по пересечению токенов с вопросом FAQ.
+            query: район, улица, ориентир или пусто для перечня.
+            context: текущий контекст; нужен ``city_slug``.
 
         Returns:
-            Текст ответа, пустая строка (вопрос похож, ответа нет) или None.
+            Строка «Филиалы под запрос: …» или пустая, если города/списка нет.
         """
-        reply_tokens = {t for t in reply.lower().replace("?", " ").split() if len(t) >= 4}
-        if not reply_tokens:
-            return None
-        best_id: int | None = None
-        best_score = 0
-        for index, item in enumerate(faq):
-            question = str(item.get("question") or "").lower()
-            q_tokens = {t for t in question.replace("?", " ").split() if len(t) >= 4}
-            score = len(reply_tokens & q_tokens)
-            if score > best_score and score >= 2:
-                best_score = score
-                best_id = index
-        if best_id is None:
-            # Один сильный триггер из вопроса целиком в реплике.
-            for item in faq:
-                question = str(item.get("question") or "").strip()
-                if question and matches_triggers(reply, [question]):
-                    return str(item.get("answer") or "").strip()
-            return None
-        return str(faq[best_id].get("answer") or "").strip()
+        city_slug = (context.city_slug or "").strip()
+        if not city_slug:
+            return ""
+        branches = await vector_kb.list_branches(city_slug)
+        if not branches:
+            return ""
+        resolution = await resolve_branch(query or "", branches)
+        by_slug = {str(b.get("slug")): b for b in branches if b.get("slug")}
+        picked = [by_slug[s] for s in resolution.slugs if s in by_slug]
+        if not picked and resolution.selected and resolution.selected in by_slug:
+            picked = [by_slug[resolution.selected]]
+        if not picked:
+            return ""
+        parts: list[str] = []
+        for branch in picked:
+            address = str(branch.get("address") or "").strip()
+            if not address:
+                continue
+            landmark = str(branch.get("landmark") or "").strip()
+            parts.append(f"{address} ({landmark})" if landmark else address)
+        if not parts:
+            return ""
+        return "Филиалы под запрос: " + "; ".join(parts) + "."
+
+
+class CityFaqTool:
+    """Типовые вопросы по городу с готовыми ответами из меты."""
+
+    name = "city_faq"
+    description = (
+        "Типовые вопросы по городу с готовыми ответами. "
+        "В query передай вопрос дословно из перечня FAQ."
+    )
+
+    async def run(self, query: str, context: ConversationContext) -> str:
+        """Ищет точное совпадение вопроса в ``context.city_faq``.
+
+        Сравнение по strip + lower, без матчинга по смыслу.
+
+        Args:
+            query: вопрос дословно из перечня, который видел агент.
+            context: контекст с ``city_faq``.
+
+        Returns:
+            Текст ответа или пустая строка при отсутствии совпадения.
+        """
+        needle = (query or "").strip().lower()
+        if not needle:
+            return ""
+        for item in context.city_faq or []:
+            question = str(item.get("question") or "").strip().lower()
+            if question == needle:
+                return str(item.get("answer") or "").strip()
+        return ""
+
+
+class BranchDetailsTool:
+    """Адрес, часы и ориентир уже выбранного филиала."""
+
+    name = "branch_details"
+    description = "Адрес, часы и ориентир уже выбранного филиала."
+
+    async def run(self, query: str, context: ConversationContext) -> str:
+        """Тянет мету филиала по ``context.branch_slug``.
+
+        Args:
+            query: не используется; оставлен для единого интерфейса.
+            context: контекст с непустым ``branch_slug``.
+
+        Returns:
+            Текстовый блок филиала или пустая строка без слага / меты.
+        """
+        _ = query
+        branch_slug = (context.branch_slug or "").strip()
+        if not branch_slug:
+            return ""
+        branch = await vector_kb.get_branch(branch_slug)
+        if not branch:
+            return ""
+        return format_branch_static(branch, branch_slug=branch_slug)
 
 
 def build_context_tools(script: CompiledScript) -> list[ContextTool]:
-    """Реестр инструментов контекстера по приоритету.
+    """Собирает реестр инструментов контекстера.
 
-    В формате продаж справок в скрипте нет — поиск через FAQ справочника.
-    Добавить новый инструмент = дописать его в этот список. Контекстер
-    перебирает реестр по порядку, первый подходящий отвечает.
+    Филиалы и FAQ всегда; ``branch_details`` всегда (сам отсеется без слага).
+    Справок скрипта в продажах нет по замыслу — ветки ``is_sales`` нет.
+
+    Args:
+        script: скомпилированный скрипт (сигнатура сохранена для вызывающих).
+
+    Returns:
+        Список инструментов для агента контекста.
     """
-    if script.is_sales:
-        return [FaqTool()]
+    _ = script  # реестр не зависит от скрипта; сигнатура наружу та же
     return [
-        HelpsTool(script),  # справки скрипта — главнее
-        FaqTool(),  # FAQ города — резерв
+        BranchesTool(),
+        CityFaqTool(),
+        BranchDetailsTool(),
     ]

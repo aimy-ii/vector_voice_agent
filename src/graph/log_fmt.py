@@ -141,6 +141,36 @@ def format_check_pending(
     return text
 
 
+def format_contexter_done(
+    *,
+    tool: str | None,
+    subject: str,
+    status: str,
+    elapsed_ms: int,
+    needed: bool = True,
+) -> str:
+    """Итог контекстера: решение агента и статус динамики.
+
+    Args:
+        tool: имя выбранного инструмента или None.
+        subject: предмет для заглушки.
+        status: итоговый ``dynamic_status``.
+        elapsed_ms: длительность работы в миллисекундах.
+        needed: False — агент решил, что контекст не нужен.
+
+    Returns:
+        Строка для ``[contexter|done]``.
+    """
+    if not needed:
+        return "решение: контекст не нужен"
+    tool_text = tool or "—"
+    subject_text = (subject or "").strip()
+    return (
+        f"решение: инструмент {tool_text}, предмет «{subject_text}», "
+        f"{elapsed_ms} мс; статус {status}"
+    )
+
+
 def format_spoken_preview(text: str, *, limit: int = SPOKEN_PREVIEW_LEN) -> str:
     """Обрезает произнесённое для лога commit.
 

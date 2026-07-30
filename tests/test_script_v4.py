@@ -9,7 +9,7 @@ import pytest
 from core.config import settings
 from graph.facts import needs_of
 from graph.prompts import _EXAMPLES_PREFIX, _describe_step, build_turn_messages, unknown_block
-from graph.tools_registry import FaqTool, HelpsTool, build_context_tools, needs_from_knowledge
+from graph.tools_registry import build_context_tools, needs_from_knowledge
 from script.build import ScriptError, build_script, params_from_settings
 from script.models import RawSalesScript, SalesStep
 from script.planner import script_head
@@ -243,13 +243,8 @@ def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, da
     assert "Тестовый unknown из настроек." in block
 
 
-def test_реестр_инструментов_v4_без_helps(script_v4, script):
-    """В формате продаж справки из скрипта не подключаются — только FAQ."""
-    tools_v4 = build_context_tools(script_v4)
-    assert len(tools_v4) == 1
-    assert isinstance(tools_v4[0], FaqTool)
-    assert not any(isinstance(t, HelpsTool) for t in tools_v4)
-
-    tools_legacy = build_context_tools(script)
-    assert isinstance(tools_legacy[0], HelpsTool)
-    assert isinstance(tools_legacy[1], FaqTool)
+def test_реестр_инструментов_всегда_branches_faq_details(script_v4, script):
+    """Реестр одинаков для продаж и legacy: филиалы, FAQ, детали филиала."""
+    for compiled in (script_v4, script):
+        tools = build_context_tools(compiled)
+        assert [t.name for t in tools] == ["branches", "city_faq", "branch_details"]

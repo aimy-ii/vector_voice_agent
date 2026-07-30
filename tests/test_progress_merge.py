@@ -18,8 +18,11 @@ from script.store import (
 
 @pytest.fixture()
 def memory_store(monkeypatch) -> MemoryScriptStore:
+    from graph.context_store import MemoryContextStore
+
     mem = MemoryScriptStore()
     monkeypatch.setattr(nodes_module, "script_store", mem)
+    monkeypatch.setattr(nodes_module, "context_store", MemoryContextStore())
     return mem
 
 

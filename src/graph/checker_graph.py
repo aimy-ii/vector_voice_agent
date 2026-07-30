@@ -26,15 +26,18 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
-from graph.context import context_from_state, merge_static
+from graph.context import merge_static
+from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import run_contexter
 from graph.facts import needs_of
 from graph.log_fmt import format_live_check_state
 from graph.nodes import (
     _call_id,
     _checker_client,
+    _load_context,
     _load_progress,
     _merge_profile,
+    _save_context,
     _save_progress,
 )
 from graph.profile_fill import fill_basic_profile
@@ -271,13 +274,16 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
 
     # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
     script = _script_of(state)
-    ctx = context_from_state(state.get("conversation_context"))
+    ctx = await _load_context(state)
     ctx = await run_contexter(
         ctx,
         reply=reply,
         tools=build_context_tools(script),
         objections=script.objections,
+        allow_searching=False,
     )
+    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+    patch.update(ctx_patch)
 
     # Прогрев под предстоящий шаг — не на пути хода, ошибки только в лог.
     ctx = await _warmup_next_step(
@@ -287,16 +293,20 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         ctx=ctx,
         asks_inform=asks_inform,
     )
-    patch["conversation_context"] = ctx.model_dump()
+    static_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC)
+    patch.update(static_patch)
 
     if closures:
         checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)
     else:
         checker_text = "ничего"
     elapsed_ms = int((time.perf_counter() - started) * 1000)
+    subject = (ctx.situation_slug or "").strip()
+    subject_part = f", предмет «{subject}»" if subject else ""
     stage(
         "live-check",
-        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}; {elapsed_ms} мс",
+        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
+        f"{subject_part}; {elapsed_ms} мс",
         "done",
     )
     return patch

@@ -5,21 +5,28 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import HumanMessage
 
 from graph.checker import CheckerVerdict, check_pass, run_checker
 from graph.checker_graph import live_check_node
-from graph.context import DYN_NEED_CITY
+from graph.context_agent import ContextDecision
+from graph.context_store import MemoryContextStore
 from graph.profile_fill import fill_basic_profile
-from graph.prompts import dynamic_status_block
 from script.store import ScriptProgress, progress_to_state
 
 
-def test_dynamic_status_need_city_просит_город():
-    block = dynamic_status_block(status=DYN_NEED_CITY)
-    assert "город" in block.lower()
-    assert "подскажите" in block.lower() or "попросить" in block.lower()
-    assert "не выдумывать" in block.lower()
+@pytest.fixture(autouse=True)
+def _offline_context(monkeypatch):
+    """Офлайн: кеш контекста и агент без модели."""
+    from graph import nodes as nodes_module
+
+    monkeypatch.setattr(nodes_module, "context_store", MemoryContextStore())
+
+    async def _no_need(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _no_need)
 
 
 def test_fill_basic_profile_город_из_сказанного_без_исхода():

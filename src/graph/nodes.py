@@ -23,8 +23,15 @@ from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
     DYN_SEARCHING,
+    ConversationContext,
     context_from_state,
     merge_static,
+)
+from graph.context_store import (
+    CONTEXT_FIELDS_DYNAMIC,
+    CONTEXT_FIELDS_STATIC,
+    context_store,
+    merge_context_fields,
 )
 from graph.contexter import run_contexter
 from graph.facts import collect_facts, needs_of
@@ -309,6 +316,42 @@ async def _save_progress(
     return progress_to_state(to_save) if persist_state else {}
 
 
+async def _load_context(state: CallState) -> ConversationContext:
+    """Читает контекст из кеша; при промахе — из состояния треда.
+
+    Args:
+        state: состояние звонка.
+
+    Returns:
+        Контекст разговора.
+    """
+    stored = await context_store.load(_call_id())
+    if stored is not None:
+        return stored
+    return context_from_state(state.get("conversation_context"))
+
+
+async def _save_context(
+    context: ConversationContext,
+    *,
+    fields: frozenset[str],
+) -> dict[str, Any]:
+    """Сливает выбранные поля в кеш и возвращает зеркало для состояния.
+
+    Args:
+        context: локальный контекст канала.
+        fields: набор полей для точечной записи (статика или динамика).
+
+    Returns:
+        Правки ``{"conversation_context": ...}`` для ``CallState``.
+    """
+    cached = await context_store.load(_call_id())
+    base = cached if cached is not None else context
+    to_save = merge_context_fields(base, context, fields)
+    await context_store.save(_call_id(), to_save)
+    return {"conversation_context": to_save.model_dump()}
+
+
 def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]:
     """Сливает профиль состояния с профилем из кеша прогресса."""
     merged = dict(state.get("profile") or {})
@@ -510,7 +553,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
         profile = {**profile, **filled}
 
     _head, step = _lead_from_progress(state, progress=progress, profile=profile)
-    ctx = context_from_state(state.get("conversation_context"))
+    ctx = await _load_context(state)
     profile_city = str(profile.get("city") or "").strip()
     city_asked = _field_step_attempts(script, progress, "city") > 0
     branch_asked = _field_step_attempts(script, progress, "branch") > 0
@@ -702,13 +745,17 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     # Общая заглушка без предмета не звучит: предмет обязателен.
 
+    # Статику пишем до контекстера — динамика другим каналом не затрёт.
+    await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC)
     # Контекстер и на маршруте lookup: справка может прийти вместе с городом.
     ctx = await run_contexter(
         ctx,
         reply=user_text,
         tools=build_context_tools(script),
         objections=script.objections,
+        allow_searching=True,
     )
+    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
 
     stage("lookup", format_lookup_done(turn_calls), "done", calls=turn_calls)
     patch.update(
@@ -716,7 +763,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
             "facts": facts,
             "tool_log": journal,
             "profile": profile,
-            "conversation_context": ctx.model_dump(),
+            **ctx_patch,
             "spoken_filler": spoken_filler,
             "fillers_used": fillers_used,
             "spoken": list(state.get("spoken") or []) + ([spoken_filler] if spoken_filler else []),
@@ -735,15 +782,18 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     # Перечень городов генератору не отдаём никогда.
     facts.pop("city_choices", None)
     spoken: list[str] = []
-    ctx = context_from_state(state.get("conversation_context"))
+    ctx = await _load_context(state)
     user_text = last_user_text(state.get("messages") or [])
-    # Контекстер в ходу: реестр инструментов → динамика до генерации.
-    ctx = await run_contexter(
-        ctx,
-        reply=user_text,
-        tools=build_context_tools(script),
-        objections=script.objections,
-    )
+    # Лайв-канал уже испёк динамику по этой реплике — повторный вызов не нужен.
+    if ctx.dynamic_reply.strip() != (user_text or "").strip():
+        ctx = await run_contexter(
+            ctx,
+            reply=user_text,
+            tools=build_context_tools(script),
+            objections=script.objections,
+            allow_searching=True,
+        )
+        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
     fillers_used = list(state.get("fillers_used") or [])
     spoken_filler: str | None = state.get("spoken_filler")
     # Повторный «в поиске» после заглушки — на контекст не опираемся.
@@ -755,6 +805,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         fillers_used.append(phrase)
         spoken_filler = phrase
         ctx = ctx.model_copy(update={"filler_spoken": True})
+        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
 
     messages = build_turn_messages(
         script=script,

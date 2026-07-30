@@ -76,8 +76,27 @@ def use_v2(monkeypatch) -> None:
 
 @pytest.fixture()
 def store(monkeypatch) -> MemoryScriptStore:
+    from graph.context_agent import ContextDecision
+    from graph.context_store import MemoryContextStore
+
     mem = MemoryScriptStore()
     monkeypatch.setattr(nodes_module, "script_store", mem)
+    ctx_mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
+
+    async def _no_context(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _no_context)
+    return mem
+
+
+@pytest.fixture()
+def ctx_store(monkeypatch):
+    from graph.context_store import MemoryContextStore
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", mem)
     return mem
 
 
@@ -1321,3 +1340,58 @@ async def test_ошибка_lookup_не_роняет_ход(
     assert state["current_step"] == "name"
     assert model["calls"] == 1
     assert "".join(spoken) == model["result"]["reply"]
+
+
+async def test_respond_не_зовёт_контекстер_если_dynamic_reply_совпал(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Основной ход не зовёт контекстер повторно, если лайв уже испёк реплику."""
+    from graph.context import DYN_READY, ConversationContext
+    from graph.context_store import MemoryContextStore
+    from graph.state import new_state_defaults
+
+    reply = "какие филиалы у Ленина?"
+    fact = "Филиалы под запрос: ул. Ленина, 1."
+    ctx_mem = MemoryContextStore()
+    await ctx_mem.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            dynamic_text=fact,
+            dynamic_status=DYN_READY,
+            dynamic_reply=reply,
+        ),
+    )
+    monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
+
+    calls: list[str] = []
+
+    async def _spy(*args: Any, **kwargs: Any):
+        calls.append("contexter")
+        raise AssertionError("контекстер не должен вызываться")
+
+    monkeypatch.setattr(nodes_module, "run_contexter", _spy)
+    model["result"] = {"understood": [], "aside_id": None, "reply": "Рядом с Ленина есть филиал."}
+
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "dynamic_text": fact,
+            "dynamic_status": DYN_READY,
+            "dynamic_reply": reply,
+        },
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert calls == []
+    assert fact in out["conversation_context"]["dynamic_text"]
+    assert model["calls"] == 1
+    prompt = model["messages"][0].content
+    assert fact in prompt

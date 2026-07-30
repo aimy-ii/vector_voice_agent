@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from graph.context import (
     DYN_MISSING,
-    DYN_NEED_CITY,
     DYN_NONE,
     DYN_READY,
     DYN_SEARCHING,
@@ -22,11 +21,11 @@ def test_статусы_динамики_константы_и_дефолт():
     assert DYN_READY == "готово"
     assert DYN_SEARCHING == "в поиске"
     assert DYN_MISSING == "не нашлось"
-    assert DYN_NEED_CITY == "нужен город"
     ctx = ConversationContext()
     assert ctx.dynamic_status == DYN_NONE
     assert ctx.situation_slug is None
     assert ctx.filler_spoken is False
+    assert ctx.dynamic_reply == ""
     assert ctx.render() == ""
 
 
@@ -78,7 +77,7 @@ def test_контекст_статика_один_раз_цена_фразой(f
     assert "Пермь" in text and "perm" in text
     assert "от 43900" in text
     assert "amount" not in text
-    assert "Список филиалов" in text
+    assert "Список филиалов и адреса в статику не входят" in text
     assert "есть рассрочка" in text.lower() or "рассроч" in text.lower()
 
     ctx = ConversationContext()
@@ -173,6 +172,27 @@ def test_format_city_static_без_рекламы_словарей_и_ключе
     assert "installment_no_overpay" not in text
     assert "без переплаты" in text.lower()
     assert "от 43900" in text
+
+
+def test_format_city_static_число_филиалов_и_без_адресов():
+    """При branches_count — число в статике; списка адресов нет."""
+    with_count = format_city_static(
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta={"branches_count": 4, "categories": []},
+    )
+    assert "Филиалов в городе: 4." in with_count
+    assert "Чернышевского" not in with_count
+    assert "ул." not in with_count
+    assert "подбирает контекстер" in with_count
+
+    without = format_city_static(
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta={"categories": []},
+    )
+    assert "Филиалов в городе" not in without
+    assert "подбирает контекстер" in without
 
 
 def test_мета_филиала_после_выбора():

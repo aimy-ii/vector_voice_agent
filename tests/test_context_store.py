@@ -1,0 +1,103 @@
+"""Тесты кеша контекста по идентификатору звонка."""
+
+from __future__ import annotations
+
+from graph.context import DYN_NONE, DYN_READY, ConversationContext
+from graph.context_store import (
+    CONTEXT_FIELDS_DYNAMIC,
+    CONTEXT_FIELDS_STATIC,
+    MemoryContextStore,
+    merge_context_fields,
+)
+
+
+async def test_точечная_запись_статика_и_динамика_не_затирают_друг_друга(
+    memory_context_store: MemoryContextStore,
+):
+    """Два канала пишут свои поля — last-write-wins их не смешивает."""
+    store = memory_context_store
+    base = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        city_name="Пермь",
+        dynamic_status=DYN_NONE,
+    )
+    await store.save("c1", base)
+
+    static_overlay = ConversationContext(
+        static_text="Город: Пермь\nФилиал выбран",
+        city_slug="perm",
+        city_name="Пермь",
+        branch_slug="perm_lenina",
+        frozen=True,
+    )
+    cached = await store.load("c1")
+    assert cached is not None
+    merged_static = merge_context_fields(cached, static_overlay, CONTEXT_FIELDS_STATIC)
+    await store.save("c1", merged_static)
+
+    dynamic_overlay = ConversationContext(
+        dynamic_text="Филиалы под запрос: ул. Ленина, 1.",
+        dynamic_status=DYN_READY,
+        dynamic_reply="какие филиалы у Ленина?",
+        situation_slug=None,
+        filler_spoken=False,
+    )
+    cached = await store.load("c1")
+    assert cached is not None
+    merged_dyn = merge_context_fields(cached, dynamic_overlay, CONTEXT_FIELDS_DYNAMIC)
+    await store.save("c1", merged_dyn)
+
+    # Вторая запись статики без динамики не должна затереть динамику.
+    again_static = ConversationContext(
+        static_text="Город: Пермь\nФилиал выбран",
+        city_slug="perm",
+        city_name="Пермь",
+        branch_slug="perm_lenina",
+        frozen=True,
+        dynamic_text="",
+        dynamic_status=DYN_NONE,
+    )
+    cached = await store.load("c1")
+    assert cached is not None
+    final = merge_context_fields(cached, again_static, CONTEXT_FIELDS_STATIC)
+    await store.save("c1", final)
+
+    loaded = await store.load("c1")
+    assert loaded is not None
+    assert loaded.static_text.startswith("Город: Пермь")
+    assert loaded.branch_slug == "perm_lenina"
+    assert "Филиалы под запрос" in loaded.dynamic_text
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_reply == "какие филиалы у Ленина?"
+
+
+async def test_промах_кеша_не_роняет_и_отдаёт_none(memory_context_store: MemoryContextStore):
+    memory_context_store.fail = True
+    assert await memory_context_store.save("c1", ConversationContext()) is False
+    assert await memory_context_store.load("c1") is None
+
+
+def test_merge_не_затирает_непустую_статику_пустой():
+    base = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        city_name="Пермь",
+    )
+    overlay = ConversationContext(
+        static_text="",
+        city_slug="",
+        city_name="",
+        dynamic_text="новое",
+        dynamic_status=DYN_READY,
+    )
+    merged = merge_context_fields(
+        base,
+        overlay,
+        CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC,
+    )
+    assert merged.static_text == "Город: Пермь"
+    assert merged.city_slug == "perm"
+    assert merged.city_name == "Пермь"
+    assert merged.dynamic_text == "новое"
+    assert merged.dynamic_status == DYN_READY

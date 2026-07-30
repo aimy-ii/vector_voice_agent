@@ -19,8 +19,6 @@ DYN_READY = "готово"
 DYN_SEARCHING = "в поиске"
 #: Поиск завершился без результата.
 DYN_MISSING = "не нашлось"
-#: Инструмент подошёл, но без города клиента ответить нельзя.
-DYN_NEED_CITY = "нужен город"
 
 #: Условия оплаты: английский ключ → русская формулировка.
 _PAYMENT_LABELS: dict[str, str] = {
@@ -44,12 +42,17 @@ class ConversationContext(BaseModel):
         static_text: запечённая статика города и филиала.
         dynamic_text: динамическая часть (пока пусто — следующий этап).
         dynamic_status: статус динамики; ставит контекстер, читает генератор.
-        situation_slug: слаг ситуации для словаря заглушек при «в поиске».
-        filler_spoken: заглушка по этому слагу уже произнесена (один заход).
+        situation_slug: предмет вопроса одним-двумя словами («медкомиссия»,
+            «филиалы», «пересдача»), который контекстер отдаёт вместе со
+            статусом «в поиске»; из него собирается фраза-заглушка.
+        filler_spoken: заглушка по этому предмету уже произнесена (один заход).
+        dynamic_reply: реплика клиента, по которой собрана текущая динамика.
+            Нужна, чтобы основной ход не пересчитывал то, что лайв-канал
+            уже испёк по этой же реплике.
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
-        city_faq: FAQ меты города (вопрос → ответ) для ``FaqTool``.
+        city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
         frozen: статика уже зафиксирована и не пересобирается.
     """
 
@@ -58,6 +61,7 @@ class ConversationContext(BaseModel):
     dynamic_status: str = DYN_NONE
     situation_slug: str | None = None
     filler_spoken: bool = False
+    dynamic_reply: str = ""
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -284,7 +288,13 @@ def format_city_static(
             lines.append(row + ".")
     if price_line:
         lines.append(f"Цена (готовая фраза, произносить только так): {price_line}")
-    lines.append("Список филиалов города в контекст не входит.")
+    count = city_meta.get("branches_count")
+    if count:
+        lines.append(f"Филиалов в городе: {count}.")
+    lines.append(
+        "Список филиалов и адреса в статику не входят — их подбирает контекстер "
+        "по району или ориентиру от клиента."
+    )
     return "\n".join(lines)
 
 
@@ -363,6 +373,7 @@ class ContextState(BaseModel):
     dynamic_status: str = DYN_NONE
     situation_slug: str | None = None
     filler_spoken: bool = False
+    dynamic_reply: str = ""
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
