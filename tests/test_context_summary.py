@@ -176,13 +176,14 @@ def test_format_city_static_без_рекламы_словарей_и_ключе
 
 
 def test_format_city_static_число_филиалов_и_без_адресов():
-    """При branches_count — число в статике; списка адресов нет."""
+    """При branches_count — служебная пометка; списка адресов нет."""
     with_count = format_city_static(
         city_slug="perm",
         city_name="Пермь",
         city_meta={"branches_count": 4, "categories": []},
     )
-    assert "Филиалов в городе: 4." in with_count
+    assert "Филиалов в городе: 4" in with_count
+    assert "служебно" in with_count
     assert "Чернышевского" not in with_count
     assert "ул." not in with_count
     assert "подбирает контекстер" in with_count
