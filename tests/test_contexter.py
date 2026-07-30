@@ -400,3 +400,123 @@ async def test_без_needs_и_без_агента_статус_не_трога�
     assert out.dynamic_status == DYN_READY
     assert out.dynamic_text == "было"
     assert out.dynamic_reply_hash == "old"
+
+
+async def test_возражение_не_отменяет_потребности_шага():
+    """При needs и триггере возражения инструменты шага работают, агент молчит."""
+    objections = {
+        "price": Objection(
+            id="price",
+            triggers=["дороговато", "дорого"],
+            text="Понимаю, давайте сравним.",
+            sets={},
+        )
+    }
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+        calls = 0
+
+        async def run(self, query, context, *, slugs=()):
+            self.calls += 1
+            return 'Факты справочника:\n{"price_line": "от 10000"}'
+
+    facts = _Facts()
+    agent = _FakeAgent(ContextDecision(need=True, tool="branches", subject="филиалы"))
+    branches_tool = _FakeTool("branches", "не должен ответить")
+    out = await run_contexter(
+        ConversationContext(static_text="Город: Пермь"),
+        reply="дороговато",
+        tools=[facts, branches_tool],
+        needs=["price"],
+        objections=objections,
+        agent=agent,
+    )
+    assert facts.calls == 1
+    assert agent.calls == []
+    assert branches_tool.calls == []
+    assert out.dynamic_status == DYN_READY
+    assert "price_line" in out.dynamic_text
+
+
+async def test_возражение_без_needs_не_требуется():
+    """Пустые потребности и возражение — DYN_NONE, агент не зовётся."""
+    objections = {
+        "think": Objection(
+            id="think",
+            triggers=["подумаю"],
+            text="Конечно.",
+            sets={},
+        )
+    }
+    agent = _FakeAgent(ContextDecision(need=True, tool="branches", subject="филиалы"))
+    tool = _FakeTool("branches", "не должен")
+    out = await run_contexter(
+        ConversationContext(),
+        reply="я ещё подумаю",
+        tools=[tool],
+        needs=(),
+        objections=objections,
+        agent=agent,
+    )
+    assert out.dynamic_status == DYN_NONE
+    assert agent.calls == []
+    assert tool.calls == []
+
+
+async def test_филиалы_не_грузятся_если_агент_не_за_ними(monkeypatch):
+    """Без инструмента branches справочник филиалов не зовём."""
+    from graph import contexter as contexter_module
+
+    calls: list[str] = []
+
+    class _KB:
+        async def list_branches(self, city_slug: str):
+            calls.append(city_slug)
+            return [{"slug": "perm_lenina", "address": "ул. Ленина, 1"}]
+
+    monkeypatch.setattr(contexter_module, "vector_kb", _KB())
+    out = await run_contexter(
+        ConversationContext(city_slug="perm"),
+        reply="угу",
+        tools=[_FakeTool("faq", "ответ")],
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert calls == []
+    assert out.dynamic_status == DYN_NONE
+
+
+async def test_филиалы_грузятся_когда_агент_выбрал_branches(monkeypatch):
+    """При решении tool=branches список подгружается из справочника."""
+    from graph import contexter as contexter_module
+
+    calls: list[str] = []
+
+    class _KB:
+        async def list_branches(self, city_slug: str):
+            calls.append(city_slug)
+            return [{"slug": "perm_lenina", "address": "ул. Ленина, 1"}]
+
+    monkeypatch.setattr(contexter_module, "vector_kb", _KB())
+    tool = _FakeTool("branches", "Филиалы: ул. Ленина, 1.")
+    agent = _FakeAgent(
+        ContextDecision(
+            need=True,
+            tool="branches",
+            query="Ленина",
+            subject="филиалы",
+            branch_slugs=["perm_lenina"],
+        )
+    )
+    out = await run_contexter(
+        ConversationContext(city_slug="perm"),
+        reply="какие у Ленина?",
+        tools=[tool],
+        agent=agent,
+    )
+    assert calls  # хотя бы один поход: для агента и/или для инструмента
+    assert all(c == "perm" for c in calls)
+    assert tool.calls == ["Ленина"]
+    assert out.dynamic_status == DYN_READY

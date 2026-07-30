@@ -282,16 +282,15 @@ async def run_contexter(
 ) -> ConversationContext:
     """Наполняет динамику/статику и ставит статус поиска.
 
-    Порядок: при потребностях шага сразу «в поиске» в кеш → агент по
-    реплике → инструменты. Если поход только по решению агента —
-    «в поиске» до первого инструмента.
+    Порядок: повтор реплики → потребности шага («в поиске» до справочника) →
+    возражение (агента не зовём) → агент → инструменты агента.
 
     Args:
         context: текущий контекст разговора.
         reply: реплика клиента на этот ход.
         tools: реестр инструментов.
         needs: потребности справочника по шапке хода (``needs_of``).
-        objections: возражения скрипта; при совпадении статус «не требуется».
+        objections: возражения скрипта; при совпадении агента не зовём.
         agent: подмена агента для офлайн-тестов.
         branches: филиалы города для отбора слагов агентом.
 
@@ -305,28 +304,52 @@ async def run_contexter(
         stage("contexter", "повтор реплики, пропуск", "done")
         return updated
 
-    # Возражения — тактика разговора в скрипте, контекстер не обрабатывает.
-    if objections and find_aside(reply, _triggers_catalogue(objections)):
-        _mark_none(updated)
-        return _finish(
-            updated,
-            reply=reply,
-            tool=None,
-            subject="",
-            started=started,
-            needed=False,
-        )
-
     need_list = [str(n).strip() for n in needs if str(n).strip()]
     marked_searching = False
+    got = False
+
     if need_list:
         # Потребности шага → поход точно будет: статус до любого справочника.
         _mark_searching(updated, digest=digest)
         await _persist_dynamic(updated)
         marked_searching = True
+        got = await _fulfill_needs(updated, reply=reply, needs=need_list, tools=tools)
 
-    branch_list = await _load_branches(updated, branches)
-    decision = await decide_context(reply, updated, tools, agent=agent, branches=branch_list)
+    # Возражения — тактика разговора; к потребностям шага отношения не имеют.
+    if objections and find_aside(reply, _triggers_catalogue(objections)):
+        if got:
+            _mark_ready(updated)
+            updated.filler_spoken = False
+        elif need_list:
+            _mark_missing(updated)
+        else:
+            _mark_none(updated)
+        return _finish(
+            updated,
+            reply=reply,
+            tool=("facts" if need_list else None),
+            subject="",
+            started=started,
+            needed=bool(need_list),
+        )
+
+    branches_for_agent: list[Mapping[str, Any]] = []
+    if branches:
+        branches_for_agent = list(branches)
+    elif (
+        _tool_by_name(tools, "branches") is not None
+        and (updated.city_slug or "").strip()
+        and not (updated.branch_slug or "").strip()
+    ):
+        branches_for_agent = await _load_branches(updated, branches)
+
+    decision = await decide_context(
+        reply,
+        updated,
+        tools,
+        agent=agent,
+        branches=branches_for_agent,
+    )
 
     if not need_list and not decision.need:
         # Ничего не предстоит — статус не трогаем.
@@ -344,13 +367,13 @@ async def run_contexter(
         _mark_searching(updated, digest=digest, subject=decision.subject)
         await _persist_dynamic(updated)
 
-    got = await _fulfill_needs(updated, reply=reply, needs=need_list, tools=tools)
-
     agent_tool_name: str | None = None
     if decision.need:
         tool = _tool_by_name(tools, decision.tool)
         if tool is not None:
             agent_tool_name = decision.tool
+            if decision.tool == "branches":
+                await _load_branches(updated, branches)
             found = await _run_tool(
                 tool,
                 decision.query,

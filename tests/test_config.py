@@ -116,6 +116,15 @@ def test_waiting_history_дефолт():
     assert "searching_stale_turns" not in Settings.model_fields
 
 
+def test_status_wait_дефолты():
+    """Порог и интервал ожидания статуса лайв-канала."""
+    assert Settings.model_fields["status_wait_timeout"].default == 0.4
+    assert Settings.model_fields["status_poll_interval"].default == 0.05
+    s = Settings(status_wait_timeout=0.0, status_poll_interval=0.0)
+    assert s.status_wait_timeout == 0.0
+    assert s.status_poll_interval == 0.0
+
+
 def test_lookup_fillers_удалены():
     assert "lookup_fillers_enabled" not in Settings.model_fields
     assert "agent_fillers" not in Settings.model_fields

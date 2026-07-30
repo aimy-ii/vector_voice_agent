@@ -72,6 +72,8 @@ def spoken(monkeypatch) -> list[str]:
 def use_v2(monkeypatch) -> None:
     """Ход-тесты идут на v2; .env и «последняя» не должны подменять версию."""
     monkeypatch.setattr(nodes_module.settings, "script_version", "2")
+    monkeypatch.setattr(nodes_module.settings, "status_wait_timeout", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "status_poll_interval", 0.0)
 
 
 @pytest.fixture()
@@ -1289,6 +1291,174 @@ async def test_continuation_всегда_полная_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
+    assert "Шапка скрипта" in model["messages"][0].content
+
+
+async def test_respond_ждёт_статус_и_берёт_полную_по_таймауту(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """Статуса по реплике нет — ход ждёт и после порога идёт в полную сборку."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    slept: list[float] = []
+
+    async def _sleep(dt: float) -> None:
+        slept.append(dt)
+
+    monkeypatch.setattr(nodes_module.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(nodes_module.settings, "status_wait_timeout", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "status_poll_interval", 0.0)
+
+    reply = "а какие филиалы рядом?"
+    await ctx_store.save("local", ConversationContext(static_text="Город: Пермь"))
+    model["result"] = {"reply": "Какой район?"}
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "conversation_context": {"static_text": "Город: Пермь"},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert "Шапка скрипта" in model["messages"][0].content
+    assert slept == []
+
+
+async def test_respond_searching_появился_во_время_ожидания(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """SEARCHING появился при перечите — короткая сборка и continuation."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module.settings, "status_wait_timeout", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "status_poll_interval", 0.0)
+
+    reply = "а какие филиалы рядом?"
+    digest = reply_hash(reply)
+    loads = {"n": 0}
+
+    async def _load(state):
+        loads["n"] += 1
+        if loads["n"] == 1:
+            return ConversationContext(static_text="Город: Пермь")
+        return ConversationContext(
+            static_text="Город: Пермь",
+            dynamic_status=DYN_SEARCHING,
+            dynamic_reply_hash=digest,
+            dynamic_reply=reply,
+            pending_fields=["branch"],
+        )
+
+    monkeypatch.setattr(nodes_module, "_load_context", _load)
+    model["result"] = {"reply": "Сейчас уточню филиалы."}
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "conversation_context": {"static_text": "Город: Пермь"},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert loads["n"] >= 2
+    assert out.get("expect_continuation") is True
+    assert "Шапка скрипта" not in model["messages"][0].content
+
+
+async def test_respond_статус_уже_был_ожидания_нет(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """Статус по реплике уже в кеше — перечитов ожидания нет."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    slept: list[float] = []
+    loads = {"n": 0}
+
+    async def _sleep(dt: float) -> None:
+        slept.append(dt)
+
+    real_load = nodes_module._load_context
+
+    async def _counting_load(state):
+        loads["n"] += 1
+        return await real_load(state)
+
+    monkeypatch.setattr(nodes_module.asyncio, "sleep", _sleep)
+    monkeypatch.setattr(nodes_module, "_load_context", _counting_load)
+    monkeypatch.setattr(nodes_module.settings, "status_wait_timeout", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "status_poll_interval", 0.0)
+
+    reply = "какие филиалы у Просвещения?"
+    digest = reply_hash(reply)
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        dynamic_status=DYN_SEARCHING,
+        dynamic_reply_hash=digest,
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    model["result"] = {"reply": "Сейчас уточню."}
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "conversation_context": ctx.model_dump(),
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is True
+    assert loads["n"] == 1
+    assert slept == []
+
+
+async def test_continuation_не_ждёт_статус(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """На продолжении ожидание статуса не включается."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    loads = {"n": 0}
+    real_load = nodes_module._load_context
+
+    async def _counting_load(state):
+        loads["n"] += 1
+        return await real_load(state)
+
+    monkeypatch.setattr(nodes_module, "_load_context", _counting_load)
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": "continuation", "thread_id": "local"}},
+    )
+    await ctx_store.save("local", ConversationContext(static_text="Город: Пермь"))
+    model["result"] = {"reply": "Ближайшие — на Ленина."}
+    state = {
+        **new_state_defaults(),
+        "messages": [
+            HumanMessage(content="филиалы?"),
+            AIMessage(content="Сейчас уточню."),
+        ],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "turn_kind": "continuation",
+        "conversation_context": {"static_text": "Город: Пермь"},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert loads["n"] == 1
     assert "Шапка скрипта" in model["messages"][0].content
 
 
