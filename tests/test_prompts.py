@@ -753,15 +753,48 @@ def test_naturalness_живая_связка_с_ответом_клиента():
 
 
 def test_unknown_запрет_выдумывать_филиал(script):
-    """Без филиала в фактах нельзя утверждать наличие по району."""
+    """Адрес филиала — только дословно из контекста."""
     from graph.prompts import unknown_block
 
     text = unknown_block(script).lower()
     assert "филиал" in text
-    assert "районе" in text or "район" in text
-    assert "придумывать" in text
-    # Обратная совместимость: вызов без новых аргументов.
-    assert script.params.unknown.split()[0].lower() in text or "не придумывать" in text
+    assert "дословно" in text
+    assert "энгельса" in text or "просвещения" in text
+    assert "уточню" in text or "уточнишь" in text
+
+
+def test_closed_steps_в_системном_сообщении(script):
+    """Закрытые шаги попадают в системное сообщение с запретом пересказывать."""
+    from graph.prompts import build_turn_messages
+
+    closed = [script.step("included"), script.step("practice")]
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("branch")],
+        profile={"city": "Пермь"},
+        facts={},
+        history=[],
+        asides_done=[],
+        closed_steps=closed,
+    )
+    text = messages[0].content.lower()
+    assert "закрытые шаги" in text
+    assert "пересказывать" in text or "повторять" in text
+    included_name = (getattr(script.step("included"), "goal", None) or "included").lower()
+    practice_name = (getattr(script.step("practice"), "goal", None) or "practice").lower()
+    # Названия шагов или их идентификаторы.
+    assert "included" in text or any(w in text for w in included_name.split()[:2])
+    assert "practice" in text or any(w in text for w in practice_name.split()[:2])
+
+
+def test_правило_адресов_требует_дословного_присутствия(script):
+    """Правило про адреса — только дословная строка из контекста."""
+    from graph.prompts import persona_block
+
+    text = persona_block().lower()
+    assert "дословно" in text
+    assert "энгельса" in text
+    assert "уточню" in text or "уточнишь" in text
 
 
 def test_profile_block_pending_в_уточняется_не_в_неизвестном(script):

@@ -125,10 +125,10 @@ def test_waiting_короче_полного(script):
     assert len(waiting[0].content) * 2 < len(full[0].content)
 
 
-async def test_генератор_в_поиске_берёт_waiting(
+async def test_генератор_без_ready_hash_берёт_waiting(
     spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
-    model["result"] = {"understood": [], "reply": "Секунду, уточняю филиалы."}
+    model["result"] = {"reply": "Секунду, уточняю филиалы."}
 
     async def _spy(*args: Any, **kwargs: Any):
         raise AssertionError("контекстер не должен вызываться из respond")
@@ -141,6 +141,7 @@ async def test_генератор_в_поиске_берёт_waiting(
         dynamic_turn=1,
         pending_fields=["branch"],
         dynamic_reply=reply,
+        ready_reply_hash="",
     )
     await ctx_store.save("local", ctx)
     state: dict[str, Any] = {
@@ -165,7 +166,9 @@ async def test_respond_читает_динамику_из_кеша_без_кон
     spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
     """Основной ход только читает готовую динамику из кеша."""
-    model["result"] = {"understood": [], "aside_id": None, "reply": "Медкомиссия отдельно."}
+    from graph.contexter import reply_hash
+
+    model["result"] = {"aside_id": None, "reply": "Медкомиссия отдельно."}
     fact = "Медкомиссия понадобится к началу практики."
     reply = "а когда медкомиссию проходить?"
 
@@ -178,6 +181,7 @@ async def test_respond_читает_динамику_из_кеша_без_кон
         dynamic_text=fact,
         dynamic_status=DYN_READY,
         dynamic_reply=reply,
+        ready_reply_hash=reply_hash(reply),
     )
     await ctx_store.save("local", ctx)
 

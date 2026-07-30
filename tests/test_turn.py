@@ -381,6 +381,7 @@ async def test_образец_в_промпте_склейки_мимо_моде
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
     """Шаг terms: образец в промпте, в эфир только реплика модели."""
+    from graph.contexter import reply_hash
     from graph.prompts import _SAMPLE_PREFIX
 
     model["result"] = {
@@ -412,6 +413,7 @@ async def test_образец_в_промпте_склейки_мимо_моде
                 "static_text": "Город: Пермь",
                 "city_slug": "perm",
                 "city_name": "Пермь",
+                "ready_reply_hash": reply_hash("механика"),
             },
         }
     )
@@ -977,10 +979,12 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
     """Основной ход не зовёт контекстер: читает динамику из кеша при совпадении."""
     from graph.context import DYN_READY, ConversationContext
     from graph.context_store import MemoryContextStore
+    from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     reply = "какие филиалы у Ленина?"
     fact = "Филиалы под запрос: ул. Ленина, 1."
+    digest = reply_hash(reply)
     ctx_mem = MemoryContextStore()
     await ctx_mem.save(
         "local",
@@ -990,6 +994,7 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
             dynamic_text=fact,
             dynamic_status=DYN_READY,
             dynamic_reply=reply,
+            ready_reply_hash=digest,
         ),
     )
     monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
@@ -1013,6 +1018,7 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
             "dynamic_text": fact,
             "dynamic_status": DYN_READY,
             "dynamic_reply": reply,
+            "ready_reply_hash": digest,
         },
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
@@ -1156,66 +1162,26 @@ async def test_ход_не_ходит_в_справочник(
     assert resolvers[1].calls == 0
 
 
-async def test_searching_waiting_и_continuation_флаг(
+async def test_ready_hash_полная_и_короткая_сборка(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
 ):
-    from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING, ConversationContext
+    """Ветвление по ready_reply_hash и needs_kb шапки."""
+    from graph.context import ConversationContext
+    from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     reply = "какие филиалы у Просвещения?"
-    model["result"] = {"understood": [], "reply": "Сейчас уточню филиалы."}
+    model["result"] = {"reply": "Сейчас уточню филиалы."}
 
-    for status, expect_cont, prompt_marker in (
-        (DYN_SEARCHING, True, "уточня"),
-        (DYN_READY, False, "Шапка"),
-        (DYN_MISSING, False, "Шапка"),
-    ):
-        ctx = ConversationContext(
-            static_text="Город: Пермь",
-            dynamic_status=status,
-            dynamic_turn=1,
-            pending_fields=["branch"] if status == DYN_SEARCHING else [],
-            dynamic_reply=reply,
-            dynamic_text="Филиалы: Ленина" if status == DYN_READY else "",
-        )
-        await ctx_store.save("local", ctx)
-        state = {
-            **new_state_defaults(),
-            "messages": [HumanMessage(content=reply)],
-            "script_id": "vector_ru",
-            "script_version": "2",
-            "current_step": "branch",
-            "head_steps": ["branch"],
-            "turn": 2,
-            "conversation_context": ctx.model_dump(),
-        }
-        out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-        assert out.get("expect_continuation") is expect_cont, status
-        prompt = model["messages"][0].content
-        if expect_cont:
-            assert "Шапка скрипта" not in prompt
-            assert prompt_marker in prompt.lower()
-        else:
-            assert "Шапка скрипта" in prompt
-
-
-async def test_зависший_searching_даёт_полную_сборку(
-    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
-):
-    from graph.context import DYN_SEARCHING, ConversationContext
-    from graph.state import new_state_defaults
-
-    monkeypatch.setattr(nodes_module.settings, "searching_stale_turns", 2)
-    reply = "ну что там?"
+    # Совпадает с репликой — полная сборка.
     ctx = ConversationContext(
         static_text="Город: Пермь",
-        dynamic_status=DYN_SEARCHING,
-        dynamic_turn=1,
-        pending_fields=["branch"],
+        dynamic_status="готово",
+        dynamic_text="Филиалы: Ленина",
+        ready_reply_hash=reply_hash(reply),
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
-    model["result"] = {"understood": [], "reply": "Пока не нашла, давайте дальше."}
     state = {
         **new_state_defaults(),
         "messages": [HumanMessage(content=reply)],
@@ -1223,7 +1189,81 @@ async def test_зависший_searching_даёт_полную_сборку(
         "script_version": "2",
         "current_step": "branch",
         "head_steps": ["branch"],
-        "turn": 4,  # 4 - 1 > 2
+        "turn": 2,
+        "conversation_context": ctx.model_dump(),
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert "Шапка скрипта" in model["messages"][0].content
+
+    # Не совпадает и шапке нужны данные — короткая сборка.
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        dynamic_status="в поиске",
+        pending_fields=["branch"],
+        ready_reply_hash="",
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    state["conversation_context"] = ctx.model_dump()
+    model["result"] = {"reply": "Сейчас уточню."}
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is True
+    assert "Шапка скрипта" not in model["messages"][0].content
+    assert "уточня" in model["messages"][0].content.lower()
+
+    # Не совпадает, но шапке данные не нужны — полная сборка.
+    ctx = ConversationContext(static_text="Город: Пермь", ready_reply_hash="")
+    await ctx_store.save("local", ctx)
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "turn": 2,
+        "conversation_context": ctx.model_dump(),
+    }
+    model["result"] = {"reply": "Как к вам обращаться?"}
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert "Шапка скрипта" in model["messages"][0].content
+
+
+async def test_continuation_всегда_полная_сборка(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """На turn_kind=continuation всегда полная сборка, даже без ready_reply_hash."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": "continuation", "thread_id": "local"}},
+    )
+    reply = "Просвещения"
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        dynamic_text="Филиалы: Ленина",
+        dynamic_status="готово",
+        ready_reply_hash="",
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    model["result"] = {"reply": "Ближайшие — на Ленина."}
+    state = {
+        **new_state_defaults(),
+        "messages": [
+            HumanMessage(content=reply),
+            AIMessage(content="Сейчас уточню филиалы."),
+        ],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "turn": 3,
+        "turn_kind": "continuation",
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
@@ -1238,7 +1278,7 @@ async def test_continuation_не_растит_счётчики(
         "graph.nodes.get_config",
         lambda: {"configurable": {"turn_kind": "continuation", "thread_id": "local"}},
     )
-    model["result"] = {"understood": [], "reply": "Ближайшие — на Ленина."}
+    model["result"] = {"reply": "Ближайшие — на Ленина."}
     before_attempts = {"name": 1, "city": 1}
     state = await graph.ainvoke(
         {
@@ -1258,6 +1298,7 @@ async def test_continuation_не_растит_счётчики(
                 "city_name": "Пермь",
                 "dynamic_status": "готово",
                 "dynamic_reply": "Пермь",
+                "ready_reply_hash": "",
             },
         }
     )

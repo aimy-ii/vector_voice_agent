@@ -159,6 +159,7 @@ async def test_dynamic_turn_hash_pending_пишутся_с_динамикой(
         dynamic_reply="какие филиалы?",
         dynamic_turn=3,
         last_reply_hash="abc123",
+        ready_reply_hash="ready456",
         pending_fields=["branch"],
     )
     cached = await store.load("c1")
@@ -175,6 +176,7 @@ async def test_dynamic_turn_hash_pending_пишутся_с_динамикой(
         frozen=True,
         dynamic_turn=0,
         last_reply_hash="",
+        ready_reply_hash="",
         pending_fields=[],
     )
     cached = await store.load("c1")
@@ -188,5 +190,6 @@ async def test_dynamic_turn_hash_pending_пишутся_с_динамикой(
     assert loaded.branch_slug == "perm_lenina"
     assert loaded.dynamic_turn == 3
     assert loaded.last_reply_hash == "abc123"
+    assert loaded.ready_reply_hash == "ready456"
     assert loaded.pending_fields == ["branch"]
     assert "Ищем филиалы" in loaded.dynamic_text

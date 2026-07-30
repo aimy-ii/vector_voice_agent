@@ -28,6 +28,7 @@ def test_статусы_динамики_константы_и_дефолт():
     assert ctx.last_agent_reply == ""
     assert ctx.dynamic_turn == 0
     assert ctx.last_reply_hash == ""
+    assert ctx.ready_reply_hash == ""
     assert ctx.pending_fields == []
     assert ctx.render() == ""
 

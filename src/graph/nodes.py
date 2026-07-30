@@ -26,9 +26,7 @@ from langgraph.runtime import Runtime
 from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
-    DYN_MISSING,
     DYN_NONE,
-    DYN_SEARCHING,
     ConversationContext,
     context_from_state,
 )
@@ -37,6 +35,7 @@ from graph.context_store import (
     context_store,
     merge_context_fields,
 )
+from graph.contexter import reply_hash
 from graph.facts import needs_of
 from graph.history import (
     last_agent_text,
@@ -48,7 +47,6 @@ from graph.log_fmt import (
     format_reply_integrity,
     format_spoken_preview,
 )
-from graph.names import given_name
 from graph.progress import say, stage
 from graph.prompts import build_turn_messages, build_waiting_messages
 from graph.reconcile import count_agent_messages, delivery_patch
@@ -377,31 +375,6 @@ def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]
     return merged
 
 
-def _effective_dynamic_status(
-    ctx: ConversationContext,
-    *,
-    turn: int,
-) -> tuple[str, bool]:
-    """Статус динамики для хода с учётом зависшего «в поиске».
-
-    Args:
-        ctx: контекст из кеша.
-        turn: номер текущего хода.
-
-    Returns:
-        Пара ``(статус, протух)``. Протухший ``DYN_SEARCHING`` читается
-        как ``DYN_MISSING`` локально, в кеш не пишется.
-    """
-    status = ctx.dynamic_status or DYN_NONE
-    if status != DYN_SEARCHING:
-        return status, False
-    stale_after = int(settings.searching_stale_turns)
-    dyn_turn = int(ctx.dynamic_turn or 0)
-    if dyn_turn > 0 and turn - dyn_turn > stale_after:
-        return DYN_MISSING, True
-    return status, False
-
-
 def call_summary(state: CallState) -> dict[str, Any]:
     """Саммари звонка в любой момент разговора.
 
@@ -583,27 +556,32 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     streamed: list[str] = []
     ctx = await _load_context(state)
     user_text = last_user_text(state.get("messages") or [])
-    turn = int(state.get("turn") or 0)
     turn_kind = str(state.get("turn_kind") or "client")
     profile = dict(state.get("profile") or {})
+    is_continuation = turn_kind == "continuation"
 
-    # Динамика из кеша: основной ход в модель за контекстом не ходит.
-    ctx_fresh = ctx.dynamic_reply.strip() == (user_text or "").strip()
-    status, stale = _effective_dynamic_status(ctx, turn=turn)
-    expect_continuation = status == DYN_SEARCHING and not stale
+    # Готовность по реплике: лайв закончил разбор и контекстер по этой реплике.
+    if is_continuation:
+        fresh = True
+    elif user_text:
+        fresh = ctx.ready_reply_hash == reply_hash(user_text)
+    else:
+        fresh = True
+    needs_kb = any(needs_of(s) for s in head)
+    waiting = not fresh and needs_kb
 
-    if ctx_fresh:
+    if fresh:
         context_text = ctx.render()
-        dynamic_status = status
+        dynamic_status = ctx.dynamic_status or DYN_NONE
         pending_fields = list(ctx.pending_fields or [])
     else:
-        # Динамика относится к другой реплике — в промпт не отдаём.
+        # Данные ещё готовятся или относятся к другой реплике — статику можно,
+        # динамику чужой реплики в промпт не отдаём.
         context_text = (ctx.static_text or "").strip()
         dynamic_status = DYN_NONE
-        pending_fields = []
-        expect_continuation = False
+        pending_fields = list(ctx.pending_fields or []) if waiting else []
 
-    if dynamic_status == DYN_SEARCHING and not stale:
+    if waiting:
         messages = build_waiting_messages(
             script,
             messages=state.get("messages") or [],
@@ -614,7 +592,13 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             turn_kind=turn_kind,
         )
         prompt_kind = "waiting"
+        expect_continuation = True
     else:
+        closed_steps = [
+            script.steps[step_id]
+            for step_id, status in (state.get("step_status") or {}).items()
+            if status == "closed" and step_id in script.steps
+        ]
         messages = build_turn_messages(
             script=script,
             steps=head,
@@ -628,8 +612,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             new_step_id=state.get("head_new_step"),
             pending_fields=pending_fields,
             turn_kind=turn_kind,
+            closed_steps=closed_steps,
         )
         prompt_kind = "full"
+        expect_continuation = False
 
     system_len = len(messages[0].content) if messages else 0
     stage(
@@ -708,16 +694,6 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     profile = dict(state.get("profile") or {})
     asides_done = list(state.get("asides_done") or [])
     patch: dict[str, Any] = {}
-
-    for item in result.get("understood") or []:
-        key = str(item.get("key", "")).strip()
-        value = str(item.get("value", "")).strip()
-        # В формате продаж форма не объявлена — пишем любые имена полей.
-        allowed = script.is_sales or key in script.profile_fields
-        if allowed and value:
-            if key in {"caller_name", "student_name"}:
-                value = given_name(value) or value
-            profile[key] = value
 
     aside_id = result.get("aside_id")
     if aside_id and aside_id not in asides_done:

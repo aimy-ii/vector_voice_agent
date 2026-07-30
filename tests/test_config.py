@@ -110,10 +110,10 @@ def test_filler_threshold_ms_отсутствует():
     assert "filler_threshold_ms" not in Settings.model_fields
 
 
-def test_searching_stale_и_waiting_history_дефолты():
-    """Порог зависшего поиска и лимит хвоста для реплики ожидания."""
-    assert Settings.model_fields["searching_stale_turns"].default == 2
+def test_waiting_history_дефолт():
+    """Лимит хвоста для реплики ожидания."""
     assert Settings.model_fields["waiting_history_limit"].default == 4
+    assert "searching_stale_turns" not in Settings.model_fields
 
 
 def test_lookup_fillers_удалены():

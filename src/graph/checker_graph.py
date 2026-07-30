@@ -17,6 +17,7 @@ r"""Служебный граф чекера в реальном времени.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -37,7 +38,7 @@ from graph.context import (
     merge_static,
 )
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
-from graph.contexter import run_contexter
+from graph.contexter import reply_hash, run_contexter
 from graph.facts import collect_facts, needs_of
 from graph.log_fmt import format_live_check_state, format_lookup_done
 from graph.nodes import (
@@ -58,6 +59,7 @@ from graph.nodes import (
     _step_fills_city,
     _step_needs_lookup,
 )
+from graph.profile_agent import guess_profile, profile_fields_of
 from graph.progress import stage
 from graph.resolvers import resolve_branch, resolve_city
 from graph.state import CallContext, CallState
@@ -649,26 +651,43 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         judge=_checker_client,
         progress=progress,
     )
-    patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
-    patch["last_checked_partial"] = reply
+    patch: dict[str, Any] = {
+        "last_checked_partial": reply,
+        "client_asks_inform": asks_inform,
+    }
     if utterance_id:
         patch["last_checked_utterance_id"] = utterance_id
-    patch["client_asks_inform"] = asks_inform
-    patch["profile"] = profile
 
-    # Разбор города/филиала/фактов — раньше был на пути основного хода.
-    ctx, lookup_patch, profile = await _lookup_in_live(
-        state,
-        reply=reply,
-        progress=progress,
-        profile=profile,
-        ctx=ctx,
+    # Разбор профиля и справочника — параллельно; складывать их время незачем.
+    script = _script_of_state(state)
+    fields = profile_fields_of(script)
+    profile_for_lookup = dict(profile)
+
+    async def _run_lookup() -> tuple[ConversationContext, dict[str, Any], dict[str, str]]:
+        return await _lookup_in_live(
+            state,
+            reply=reply,
+            progress=progress,
+            profile=profile_for_lookup,
+            ctx=ctx,
+        )
+
+    (ctx, lookup_patch, profile), guess = await asyncio.gather(
+        _run_lookup(),
+        guess_profile(reply, known=profile, fields=fields),
     )
+    for item in guess.values:
+        key = item.key
+        value = item.value
+        if value and not str(profile.get(key) or "").strip():
+            profile[key] = value
+    progress.profile = dict(profile)
+    progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
+    patch.update(progress_patch)
     patch.update(lookup_patch)
     patch["profile"] = profile
 
     # Контекстер печёт справку/статус по реплике.
-    script = _script_of_state(state)
     branches: list[Any] = []
     if ctx.city_slug and not ctx.branch_slug:
         try:
@@ -698,8 +717,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
                 "dynamic_text": ctx.dynamic_text or lookup_text,
             }
         )
-    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
-    patch.update(ctx_patch)
 
     ctx = await _warmup_next_step(
         state,
@@ -708,8 +725,11 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         ctx=ctx,
         asks_inform=asks_inform,
     )
-    static_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC)
-    patch.update(static_patch)
+    # Флаг готовности — после разбора и контекстера (и при ошибке справочника),
+    # иначе основной ход будет ждать вечно.
+    ctx = ctx.model_copy(update={"ready_reply_hash": reply_hash(reply)})
+    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
+    patch.update(ctx_patch)
 
     if closures:
         checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)

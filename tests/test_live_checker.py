@@ -22,8 +22,9 @@ from script.store import ScriptProgress, progress_to_state
 
 @pytest.fixture(autouse=True)
 def _offline_context(monkeypatch):
-    """Офлайн: кеш контекста в памяти, агент контекста не зовёт модель."""
+    """Офлайн: кеш контекста в памяти, агенты не зовут модель."""
     from graph import nodes as nodes_module
+    from graph.profile_agent import ProfileGuess
 
     mem = MemoryContextStore()
     monkeypatch.setattr(nodes_module, "context_store", mem)
@@ -31,7 +32,11 @@ def _offline_context(monkeypatch):
     async def _no_need(*_a, **_k):
         return ContextDecision(need=False)
 
+    async def _no_profile(*_a, **_k):
+        return ProfileGuess()
+
     monkeypatch.setattr("graph.contexter.decide_context", _no_need)
+    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
     return mem
 
 
@@ -1182,3 +1187,109 @@ async def test_live_lookup_ошибка_даёт_missing(script, monkeypatch, _o
     ctx = out.get("conversation_context") or {}
     assert ctx.get("dynamic_status") == DYN_MISSING
     assert ctx.get("pending_fields") in ([], None)
+    # При ошибке справочника флаг готовности всё равно ставится —
+    # иначе основной ход будет ждать вечно.
+    from graph.contexter import reply_hash
+
+    assert ctx.get("ready_reply_hash") == reply_hash(text)
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.ready_reply_hash == reply_hash(text)
+
+
+async def test_live_профиль_попадает_в_кеш_чекера(script, monkeypatch, _offline_context):
+    """Разбор профиля после check_pass пишется набором PROGRESS_FIELDS_CHECKER."""
+    from graph.profile_agent import ProfileGuess, ProfileValue
+    from script.store import MemoryScriptStore
+
+    text = "Меня зовут Андрей Андреевич"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    mem = MemoryScriptStore()
+    await mem.save("local", progress)
+
+    async def fake_guess(reply, *, known, fields, agent=None):
+        return ProfileGuess(values=[ProfileValue(key="caller_name", value="Андрей")])
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+    monkeypatch.setattr("graph.nodes.script_store", mem)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert out.get("profile", {}).get("caller_name") == "Андрей"
+    stored = await mem.load("local")
+    assert stored is not None
+    assert stored.profile.get("caller_name") == "Андрей"
+
+
+async def test_ready_reply_hash_после_разбора_и_контекстера(script, monkeypatch, _offline_context):
+    """ready_reply_hash выставляется только в конце, после разбора и контекстера."""
+    from graph.context import ConversationContext
+    from graph.contexter import reply_hash
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    await _offline_context.save("local", ConversationContext())
+
+    order: list[str] = []
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_lookup(state, *, reply, progress, profile, ctx):
+        order.append("lookup")
+        loaded = await _offline_context.load("local")
+        assert loaded is not None
+        assert not (loaded.ready_reply_hash or "")
+        return ctx, {}, profile
+
+    async def fake_contexter(ctx, **kwargs):
+        order.append("contexter")
+        loaded = await _offline_context.load("local")
+        assert loaded is not None
+        assert not (loaded.ready_reply_hash or "")
+        return ctx
+
+    async def fake_warmup(*args, **kwargs):
+        order.append("warmup")
+        return kwargs["ctx"]
+
+    monkeypatch.setattr("graph.checker_graph._lookup_in_live", fake_lookup)
+    monkeypatch.setattr("graph.checker_graph.run_contexter", fake_contexter)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert order == ["lookup", "contexter", "warmup"]
+    digest = reply_hash(text)
+    assert (out.get("conversation_context") or {}).get("ready_reply_hash") == digest
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.ready_reply_hash == digest
