@@ -12,6 +12,7 @@ Redis-кеша и не ждёт лайв. Генератор плюсует сч
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from typing import Any
@@ -42,6 +43,7 @@ from graph.fillers import (
     SUBJECT_CITY,
     SUBJECT_COST,
     branch_filler,
+    bridge_filler,
     city_filler,
     cost_filler,
 )
@@ -53,6 +55,7 @@ from graph.history import (
 from graph.log_fmt import (
     format_lookup_done,
     format_plan_done,
+    format_reply_integrity,
     format_spoken_preview,
 )
 from graph.names import given_name
@@ -62,7 +65,7 @@ from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import BranchResolver, CityResolver, resolve_branch, resolve_city
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
-from graph.situations import pick_ack, pick_filler
+from graph.situations import pick_filler
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from kb.client import vector_kb
@@ -627,12 +630,14 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
             "spoken_filler": spoken_filler,
             "filler_subject": filler_subject,
             "fillers_used": fillers_used,
-            "spoken": list(state.get("spoken") or []) + [spoken_filler],
+            # Хвостовой пробел как у say(phrase + " ") — иначе стык с дельтой без
+            # разделителя: «Сейчас.Очень».
+            "spoken": list(state.get("spoken") or []) + [spoken_filler + " "],
             "last_filler_turn": turn if filler_subject is not None else last_filler_turn,
         }
         return out
 
-    # Один отклик на ход — до сетевых вызовов и до раннего выхода.
+    # Предметный зачин только при реальном поиске — до сетевых вызовов и раннего выхода.
     if settings.lookup_fillers_enabled:
         fills_city = _step_fills_city(step)
         if city_asked and fills_city and user_text:
@@ -676,9 +681,6 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 cost_filler(script.params.fillers, used=fillers_used),
                 subject=SUBJECT_COST,
             )
-        elif turn > 1 and not spoken_filler:
-            # Короткий отклик каждый ход, кроме первого (реплики клиента ещё не было).
-            _speak_filler(pick_ack(spoken=fillers_used), subject=None)
 
     if not needs_lookup:
         # Нечего искать — не ждём справочник и не зовём контекстер.
@@ -851,6 +853,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     # Перечень городов генератору не отдаём никогда.
     facts.pop("city_choices", None)
     spoken: list[str] = []
+    streamed: list[str] = []
     ctx = await _load_context(state)
     user_text = last_user_text(state.get("messages") or [])
     # Динамика из кеша: основной ход в модель за контекстом не ходит.
@@ -895,37 +898,93 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
 
+    bridge_task: asyncio.Task[None] | None = None
+
+    async def _bridge_chain() -> None:
+        """Пока модель молчит — короткие связки после зачина."""
+        nonlocal spoken_filler
+        try:
+            for _ in range(settings.bridge_filler_limit):
+                await asyncio.sleep(settings.bridge_filler_delay)
+                phrase = bridge_filler(
+                    settings.agent_bridge_fillers,
+                    used=fillers_used,
+                )
+                if not phrase:
+                    return
+                say(phrase + " ")
+                spoken.append(phrase + " ")
+                fillers_used.append(phrase)
+                if spoken_filler:
+                    spoken_filler = f"{spoken_filler} {phrase}"
+                else:
+                    spoken_filler = phrase
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Связка не удалась: %s", exc)
+
+    if spoken_filler:
+        bridge_task = asyncio.create_task(_bridge_chain())
+
+    def _cancel_bridge() -> None:
+        """Отменяет цепочку связок, если она ещё бежит."""
+        if bridge_task is not None and not bridge_task.done():
+            bridge_task.cancel()
+
     def _on_delta(delta: str) -> None:
+        _cancel_bridge()
+        streamed.append(delta)
         spoken.append(delta)
         say(delta)
 
+    async def _await_bridge_cancelled() -> None:
+        """Дожидается остановки задачи связок после cancel."""
+        if bridge_task is None:
+            return
+        _cancel_bridge()
+        try:
+            await bridge_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
     try:
-        async with get_llm() as llm:
-            raw = await astream_structured(
-                llm,
-                messages,
-                schema=schema,
-                text_field="reply",
-                on_delta=_on_delta,
-                purpose="генератор",
-            )
-    except LLMTurnFailed as exc:
-        reason = str(exc) or "неизвестная причина"
-        log.warning("Подстановка фолбэка: %s", reason)
-        if not spoken:
-            say(script.params.fallback)
-            spoken.append(script.params.fallback)
-        stage("respond", "модель не ответила, отдана аварийная реплика", "done")
-        return {
-            "turn_result": {},
-            "spoken": list(state.get("spoken") or []) + spoken,
-            "last_error": str(exc),
-            "conversation_context": ctx.model_dump(),
-            "spoken_filler": spoken_filler,
-            "fillers_used": fillers_used,
-        }
+        try:
+            async with get_llm() as llm:
+                raw = await astream_structured(
+                    llm,
+                    messages,
+                    schema=schema,
+                    text_field="reply",
+                    on_delta=_on_delta,
+                    purpose="генератор",
+                )
+        except LLMTurnFailed as exc:
+            reason = str(exc) or "неизвестная причина"
+            log.warning("Подстановка фолбэка: %s", reason)
+            if not spoken:
+                say(script.params.fallback)
+                spoken.append(script.params.fallback)
+            stage("respond", "модель не ответила, отдана аварийная реплика", "done")
+            return {
+                "turn_result": {},
+                "spoken": list(state.get("spoken") or []) + spoken,
+                "last_error": str(exc),
+                "conversation_context": ctx.model_dump(),
+                "spoken_filler": spoken_filler,
+                "fillers_used": fillers_used,
+            }
+    finally:
+        await _await_bridge_cancelled()
 
     result = _safe_result(raw)
+    streamed_text = "".join(streamed)
+    integrity = format_reply_integrity(streamed=streamed_text, final=result.reply)
+    if integrity:
+        stage("respond", integrity, "done")
+        log.warning("%s", integrity)
     stage("respond", f"разбор: вопрос {result.aside_id or '—'}", "done", aside_id=result.aside_id)
     return {
         "turn_result": result.model_dump(),

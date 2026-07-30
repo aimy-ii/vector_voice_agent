@@ -190,3 +190,24 @@ def format_spoken_preview(text: str, *, limit: int = SPOKEN_PREVIEW_LEN) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 1].rstrip() + "…"
+
+
+def format_reply_integrity(*, streamed: str, final: str) -> str | None:
+    """Сверяет отданное в поток с финальным текстом модели.
+
+    Args:
+        streamed: склеенные дельты этого хода, ушедшие в эфир.
+        final: поле ``reply`` из ответа модели.
+
+    Returns:
+        Строка для лога, если тексты расходятся; иначе ``None``.
+    """
+    if streamed == final:
+        return None
+    tail = 40
+    stream_tail = streamed[-tail:] if streamed else ""
+    final_tail = final[-tail:] if final else ""
+    return (
+        f"расхождение реплики: поток {len(streamed)} симв. «…{stream_tail}», "
+        f"финал {len(final)} симв. «…{final_tail}»"
+    )

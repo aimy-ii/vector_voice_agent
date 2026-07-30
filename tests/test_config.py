@@ -124,17 +124,34 @@ def test_pending_steps_soft_cap_дефолт_и_алиас():
 
 
 def test_шаблоны_заглушек_без_предлога_и_многоточия():
-    """Дефолты city/branch/общих заглушек — именительный без «по» и без «…»."""
+    """Дефолты city/branch/общих/связок — именительный без «по» и без «…»."""
     import re
 
     prep = re.compile(r"\bпо\s*\{place\}|\bпо\s*\{city\}")
-    pools = (
+    subject_pools = (
         Settings.model_fields["agent_fillers"].default_factory(),
         Settings.model_fields["agent_city_fillers"].default_factory(),
         Settings.model_fields["agent_branch_fillers"].default_factory(),
     )
-    for pool in pools:
+    for pool in subject_pools:
+        tak_count = sum(1 for tpl in pool if tpl.lstrip().startswith("Так"))
+        assert tak_count <= 1, pool
         for tpl in pool:
             assert prep.search(tpl) is None, tpl
             assert not tpl.rstrip().endswith(("…", "...")), tpl
             assert "…" not in tpl and "..." not in tpl, tpl
+            assert tpl.rstrip().endswith((".", "!", "?")), tpl
+    bridges = Settings.model_fields["agent_bridge_fillers"].default_factory()
+    for tpl in bridges:
+        assert "{place}" not in tpl and "{city}" not in tpl, tpl
+        assert not tpl.rstrip().endswith(("…", "...")), tpl
+        assert "…" not in tpl and "..." not in tpl, tpl
+        assert tpl.rstrip().endswith((".", "!", "?")), tpl
+
+
+def test_bridge_filler_настройки_есть():
+    assert Settings.model_fields["bridge_filler_delay"].default == 1.2
+    assert Settings.model_fields["bridge_filler_limit"].default == 2
+    bridges = Settings.model_fields["agent_bridge_fillers"].default_factory()
+    assert bridges
+    assert all("{place}" not in t and "{city}" not in t for t in bridges)

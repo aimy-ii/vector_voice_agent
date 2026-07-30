@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -665,6 +666,8 @@ async def test_заглушка_города_без_модели_и_видна_�
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
     monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_delay", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 0)
     model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
     state = await graph.ainvoke(
         {
@@ -684,15 +687,20 @@ async def test_заглушка_города_без_модели_и_видна_�
     # Резолвер LLM не звался для точного совпадения.
     assert resolvers[0].calls == 0
     prompt = model["messages"][0].content
-    assert "уже ушла фраза" in prompt or filler in prompt
+    assert "продолжить" in prompt.lower() or filler in prompt
     assert "подводку к теме не делать" in prompt.lower()
+    # Ровно один пробел между зачином и первой дельтой генератора.
+    joined = "".join(state.get("spoken") or [])
+    assert filler + " " + "Учиться будете сами?" in joined
+    assert filler + "  " not in joined
 
 
-async def test_короткий_отклик_на_ходу_без_поиска_и_ранний_выход(
+async def test_без_поиска_зачин_не_звучит(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
-    """Без справочника — короткий отклик, filler_subject=None, патч на раннем выходе."""
+    """Без справочника — в эфир только реплика генератора, зачина нет."""
     monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 0)
     model["result"] = {"understood": [], "reply": "Как вас зовут?"}
     state = await graph.ainvoke(
         {
@@ -700,14 +708,9 @@ async def test_короткий_отклик_на_ходу_без_поиска_�
             "turn": 1,
         }
     )
-    assert state.get("spoken_filler")
+    assert not state.get("spoken_filler")
     assert state.get("filler_subject") is None
-    filler = state["spoken_filler"] or ""
-    assert "город" not in filler
-    assert "филиал" not in filler
-    assert filler in (state.get("spoken") or [])
-    assert filler in (state.get("fillers_used") or [])
-    assert any(filler in chunk for chunk in spoken)
+    assert "".join(spoken) == "Как вас зовут?"
 
 
 async def test_на_первом_ходу_отклика_нет(
@@ -728,6 +731,7 @@ async def test_заглушка_филиала_ровно_одна(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
     monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 0)
     model["result"] = {"understood": [], "reply": "Какой адрес удобнее?"}
     state = await graph.ainvoke(
         {
@@ -782,10 +786,11 @@ async def test_заглушка_филиала_ровно_одна(
     assert sum(1 for c in spoken if "филиал" in c) == 1
 
 
-async def test_два_хода_поиска_предмет_не_дважды_но_ack_на_втором(
+async def test_два_хода_поиска_предмет_не_дважды(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
     monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 0)
     model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
     first = await graph.ainvoke(
         {
@@ -853,10 +858,9 @@ async def test_два_хода_поиска_предмет_не_дважды_н�
             "fillers_used": list(first.get("fillers_used") or []),
         }
     )
-    assert second.get("spoken_filler")
+    # Предмет подряд запрещён; короткого отклика больше нет — зачина нет.
+    assert not second.get("spoken_filler")
     assert second.get("filler_subject") is None
-    assert "филиал" not in (second.get("spoken_filler") or "")
-    assert "город" not in (second.get("spoken_filler") or "")
 
 
 async def test_заглушка_не_берёт_текст_клиента(
@@ -882,6 +886,7 @@ async def test_заглушка_не_два_хода_подряд(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
     monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 0)
     model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
     state = await graph.ainvoke(
         {
@@ -893,10 +898,171 @@ async def test_заглушка_не_два_хода_подряд(
             "last_filler_turn": 1,
         }
     )
-    # turn станет 2, last_filler_turn=1 → предметная заглушка молчит, короткий отклик звучит.
-    assert state.get("spoken_filler")
+    # turn станет 2, last_filler_turn=1 → предметная заглушка молчит, короткого отклика нет.
+    assert not state.get("spoken_filler")
     assert state.get("filler_subject") is None
-    assert "город" not in (state.get("spoken_filler") or "")
+
+
+async def test_связки_пока_модель_молчит(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """При нулевой задержке и медленном генераторе связки уходят в эфир и в spoken."""
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_delay", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 2)
+    monkeypatch.setattr(
+        nodes_module.settings,
+        "agent_bridge_fillers",
+        ["Так, вижу.", "Ага, нашла.", "Сейчас."],
+    )
+    # Стабильный порядок: первые две из свежего пула.
+    monkeypatch.setattr("graph.fillers.random.choice", lambda pool: pool[0])
+
+    async def _slow_stream(
+        llm, messages, *, schema, text_field=None, on_delta=None, budget=None, purpose=None
+    ):
+        model["calls"] += 1
+        model["messages"] = messages
+        # Дать цепочке связок отработать оба шага до первой дельты.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        result = model["result"]
+        if text_field and on_delta is not None and result.get(text_field):
+            on_delta(result[text_field])
+        return result
+
+    monkeypatch.setattr(nodes_module, "astream_structured", _slow_stream)
+    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+            "turn": 1,
+        }
+    )
+    joined = "".join(spoken)
+    bridges_heard = [b for b in ("Так, вижу.", "Ага, нашла.", "Сейчас.") if b in joined]
+    assert len(bridges_heard) == 2
+    assert state.get("spoken_filler")
+    for phrase in bridges_heard:
+        assert phrase in (state.get("fillers_used") or [])
+        assert phrase in (state.get("spoken_filler") or "")
+    assert "Учиться будете сами?" in joined
+
+
+async def test_первая_дельта_отменяет_следующую_связку(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_delay", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 2)
+    monkeypatch.setattr(
+        nodes_module.settings,
+        "agent_bridge_fillers",
+        ["Так, вижу.", "Ага, нашла."],
+    )
+    monkeypatch.setattr("graph.fillers.random.choice", lambda pool: pool[0])
+    real_sleep = asyncio.sleep
+    sleep_calls = {"n": 0}
+
+    async def _gated_sleep(delay: float) -> None:
+        """Первая пауза мгновенная; вторая ждёт отмены после дельты."""
+        sleep_calls["n"] += 1
+        if sleep_calls["n"] == 1:
+            await real_sleep(0)
+            return
+        await real_sleep(3600)
+
+    monkeypatch.setattr(nodes_module.asyncio, "sleep", _gated_sleep)
+
+    async def _stream_after_one_bridge(
+        llm, messages, *, schema, text_field=None, on_delta=None, budget=None, purpose=None
+    ):
+        model["calls"] += 1
+        model["messages"] = messages
+        # Первая связка успевает; дальше sleep зависает до cancel из on_delta.
+        await real_sleep(0)
+        await real_sleep(0)
+        result = model["result"]
+        if text_field and on_delta is not None and result.get(text_field):
+            on_delta(result[text_field])
+        await real_sleep(0)
+        return result
+
+    monkeypatch.setattr(nodes_module, "astream_structured", _stream_after_one_bridge)
+    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
+    await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+            "turn": 1,
+        }
+    )
+    joined = "".join(spoken)
+    assert "Так, вижу." in joined
+    assert "Ага, нашла." not in joined
+
+
+async def test_без_зачина_связки_не_запускаются(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_delay", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 2)
+    monkeypatch.setattr(
+        nodes_module.settings,
+        "agent_bridge_fillers",
+        ["Так, вижу.", "Ага, нашла."],
+    )
+    model["result"] = {"understood": [], "reply": "Как вас зовут?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Здравствуйте")],
+            "turn": 1,
+        }
+    )
+    assert not state.get("spoken_filler")
+    assert "Так, вижу." not in "".join(spoken)
+    assert "Ага, нашла." not in "".join(spoken)
+    assert "".join(spoken) == "Как вас зовут?"
+
+
+async def test_ошибка_модели_не_оставляет_связку_висеть(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_delay", 0.0)
+    monkeypatch.setattr(nodes_module.settings, "bridge_filler_limit", 2)
+    monkeypatch.setattr(
+        nodes_module.settings,
+        "agent_bridge_fillers",
+        ["Так, вижу.", "Ага, нашла."],
+    )
+    real_sleep = asyncio.sleep
+
+    async def _hang_sleep(delay: float) -> None:
+        await real_sleep(3600)
+
+    monkeypatch.setattr(nodes_module.asyncio, "sleep", _hang_sleep)
+    model["result"] = LLMTurnFailed("сбой")
+    await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+            "turn": 1,
+        }
+    )
+    after = len(spoken)
+    await real_sleep(0)
+    await real_sleep(0)
+    assert len(spoken) == after
 
 
 async def test_образец_в_промпте_склейки_мимо_модели_нет(

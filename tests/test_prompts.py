@@ -751,10 +751,11 @@ def test_filler_subject_запрещает_подводку(script):
         facts={},
         history=[],
         asides_done=[],
-        spoken_filler="Так, филиал. Секунду, гляну адреса.",
-        filler_subject="филиал",
+        spoken_filler="Секунду, открываю город. Так, вижу.",
+        filler_subject="город",
     )
     content = with_subject[0].content.lower()
+    assert "продолжить" in content
     assert "подводку" in content
     assert "не делать" in content
 
@@ -765,7 +766,7 @@ def test_filler_subject_запрещает_подводку(script):
         facts={},
         history=[],
         asides_done=[],
-        spoken_filler="Так, секунду.",
+        spoken_filler="Секунду.",
         filler_subject=None,
     )
     content_ack = without_subject[0].content.lower()
@@ -774,7 +775,7 @@ def test_filler_subject_запрещает_подводку(script):
 
 
 def test_spoken_filler_запрещает_начало_с_подтверждения(script):
-    """При непустом spoken_filler в системе есть запрет начинать с подтверждения."""
+    """При непустом spoken_filler — продолжить начатую реплику, без подтверждения."""
     for subject in ("филиал", None):
         messages = build_turn_messages(
             script=script,
@@ -787,9 +788,9 @@ def test_spoken_filler_запрещает_начало_с_подтвержден
             filler_subject=subject,
         )
         content = messages[0].content.lower()
+        assert "продолжить" in content
         assert "подтверждающ" in content
         assert "междомет" in content
-        assert "заикание" in content
 
 
 def test_build_turn_messages_без_filler_subject_обратная_совместимость(script):
@@ -802,5 +803,5 @@ def test_build_turn_messages_без_filler_subject_обратная_совмес
         asides_done=[],
         spoken_filler="Секунду, гляну.",
     )
-    assert "уже ушла фраза" in messages[0].content
+    assert "продолжить" in messages[0].content.lower()
     assert "подводку к теме не делать" not in messages[0].content.lower()

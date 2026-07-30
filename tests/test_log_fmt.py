@@ -8,6 +8,7 @@ from graph.log_fmt import (
     format_live_check_state,
     format_lookup_done,
     format_plan_done,
+    format_reply_integrity,
     format_spoken_preview,
 )
 
@@ -108,3 +109,15 @@ def test_format_lookup_done_за_ход():
         )
         == "2 вызова: list_cities, resolve_city"
     )
+
+
+def test_format_reply_integrity_совпадение_и_расхождение():
+    assert format_reply_integrity(streamed="Привет.", final="Привет.") is None
+    mismatch = format_reply_integrity(streamed="Привет", final="Привет.")
+    assert mismatch is not None
+    assert "6" in mismatch and "7" in mismatch
+    assert "Привет" in mismatch
+    one_char = format_reply_integrity(streamed="abc", final="abd")
+    assert one_char is not None
+    assert "3" in one_char
+    assert "abc" in one_char and "abd" in one_char

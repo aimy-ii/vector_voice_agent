@@ -22,23 +22,24 @@ _TERMINAL_PUNCT = ".!?,:;"
 
 #: Запасные шаблоны, если в скрипте пусто. Плейсхолдер ``{place}`` — именительный.
 _DEFAULT_CITY = (
-    "Так, {place}. Секунду, открываю.",
+    "Секунду, открываю {place}.",
     "Угу, {place}. Сейчас гляну.",
     "{place}, да. Минутку, открою карточку.",
     "Так, {place}. Сейчас сверю.",
 )
 
 _DEFAULT_BRANCH = (
-    "Так, {place}. Секунду, гляну адреса.",
-    "Угу, {place}. Минутку, открою.",
+    "Минутку, гляну адреса.",
+    "Угу, {place}. Сейчас посмотрю, что рядом.",
     "{place}, да. Сейчас подберу пару адресов.",
-    "Так, {place}. Сейчас посмотрю, что рядом.",
+    "Так, {place}. Секунду, открою.",
 )
 
 _DEFAULT_COST = (
-    "Так, {place}. Секунду, открою.",
-    "Угу, {place}. Минутку, гляну.",
-    "{place}, да. Сейчас сверю.",
+    "Секунду, гляну.",
+    "Минутку, посмотрю.",
+    "Сейчас уточню.",
+    "Секундочку.",
 )
 
 
@@ -47,6 +48,12 @@ def _ensure_terminal_punct(text: str) -> str:
 
     Многоточие в конце не закрывает сегмент для синтеза, поэтому отклик
     не уходит в эфир вовремя и сливается с репликой генератора.
+
+    Args:
+        text: исходная фраза.
+
+    Returns:
+        Фраза с закрывающей пунктуацией.
     """
     if not text:
         return text
@@ -100,7 +107,15 @@ def city_filler(
     *,
     used: Sequence[str] | None = None,
 ) -> str | None:
-    """Заглушка на поиск города; предмет всегда «город»."""
+    """Заглушка на поиск города; предмет всегда «город».
+
+    Args:
+        templates: шаблоны из скрипта или настроек.
+        used: уже звучавшие фразы в этом звонке.
+
+    Returns:
+        Готовая фраза или ``None``.
+    """
     return pick_filler(
         templates,
         subject=SUBJECT_CITY,
@@ -114,7 +129,15 @@ def branch_filler(
     *,
     used: Sequence[str] | None = None,
 ) -> str | None:
-    """Заглушка на поиск филиала; предмет всегда «филиал»."""
+    """Заглушка на поиск филиала; предмет всегда «филиал».
+
+    Args:
+        templates: шаблоны из скрипта или настроек.
+        used: уже звучавшие фразы в этом звонке.
+
+    Returns:
+        Готовая фраза или ``None``.
+    """
     return pick_filler(
         templates,
         subject=SUBJECT_BRANCH,
@@ -128,10 +151,43 @@ def cost_filler(
     *,
     used: Sequence[str] | None = None,
 ) -> str | None:
-    """Заглушка на поиск стоимости; предмет всегда «стоимость»."""
+    """Заглушка на поиск стоимости; предмет всегда «стоимость».
+
+    Args:
+        templates: шаблоны из скрипта или настроек.
+        used: уже звучавшие фразы в этом звонке.
+
+    Returns:
+        Готовая фраза или ``None``.
+    """
     return pick_filler(
         templates,
         subject=SUBJECT_COST,
         used=used,
         defaults=_DEFAULT_COST,
     )
+
+
+def bridge_filler(
+    templates: Sequence[str],
+    *,
+    used: Sequence[str] | None = None,
+) -> str | None:
+    """Короткая связка, пока генератор ещё не начал отвечать.
+
+    Предмет не подставляется: связка идёт после зачина, тема уже названа.
+
+    Args:
+        templates: шаблоны из настроек.
+        used: фразы, уже звучавшие в этом звонке.
+
+    Returns:
+        Готовая фраза или ``None``, если набор пуст.
+    """
+    pool = [t for t in templates if t and t.strip()]
+    if not pool:
+        return None
+    used_set = set(used or [])
+    fresh = [t for t in pool if t not in used_set]
+    choice = random.choice(fresh or list(pool))
+    return _ensure_terminal_punct(choice)
