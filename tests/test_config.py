@@ -121,3 +121,20 @@ def test_llm_max_tokens_short_есть():
 def test_pending_steps_soft_cap_дефолт_и_алиас():
     assert Settings.model_fields["pending_steps_soft_cap"].default == 4
     assert Settings(pending_steps_soft_cap=3).pending_steps_soft_cap == 3
+
+
+def test_шаблоны_заглушек_без_предлога_и_многоточия():
+    """Дефолты city/branch/общих заглушек — именительный без «по» и без «…»."""
+    import re
+
+    prep = re.compile(r"\bпо\s*\{place\}|\bпо\s*\{city\}")
+    pools = (
+        Settings.model_fields["agent_fillers"].default_factory(),
+        Settings.model_fields["agent_city_fillers"].default_factory(),
+        Settings.model_fields["agent_branch_fillers"].default_factory(),
+    )
+    for pool in pools:
+        for tpl in pool:
+            assert prep.search(tpl) is None, tpl
+            assert not tpl.rstrip().endswith(("…", "...")), tpl
+            assert "…" not in tpl and "..." not in tpl, tpl

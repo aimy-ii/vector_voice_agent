@@ -25,6 +25,9 @@ def test_словарь_имеет_templates_и_default():
     assert len(catalog[TEMPLATES_KEY]) >= 5
     assert all("{subject}" in t for t in catalog[TEMPLATES_KEY])
     assert all("по {subject}" not in t for t in catalog[TEMPLATES_KEY])
+    for key in (DEFAULT_SLUG, TEMPLATES_KEY):
+        for phrase in catalog[key]:
+            assert "…" not in phrase and "..." not in phrase, phrase
 
 
 def test_pick_filler_подстановка_предмета_именительный():
@@ -32,21 +35,20 @@ def test_pick_filler_подстановка_предмета_именитель�
     assert phrase
     assert "филиалы" in phrase
     assert "по филиалы" not in phrase
-    assert "филиалы, да… секунду" in phrase or "филиалы" in phrase
-    assert phrase[-1] in ".!?…,:;"
+    assert phrase.endswith(".")
 
 
 def test_pick_filler_шаблон_филиалы_да_секунду(monkeypatch):
     """Конкретный шаблон даёт именительный без «по»."""
     catalog = load_situations()
-    target = _ensure_terminal_punct("{subject}, да… секунду".format(subject="филиалы"))
+    target = _ensure_terminal_punct("{subject}, да. Секунду.".format(subject="филиалы"))
     monkeypatch.setattr(
         "graph.situations.random.choice",
         lambda pool: next(p for p in pool if p.startswith("филиалы, да")),
     )
     phrase = pick_filler("филиалы")
     assert phrase == target
-    assert phrase == "филиалы, да… секунду."
+    assert phrase == "филиалы, да. Секунду."
     assert "по филиалы" not in phrase
     assert all(t.endswith("{subject}") or "{subject}" in t for t in catalog[TEMPLATES_KEY])
 
@@ -58,7 +60,7 @@ def test_pick_filler_пустой_предмет_берёт_default():
     assert phrase in defaults
     assert pick_filler("") in defaults
     assert pick_filler("   ") in defaults
-    assert phrase[-1] in ".!?…,:;"
+    assert phrase.endswith(".")
 
 
 def test_pick_filler_мимо_уже_звучавших():
@@ -97,12 +99,25 @@ def test_pick_ack_без_предмета_в_default():
     phrase = pick_ack()
     assert "{subject}" not in phrase
     assert "{place}" not in phrase
-    assert phrase[-1] in ".!?…,:;"
+    assert phrase.endswith(".")
+
+
+def test_pick_ack_оканчивается_точкой():
+    """Короткий отклик всегда закрывается точкой."""
+    assert pick_ack().endswith(".")
+
+
+def test_ensure_terminal_punct_многоточие_в_точку():
+    """Конечное многоточие нормализуется в точку."""
+    assert _ensure_terminal_punct("Угу, минутку…") == "Угу, минутку."
+    assert _ensure_terminal_punct("Так, секунду...") == "Так, секунду."
+    assert _ensure_terminal_punct("Секундочку") == "Секундочку."
+    assert _ensure_terminal_punct("Готово.") == "Готово."
 
 
 def test_отсутствие_обязательного_ключа_ошибка_загрузки(tmp_path: Path, monkeypatch):
     bad = tmp_path / "situations.json"
-    bad.write_text(json.dumps({"default": ["так… секунду"]}), encoding="utf-8")
+    bad.write_text(json.dumps({"default": ["Так, секунду."]}), encoding="utf-8")
     monkeypatch.setattr("graph.situations._DATA_PATH", bad)
     load_situations.cache_clear()
     with pytest.raises(RuntimeError, match="templates"):

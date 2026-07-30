@@ -17,26 +17,46 @@ SUBJECT_CITY = "город"
 SUBJECT_BRANCH = "филиал"
 SUBJECT_COST = "стоимость"
 
+#: Знаки, после которых точку в конец фразы не добавляем.
+_TERMINAL_PUNCT = ".!?,:;"
+
 #: Запасные шаблоны, если в скрипте пусто. Плейсхолдер ``{place}`` — именительный.
 _DEFAULT_CITY = (
-    "так, {place}… секунду, открываю",
-    "а, {place}… сейчас гляну",
-    "{place}, да… минутку, открою карточку",
-    "угу, {place}… сейчас сверю",
+    "Так, {place}. Секунду, открываю.",
+    "Угу, {place}. Сейчас гляну.",
+    "{place}, да. Минутку, открою карточку.",
+    "Так, {place}. Сейчас сверю.",
 )
 
 _DEFAULT_BRANCH = (
-    "так, {place}… секунду, гляну адреса",
-    "а, {place}… минутку, открою",
-    "{place}, да… сейчас подберу пару адресов",
-    "угу, {place}… секунду, посмотрю",
+    "Так, {place}. Секунду, гляну адреса.",
+    "Угу, {place}. Минутку, открою.",
+    "{place}, да. Сейчас подберу пару адресов.",
+    "Так, {place}. Сейчас посмотрю, что рядом.",
 )
 
 _DEFAULT_COST = (
-    "так, {place}… секунду, открою",
-    "а, {place}… минутку, гляну",
-    "{place}, да… сейчас сверю",
+    "Так, {place}. Секунду, открою.",
+    "Угу, {place}. Минутку, гляну.",
+    "{place}, да. Сейчас сверю.",
 )
+
+
+def _ensure_terminal_punct(text: str) -> str:
+    """Нормализует хвост фразы: многоточие → точка, иначе точка при нужде.
+
+    Многоточие в конце не закрывает сегмент для синтеза, поэтому отклик
+    не уходит в эфир вовремя и сливается с репликой генератора.
+    """
+    if not text:
+        return text
+    if text.endswith("..."):
+        return text[:-3] + "."
+    if text.endswith("…"):
+        return text[:-1] + "."
+    if text[-1] not in _TERMINAL_PUNCT:
+        return text + "."
+    return text
 
 
 def pick_filler(
@@ -66,11 +86,13 @@ def pick_filler(
     fresh = [t for t in pool if t not in used_set]
     choice = random.choice(fresh or list(pool))
     if "{place}" in choice:
-        return choice.format(place=subject)
-    if "{city}" in choice:
-        return choice.format(city=subject)
-    # Шаблон без плейсхолдера — предмет всё равно зафиксирован кодом.
-    return choice
+        phrase = choice.format(place=subject)
+    elif "{city}" in choice:
+        phrase = choice.format(city=subject)
+    else:
+        # Шаблон без плейсхолдера — предмет всё равно зафиксирован кодом.
+        phrase = choice
+    return _ensure_terminal_punct(phrase)
 
 
 def city_filler(
