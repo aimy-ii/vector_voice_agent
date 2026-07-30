@@ -1513,3 +1513,114 @@ async def test_continuation_не_растит_счётчики(
     for sid, count in before_attempts.items():
         assert int(state["step_attempts"].get(sid, 0)) == count
     assert state["step_status"].get("city") != "closed"
+
+
+async def test_next_step_в_промпте_первый_незакрытый_после_ведущего(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """В промпте next_step — первый незакрытый после ведущего; не висящий."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Обучение под ключ, доплат не будет. Теорию удобнее очно или в приложении?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="дистанционно")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "дистанционно",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state["current_step"] == "included"
+    assert state["next_step"] == "practice"
+    prompt = model["messages"][0].content
+    assert "Ведущий шаг: included" in prompt
+    assert "Следующий шаг: practice" in prompt
+    assert "Висящий шаг: practice" not in prompt
+    assert "только завершающий вопрос" in prompt.lower()
+
+
+async def test_без_следующего_шага_вопрос_ведущего(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Ведущий последний — в промпте нет перехода; конец — вопрос ведущего."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком мессенджере удобнее — Telegram или WhatsApp?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="да, напишите")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+                "branch": "Чернышевского",
+                "outcome": "оформлю дистанционно",
+            },
+            "step_status": {
+                sid: "closed"
+                for sid in (
+                    "name",
+                    "city",
+                    "who_studies",
+                    "experience",
+                    "transmission",
+                    "terms",
+                    "theory_format",
+                    "included",
+                    "practice",
+                    "branch",
+                    "price",
+                    "payment",
+                    "tax_deduction",
+                    "closing",
+                )
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "branch_slug": "perm_chernyshevskogo",
+            },
+        }
+    )
+    assert state["current_step"] == "messenger"
+    assert state.get("next_step") in (None, "")
+    prompt = model["messages"][0].content
+    assert "Ведущий шаг: messenger" in prompt
+    assert "Следующий шаг:" not in prompt
+    assert "только завершающий вопрос" not in prompt.lower()
+    # Вопрос ведущего шага на месте — правило перехода не подменяет его.
+    assert "messenger" in prompt.lower() or "мессенджер" in prompt.lower()

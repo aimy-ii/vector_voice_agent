@@ -34,7 +34,7 @@ from graph.prompts import (
 )
 
 #: Число правил речи — замена формулировок не увеличивает набор.
-_SPEECH_RULES_COUNT = 22
+_SPEECH_RULES_COUNT = 23
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -118,7 +118,7 @@ def test_системное_сообщение_содержит_ключевые
     )
     content = messages[0].content
     assert "только на «Вы»" in content
-    assert "шаг из текущей задачи" in content
+    assert "ведущий шаг" in content.lower()
     assert "форма фразы, а не текст реплики" in content
     assert "Открытых вопросов не задавать" in content
     assert "когда человек сам прощается словами" in content
@@ -362,9 +362,7 @@ def test_промпт_видит_шапку_и_запрет_переспраши
 def test_промпт_держит_границы_шага_и_незакрытый_вопрос(script):
     """Модель не забегает вперёд и возвращается к незакрытому после побочного."""
     natural = naturalness_block(ask_for_move=True).lower()
-    assert "только те вопросы" in natural
-    assert "не придумывать" in natural
-    assert "не забегать" in natural
+    assert "своих вопросов не придумывать" in natural
     assert "заодно" in natural
     assert "до конца" in natural
     assert "вернуться" in natural
@@ -384,7 +382,7 @@ def test_промпт_держит_границы_шага_и_незакрыты
         attempts={"name": 1},
     )
     content = messages[0].content
-    assert "только те вопросы" in content.lower()
+    assert "своих вопросов не придумывать" in content.lower()
     assert "незакрытый вопрос не исчезает" in content.lower()
     assert "name" in content
     assert "уже спрашивали, ответа нет" in content
@@ -439,7 +437,7 @@ def test_шапка_с_висящими_и_образцом_одним_пром�
     assert "terms" in content
     assert _SAMPLE_PREFIX in content
     assert "Шапка скрипта" in content
-    assert "Текущий шаг: city" in content
+    assert "Ведущий шаг: city" in content
     assert "Висящий шаг: terms" in content
 
 
@@ -1000,7 +998,7 @@ def test_build_filler_messages_короче_без_статики_и_приме�
 
 
 def test_шапка_текущим_помечен_первый_не_последний(script):
-    """В шапке из двух шагов текущим помечен первый, а не последний."""
+    """В шапке из двух шагов ведущим помечен первый, а не последний."""
     block = steps_block(
         [script.step("transmission"), script.step("terms")],
         {},
@@ -1008,9 +1006,9 @@ def test_шапка_текущим_помечен_первый_не_послед
         attempts={"transmission": 0},
         new_step_id="transmission",
     )
-    assert "Текущий шаг: transmission" in block
+    assert "Ведущий шаг: transmission" in block
     assert "Висящий шаг: terms" in block
-    lead_i = block.index("Текущий шаг: transmission")
+    lead_i = block.index("Ведущий шаг: transmission")
     hang_i = block.index("Висящий шаг: terms")
     assert lead_i < hang_i
     # Пометка «новый» — у ведущего, не у следующего.
@@ -1021,22 +1019,20 @@ def test_шапка_текущим_помечен_первый_не_послед
 
 
 def test_step_block_с_next_step_текущим_ведущий(script):
-    """step_block с next_step помечает текущим ведущий шаг, не следующий."""
+    """step_block с next_step помечает ведущим ведущий шаг; следующий — только вопрос."""
     block = step_block(
         script.step("terms"),
         {},
         {},
         next_step=script.step("theory_format"),
     )
-    assert "Текущий шаг: terms" in block
-    assert "Висящий шаг: theory_format" in block
-    assert block.index("Текущий шаг: terms") < block.index("Висящий шаг: theory_format")
-    lead_line = next(line for line in block.splitlines() if line.startswith("Текущий шаг: terms"))
-    hang_line = next(
-        line for line in block.splitlines() if line.startswith("Висящий шаг: theory_format")
-    )
+    assert "Ведущий шаг: terms" in block
+    assert "Следующий шаг: theory_format" in block
+    assert "Висящий шаг: theory_format" not in block
+    assert "только завершающий вопрос" in block.lower()
+    assert block.index("Ведущий шаг: terms") < block.index("Следующий шаг: theory_format")
+    lead_line = next(line for line in block.splitlines() if line.startswith("Ведущий шаг: terms"))
     assert "новый вопрос" in lead_line
-    assert "новый вопрос" not in hang_line
 
 
 def test_шапка_запрет_рассказывать_шаги_дальше_ведущего(script):
@@ -1049,7 +1045,7 @@ def test_шапка_запрет_рассказывать_шаги_дальше_
         new_step_id=None,
     )
     lowered = block.lower()
-    assert "первому шагу шапки" in lowered or "текущему" in lowered
+    assert "ведущему шагу" in lowered or "ведущий шаг" in lowered
     assert "не рассказывать" in lowered
     assert "вперёд по ним не забегать" in lowered
     messages = build_turn_messages(
@@ -1064,6 +1060,89 @@ def test_шапка_запрет_рассказывать_шаги_дальше_
     content = messages[0].content.lower()
     assert "не рассказывать" in content
     assert "вперёд по ним не забегать" in content
+
+
+def test_ведущий_и_следующий_разные_роли_только_вопрос(script):
+    """Ведущий и следующий — разные роли; из следующего берётся только вопрос."""
+    block = steps_block(
+        [script.step("included")],
+        {},
+        {},
+        attempts={"included": 0},
+        new_step_id="included",
+        next_step=script.step("theory_format"),
+    )
+    assert "Ведущий шаг: included" in block
+    assert "Следующий шаг: theory_format" in block
+    assert "Висящий шаг: theory_format" not in block
+    lowered = block.lower()
+    assert "только завершающий вопрос" in lowered
+    assert "содержание" in lowered
+    assert "не идут" in lowered
+    # Ведущий — полное описание; следующий — без «Висящий» и с ролью вопроса.
+    assert "Ведущий шаг: included" in block.split("Следующий шаг")[0]
+
+
+def test_запрет_раскрывать_содержание_следующего_шага(script):
+    """В правилах — запрет раскрывать содержание следующего шага заранее."""
+    end_rule = next(rule for rule in SPEECH_RULES if "Пустая проверка в конце запрещена" in rule)
+    assert "не раскрывая" in end_rule.lower() or "раскрыто заранее" in end_rule.lower()
+    assert "содержание следующего шага раскрыто заранее" in end_rule
+    natural = naturalness_block(ask_for_move=True).lower()
+    assert "не раскрывая содержание следующего" in natural
+    assert "раскрыто заранее" in natural
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("included")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        next_step=script.step("theory_format"),
+    )
+    content = messages[0].content.lower()
+    assert "раскрыто заранее" in content or "не раскрывая" in content
+
+
+def test_ход_к_собеседнику_и_запрет_пустых_проверок_вместе(script):
+    """Требование хода к собеседнику и запрет пустых проверок — рядом."""
+    end_rule = next(rule for rule in SPEECH_RULES if "Пустая проверка в конце запрещена" in rule)
+    assert "всегда заканчивается ходом к собеседнику" in end_rule
+    assert "Заканчивать реплику ничем нельзя" in end_rule
+    assert "Продолжим?" in end_rule or "продолжим" in end_rule.lower()
+    assert "вопросы" in end_rule.lower() or "вопросом" in end_rule.lower()
+    natural = naturalness_block(ask_for_move=True)
+    assert "Заканчивать реплику ничем нельзя" in natural
+    assert "Пустая проверка" in natural
+    assert "либо ничем" not in natural.lower()
+
+
+def test_запрет_повторять_и_разворачивать_уже_сказанное(script):
+    """Уже прозвучавшее не повторять и не разворачивать заново."""
+    rule = next(
+        r
+        for r in SPEECH_RULES
+        if "уже прозвучало в предыдущих репликах" in r.lower()
+        or ("не разворачивать заново" in r.lower() and "вскользь" in r.lower())
+    )
+    assert "не повторять" in rule.lower()
+    assert "не разворачивать" in rule.lower()
+    assert "вскользь" in rule.lower()
+    natural = naturalness_block(ask_for_move=True).lower()
+    assert "уже прозвучало" in natural
+    assert "не разворачивать" in natural
+    assert "вскользь" in natural
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("included")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "уже прозвучало" in content
+    assert "вскользь" in content
 
 
 def test_реплика_всегда_ходом_и_запрет_пустых_проверок(script):

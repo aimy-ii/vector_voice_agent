@@ -614,6 +614,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             for step_id, status in (state.get("step_status") or {}).items()
             if status == "closed" and step_id in script.steps
         ]
+        next_step_id = state.get("next_step")
+        next_step = (
+            script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
+        )
         messages = build_turn_messages(
             script=script,
             steps=head,
@@ -621,6 +625,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             facts=facts,
             history=state.get("messages") or [],
             asides_done=list(state.get("asides_done") or []),
+            next_step=next_step,
             context_text=context_text,
             attempts=state.get("step_attempts") or {},
             dynamic_status=dynamic_status,
