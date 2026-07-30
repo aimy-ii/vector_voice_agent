@@ -854,3 +854,40 @@ def test_build_waiting_messages_короче_без_статики_и_факто
     assert "предмет" in content.lower()
     assert len(waiting) - 1 == 4
     assert len(content) * 2 < len(full[0].content)
+
+
+def test_build_filler_messages_короче_без_статики_и_примеров(script):
+    """Живая реакция: без статики/фактов/шапки/примеров, короче waiting."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from core.config import settings
+    from graph.prompts import build_filler_messages, build_waiting_messages
+
+    history = [
+        AIMessage(content="Как вас зовут?"),
+        HumanMessage(content="Меня Андрей зовут"),
+        AIMessage(content="В каком городе?"),
+        HumanMessage(content="Пермь"),
+    ]
+    filler = build_filler_messages(
+        script,
+        messages=history,
+        history_limit=settings.filler_history_limit,
+    )
+    waiting = build_waiting_messages(
+        script,
+        messages=history,
+        profile={"caller_name": "Андрей"},
+        pending_fields=[],
+        step=script.step("name"),
+        history_limit=settings.waiting_history_limit,
+    )
+    content = filler[0].content
+    assert "Статика" not in content
+    assert "Шапка" not in content
+    assert "Факты" not in content
+    assert "сейчас подберу" not in content.lower()
+    assert "например" not in content.lower()
+    assert len(content) * 2 < len(waiting[0].content)
+    assert len(filler) - 1 == settings.filler_history_limit
+    assert filler[-1].content == "Пермь"

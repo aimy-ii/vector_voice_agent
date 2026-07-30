@@ -111,18 +111,12 @@ def test_filler_threshold_ms_отсутствует():
 
 
 def test_waiting_history_дефолт():
-    """Лимит хвоста для реплики ожидания."""
+    """Лимит хвоста для реплики ожидания и живой реакции."""
     assert Settings.model_fields["waiting_history_limit"].default == 4
+    assert Settings.model_fields["filler_history_limit"].default == 2
     assert "searching_stale_turns" not in Settings.model_fields
-
-
-def test_status_wait_дефолты():
-    """Порог и интервал ожидания статуса лайв-канала."""
-    assert Settings.model_fields["status_wait_timeout"].default == 0.4
-    assert Settings.model_fields["status_poll_interval"].default == 0.05
-    s = Settings(status_wait_timeout=0.0, status_poll_interval=0.0)
-    assert s.status_wait_timeout == 0.0
-    assert s.status_poll_interval == 0.0
+    assert "status_wait_timeout" not in Settings.model_fields
+    assert "status_poll_interval" not in Settings.model_fields
 
 
 def test_lookup_fillers_удалены():

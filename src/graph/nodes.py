@@ -15,9 +15,7 @@ Plan читает закрытия из Redis-кеша и не ждёт лайв
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -28,12 +26,11 @@ from langgraph.runtime import Runtime
 from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
-    DYN_MISSING,
     DYN_NONE,
-    DYN_READY,
     DYN_SEARCHING,
     ConversationContext,
     context_from_state,
+    missing_needs,
 )
 from graph.context_store import (
     CONTEXT_FIELDS_TURN,
@@ -53,7 +50,7 @@ from graph.log_fmt import (
     format_spoken_preview,
 )
 from graph.progress import say, stage
-from graph.prompts import build_turn_messages, build_waiting_messages
+from graph.prompts import build_filler_messages, build_turn_messages, build_waiting_messages
 from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import (
     BranchResolver,
@@ -349,52 +346,6 @@ async def _load_context(state: CallState) -> ConversationContext:
     return context_from_state(state.get("conversation_context"))
 
 
-def _status_announced_for_reply(context: ConversationContext, digest: str) -> bool:
-    """Лайв-канал уже отчитался по этой реплике статусом поиска или итога."""
-    if not digest or context.dynamic_reply_hash != digest:
-        return False
-    return context.dynamic_status in (DYN_SEARCHING, DYN_READY, DYN_MISSING)
-
-
-async def _wait_dynamic_status(
-    state: CallState,
-    *,
-    digest: str,
-    initial: ConversationContext,
-) -> tuple[ConversationContext, int]:
-    """Перечитывает кеш, пока лайв не объявит статус по реплике или не выйдет порог.
-
-    Args:
-        state: состояние звонка (для запасного чтения из треда).
-        digest: хеш текущей реплики клиента.
-        initial: уже прочитанный контекст.
-
-    Returns:
-        Пара (контекст, сколько миллисекунд ждали).
-    """
-    if _status_announced_for_reply(initial, digest):
-        return initial, 0
-
-    started = time.perf_counter()
-    deadline = started + float(settings.status_wait_timeout)
-    interval = float(settings.status_poll_interval)
-    ctx = initial
-
-    while True:
-        # Перечит сразу: статус мог появиться между первым чтением и ожиданием.
-        ctx = await _load_context(state)
-        if _status_announced_for_reply(ctx, digest):
-            return ctx, int((time.perf_counter() - started) * 1000)
-        now = time.perf_counter()
-        if now >= deadline:
-            return ctx, int((now - started) * 1000)
-        remaining = deadline - now
-        sleep_for = min(interval, remaining) if interval > 0 else remaining
-        if sleep_for <= 0:
-            return ctx, int((time.perf_counter() - started) * 1000)
-        await asyncio.sleep(sleep_for)
-
-
 async def _save_context(
     context: ConversationContext,
     *,
@@ -596,8 +547,8 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Единственный вызов генератора за ход.
 
-    Читает кеш контекста, выбирает полную или укороченную сборку промпта
-    и генерирует реплику. В справочник не ходит.
+    Читает кеш контекста, выбирает полную, ожидающую или живую сборку
+    промпта и генерирует реплику. В справочник не ходит.
     """
     script = _script_of(state)
     head = _head_steps(state)
@@ -611,18 +562,9 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     profile = dict(state.get("profile") or {})
     is_continuation = turn_kind == "continuation"
 
-    # Пока лайв не объявил статус по реплике — коротко ждём объявления, не работы.
-    status_wait_ms = 0
     digest = reply_hash(user_text) if user_text else ""
-    if not is_continuation and digest and not _status_announced_for_reply(ctx, digest):
-        ctx, status_wait_ms = await _wait_dynamic_status(
-            state,
-            digest=digest,
-            initial=ctx,
-        )
-
-    # Статус «в поиске» по этой реплике — короткая сборка; иначе полная.
-    # На продолжении всегда полная. Хеш чужой реплики не подхватываем.
+    lead = head[0] if head else None
+    lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
     searching = (
         not is_continuation
         and bool(user_text)
@@ -633,18 +575,39 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     dynamic_status = ctx.dynamic_status or DYN_NONE
     pending_fields = list(ctx.pending_fields or [])
 
-    if searching:
+    if is_continuation:
+        prompt_kind = "full"
+        prompt_reason = "продолжение"
+        expect_continuation = False
+    elif searching:
+        prompt_kind = "waiting"
+        prompt_reason = "статус поиска"
+        expect_continuation = True
+    elif lead_missing:
+        prompt_kind = "filler"
+        prompt_reason = f"недостающие данные ведущего шага: {', '.join(lead_missing)}"
+        expect_continuation = True
+    else:
+        prompt_kind = "full"
+        prompt_reason = "данных достаточно"
+        expect_continuation = False
+
+    if prompt_kind == "waiting":
         messages = build_waiting_messages(
             script,
             messages=state.get("messages") or [],
             profile=profile,
             pending_fields=pending_fields,
-            step=head[0] if head else None,
+            step=lead,
             history_limit=settings.waiting_history_limit,
             turn_kind=turn_kind,
         )
-        prompt_kind = "waiting"
-        expect_continuation = True
+    elif prompt_kind == "filler":
+        messages = build_filler_messages(
+            script,
+            messages=state.get("messages") or [],
+            history_limit=settings.filler_history_limit,
+        )
     else:
         closed_steps = [
             script.steps[step_id]
@@ -666,20 +629,15 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             turn_kind=turn_kind,
             closed_steps=closed_steps,
         )
-        prompt_kind = "full"
-        expect_continuation = False
 
     system_len = len(messages[0].content) if messages else 0
     stage(
         "prompt",
-        (
-            f"сборка {prompt_kind}, системное сообщение {system_len} символов, "
-            f"ожидание статуса {status_wait_ms} мс"
-        ),
+        f"сборка {prompt_kind}, {prompt_reason}, системное сообщение {system_len} символов",
         "done",
         chars=system_len,
         prompt=prompt_kind,
-        status_wait_ms=status_wait_ms,
+        reason=prompt_reason,
     )
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
 

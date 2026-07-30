@@ -654,6 +654,7 @@ async def test_live_check_контекстер_пишет_динамику_в_к
         branch=None,
     )
     monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.vector_kb", fake_kb)
     monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
 
     with (
@@ -683,8 +684,10 @@ async def test_live_check_контекстер_пишет_динамику_в_к
     assert loaded.static_text == "Город: Пермь"
 
 
-async def test_live_check_тянет_филиалы_города_для_агента(script, monkeypatch, _offline_context):
-    """При городе без филиала лайв тянет list_branches и передаёт агенту."""
+async def test_live_check_не_тянет_филиалы_пока_агент_не_выбрал(
+    script, monkeypatch, _offline_context
+):
+    """Пока агент не выбрал branches, list_branches не зовём и список агенту пуст."""
     from graph.context import ConversationContext
     from tests.conftest import FakeKB
 
@@ -734,9 +737,8 @@ async def test_live_check_тянет_филиалы_города_для_аген
         mock_settings.script_version = script.version
         await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
-    assert "list_branches" in fake_kb.calls
-    assert len(seen["branches"]) == 2
-    assert seen["branches"][0]["slug"] == "perm_lenina"
+    assert "list_branches" not in fake_kb.calls
+    assert seen["branches"] == []
 
 
 async def test_live_check_при_выбранном_филиале_список_не_тянется(

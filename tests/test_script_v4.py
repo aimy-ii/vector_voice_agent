@@ -36,7 +36,7 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
         assert isinstance(dumped["knowledge"], list)
         if not dumped["knowledge"]:
             empty_knowledge += 1
-    assert empty_knowledge == 8
+    assert empty_knowledge == 10
     experience = script_v4.step("experience")
     assert "подбадривать" in experience.requirements
 
@@ -209,8 +209,13 @@ def test_промпт_v4_пустой_knowledge_без_строки_нехват
 def test_прогрев_по_всему_списку_knowledge(script_v4):
     """needs_of / прогрев идут по всему списку knowledge."""
     city = script_v4.step("city")
-    assert needs_of(city) == ["city_choices"]
+    assert city.knowledge == []
+    assert needs_of(city) == []
     assert needs_of(city) == needs_from_knowledge(city.knowledge)
+
+    branch = script_v4.step("branch")
+    assert branch.knowledge == []
+    assert needs_of(branch) == []
 
     terms = script_v4.step("terms")
     needs = needs_of(terms)
@@ -220,11 +225,12 @@ def test_прогрев_по_всему_списку_knowledge(script_v4):
     assert "время до первого занятия по вождению" in terms.knowledge
     assert needs_from_knowledge(["время до первого занятия по вождению"]) == []
 
+    included = script_v4.step("included")
+    assert "city_meta" in needs_of(included)
+
     price = script_v4.step("price")
     assert needs_of(price) == ["price"]
-
-    branch = script_v4.step("branch")
-    assert "branches" in needs_of(branch)
+    assert price.knowledge
 
 
 def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, data_dir, monkeypatch):

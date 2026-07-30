@@ -420,3 +420,83 @@ def context_from_state(data: Mapping[str, Any] | None) -> ConversationContext:
     if not data:
         return ConversationContext()
     return ConversationContext.model_validate(dict(data))
+
+
+def _city_known(
+    context: ConversationContext,
+    profile: Mapping[str, str] | None,
+) -> bool:
+    """Город уже назван: в контексте или в форме разговора."""
+    if (context.city_slug or "").strip() or (context.city_name or "").strip():
+        return True
+    if profile and str(profile.get("city") or "").strip():
+        return True
+    return False
+
+
+def _has_city_static(context: ConversationContext) -> bool:
+    """В контексте уже запечена статика города."""
+    return bool((context.city_slug or "").strip() and (context.static_text or "").strip())
+
+
+def _has_price_static(context: ConversationContext) -> bool:
+    """В статике уже есть готовая фраза о цене."""
+    return "Цена (готовая фраза" in (context.static_text or "")
+
+
+def _has_branch_static(context: ConversationContext) -> bool:
+    """В статике уже есть блок выбранного филиала."""
+    return "Выбранный филиал" in (context.static_text or "")
+
+
+def _has_branches_dynamic(context: ConversationContext) -> bool:
+    """В динамике уже лежит список филиалов."""
+    return "Филиалы" in (context.dynamic_text or "")
+
+
+def missing_needs(
+    context: ConversationContext,
+    needs: Sequence[str],
+    profile: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Оставляет потребности, за которыми действительно надо идти.
+
+    Потребность остаётся, если нужного нет в контексте и есть от чего
+    плясать: городских данных не существует, пока не известен город.
+
+    Args:
+        context: текущий контекст разговора.
+        needs: потребности справочника (``needs_of``).
+        profile: форма разговора; из неё берутся город и филиал.
+
+    Returns:
+        Недостающие потребности в порядке поступления.
+    """
+    city_known = _city_known(context, profile)
+    branch_selected = bool((context.branch_slug or "").strip())
+    if profile and str(profile.get("branch") or "").strip():
+        branch_selected = True
+
+    missing: list[str] = []
+    for raw in needs:
+        need = str(raw).strip()
+        if not need:
+            continue
+        if need == "city_choices":
+            if not city_known:
+                missing.append(need)
+        elif need == "city_meta":
+            if city_known and not _has_city_static(context):
+                missing.append(need)
+        elif need == "price":
+            if city_known and not _has_price_static(context):
+                missing.append(need)
+        elif need == "branches":
+            if city_known and not branch_selected and not _has_branches_dynamic(context):
+                missing.append(need)
+        elif need == "branch_meta":
+            if branch_selected and not _has_branch_static(context):
+                missing.append(need)
+        else:
+            missing.append(need)
+    return missing

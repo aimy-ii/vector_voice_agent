@@ -170,9 +170,22 @@ def _valid_branch_slugs(
     slugs: Sequence[str],
     branches: Sequence[Mapping[str, Any]],
 ) -> list[str]:
-    """Оставляет только слаги из перечня, не больше трёх, порядок сохраняет."""
-    allowed = {str(b.get("slug")) for b in branches if b.get("slug")}
+    """Оставляет только слаги из перечня, не больше трёх, порядок сохраняет.
+
+    Пустой перечень — слаги пока не фильтруем: списка ещё нет, контекстер
+    подгрузит филиалы после выбора инструмента и проверит слаги сам.
+    """
     out: list[str] = []
+    if not branches:
+        for slug in slugs:
+            text = str(slug).strip()
+            if not text or text in out:
+                continue
+            out.append(text)
+            if len(out) >= 3:
+                break
+        return out
+    allowed = {str(b.get("slug")) for b in branches if b.get("slug")}
     for slug in slugs:
         text = str(slug).strip()
         if not text or text not in allowed or text in out:

@@ -281,6 +281,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         reply=reply,
         tools=build_context_tools(script),
         needs=needs,
+        profile=profile,
         objections=script.objections,
     )
 

@@ -22,6 +22,7 @@ from graph.context import (
     DYN_READY,
     DYN_SEARCHING,
     ConversationContext,
+    missing_needs,
 )
 from graph.context_agent import ContextAgent, decide_context
 from graph.context_store import (
@@ -81,6 +82,23 @@ def _triggers_catalogue(
 ) -> dict[str, Sequence[str]]:
     """Идентификатор → признаки срабатывания."""
     return {item_id: item.triggers for item_id, item in items.items()}
+
+
+def _valid_branch_slugs(
+    slugs: Sequence[str],
+    branches: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Оставляет слаги из перечня, не больше трёх; порядок сохраняет."""
+    allowed = {str(b.get("slug")) for b in branches if b.get("slug")}
+    out: list[str] = []
+    for slug in slugs:
+        text = str(slug).strip()
+        if not text or text not in allowed or text in out:
+            continue
+        out.append(text)
+        if len(out) >= 3:
+            break
+    return out
 
 
 def _append_dynamic(context: ConversationContext, text: str) -> None:
@@ -197,6 +215,30 @@ def _finish(
     return updated
 
 
+def _apply_status(
+    updated: ConversationContext,
+    *,
+    got: bool,
+    invoked: bool,
+    marked_searching: bool,
+    prior_status: str,
+    prior_hash: str,
+    prior_subject: str | None,
+) -> None:
+    """Ставит итог по факту вызовов; без вызовов статус не трогает."""
+    if got:
+        _mark_ready(updated)
+        updated.filler_spoken = False
+        return
+    if invoked:
+        _mark_missing(updated)
+        return
+    if marked_searching:
+        updated.dynamic_status = prior_status
+        updated.dynamic_reply_hash = prior_hash
+        updated.situation_slug = prior_subject
+
+
 async def _run_tool(
     tool: ContextTool,
     query: str,
@@ -218,27 +260,29 @@ async def _fulfill_needs(
     reply: str,
     needs: Sequence[str],
     tools: Sequence[ContextTool],
-) -> bool:
+) -> tuple[bool, bool]:
     """Исполняет потребности шага без агента.
 
     Args:
         context: контекст; инструменты могут обновить статику на месте.
         reply: реплика клиента (для резолва города).
-        needs: потребности справочника из ``needs_of``.
+        needs: потребности справочника из ``missing_needs``.
         tools: реестр инструментов.
 
     Returns:
-        True — хотя бы один инструмент вернул данные или дописал статику.
+        Пара ``(got, invoked)``: данные получены; был хотя бы один вызов.
     """
     if not needs:
-        return False
+        return False, False
     got = False
+    invoked = False
     city_before = context.city_slug
     branch_before = context.branch_slug
 
     if not context.city_slug and (reply or "").strip() and "city_choices" in needs:
         city_tool = _tool_by_name(tools, "city")
         if city_tool is not None:
+            invoked = True
             found = await _run_tool(city_tool, reply, context)
             if (found or "").strip():
                 _append_dynamic(context, found)
@@ -251,6 +295,7 @@ async def _fulfill_needs(
         facts_tool = _tool_by_name(tools, "facts")
         if facts_tool is not None and hasattr(facts_tool, "needs"):
             facts_tool.needs = list(fact_needs)  # type: ignore[attr-defined]
+            invoked = True
             found = await _run_tool(facts_tool, "", context)
             if (found or "").strip():
                 _append_dynamic(context, found)
@@ -261,13 +306,14 @@ async def _fulfill_needs(
     if "branch_meta" in needs and context.branch_slug:
         details = _tool_by_name(tools, "branch_details")
         if details is not None:
+            invoked = True
             found = await _run_tool(details, "", context)
             if (found or "").strip() or (
                 context.branch_slug and context.branch_slug != branch_before
             ):
                 got = True
 
-    return got
+    return got, invoked
 
 
 async def run_contexter(
@@ -276,20 +322,22 @@ async def run_contexter(
     reply: str,
     tools: Sequence[ContextTool],
     needs: Sequence[str] = (),
+    profile: Mapping[str, str] | None = None,
     objections: Mapping[str, Objection] | None = None,
     agent: ContextAgent | None = None,
     branches: Sequence[Mapping[str, Any]] = (),
 ) -> ConversationContext:
     """Наполняет динамику/статику и ставит статус поиска.
 
-    Порядок: повтор реплики → потребности шага («в поиске» до справочника) →
-    возражение (агента не зовём) → агент → инструменты агента.
+    Порядок: повтор реплики → недостающие потребности («в поиске» до
+    справочника) → возражение (агента не зовём) → агент → инструменты.
 
     Args:
         context: текущий контекст разговора.
         reply: реплика клиента на этот ход.
         tools: реестр инструментов.
         needs: потребности справочника по шапке хода (``needs_of``).
+        profile: форма разговора; нужна ``missing_needs`` для города/филиала.
         objections: возражения скрипта; при совпадении агента не зовём.
         agent: подмена агента для офлайн-тестов.
         branches: филиалы города для отбора слагов агентом.
@@ -305,43 +353,46 @@ async def run_contexter(
         return updated
 
     need_list = [str(n).strip() for n in needs if str(n).strip()]
+    missing = missing_needs(updated, need_list, profile)
     marked_searching = False
     got = False
+    invoked = False
+    prior_status = updated.dynamic_status
+    prior_hash = updated.dynamic_reply_hash
+    prior_subject = updated.situation_slug
 
-    if need_list:
+    if missing:
         # Потребности шага → поход точно будет: статус до любого справочника.
         _mark_searching(updated, digest=digest)
         await _persist_dynamic(updated)
         marked_searching = True
-        got = await _fulfill_needs(updated, reply=reply, needs=need_list, tools=tools)
+        got, invoked = await _fulfill_needs(updated, reply=reply, needs=missing, tools=tools)
 
     # Возражения — тактика разговора; к потребностям шага отношения не имеют.
     if objections and find_aside(reply, _triggers_catalogue(objections)):
         if got:
             _mark_ready(updated)
             updated.filler_spoken = False
-        elif need_list:
+        elif invoked:
             _mark_missing(updated)
+        elif marked_searching:
+            updated.dynamic_status = prior_status
+            updated.dynamic_reply_hash = prior_hash
+            updated.situation_slug = prior_subject
         else:
             _mark_none(updated)
         return _finish(
             updated,
             reply=reply,
-            tool=("facts" if need_list else None),
+            tool=("facts" if missing else None),
             subject="",
             started=started,
-            needed=bool(need_list),
+            needed=bool(missing),
         )
 
-    branches_for_agent: list[Mapping[str, Any]] = []
-    if branches:
-        branches_for_agent = list(branches)
-    elif (
-        _tool_by_name(tools, "branches") is not None
-        and (updated.city_slug or "").strip()
-        and not (updated.branch_slug or "").strip()
-    ):
-        branches_for_agent = await _load_branches(updated, branches)
+    # Список филиалов агенту — только явно переданный; иначе подгрузим,
+    # если агент сам выберет branches.
+    branches_for_agent: list[Mapping[str, Any]] = list(branches) if branches else []
 
     decision = await decide_context(
         reply,
@@ -351,7 +402,7 @@ async def run_contexter(
         branches=branches_for_agent,
     )
 
-    if not need_list and not decision.need:
+    if not missing and not decision.need:
         # Ничего не предстоит — статус не трогаем.
         return _finish(
             updated,
@@ -363,39 +414,60 @@ async def run_contexter(
             branch_slugs=decision.branch_slugs,
         )
 
-    if not marked_searching:
-        _mark_searching(updated, digest=digest, subject=decision.subject)
-        await _persist_dynamic(updated)
-
     agent_tool_name: str | None = None
+    branch_slugs: list[str] = list(decision.branch_slugs)
     if decision.need:
+        if not marked_searching:
+            _mark_searching(updated, digest=digest, subject=decision.subject)
+            await _persist_dynamic(updated)
+            marked_searching = True
         tool = _tool_by_name(tools, decision.tool)
         if tool is not None:
             agent_tool_name = decision.tool
+            slugs: Sequence[str] = decision.branch_slugs
             if decision.tool == "branches":
-                await _load_branches(updated, branches)
-            found = await _run_tool(
-                tool,
-                decision.query,
-                updated,
-                slugs=decision.branch_slugs,
-            )
-            if (found or "").strip():
-                _append_dynamic(updated, found)
-                got = True
+                loaded = await _load_branches(updated, branches)
+                if loaded:
+                    branch_slugs = _valid_branch_slugs(decision.branch_slugs, loaded)
+                else:
+                    # Перечень не подгрузился — слаги агента идут в инструмент как есть.
+                    branch_slugs = [
+                        str(s).strip() for s in decision.branch_slugs if str(s).strip()
+                    ][:3]
+                if not branch_slugs:
+                    # Слагов нет — вызова инструмента не было.
+                    agent_tool_name = None
+                    tool = None
+                else:
+                    slugs = branch_slugs
+            if tool is not None:
+                invoked = True
+                found = await _run_tool(
+                    tool,
+                    decision.query,
+                    updated,
+                    slugs=slugs,
+                )
+                if (found or "").strip():
+                    _append_dynamic(updated, found)
+                    got = True
 
-    if got:
-        _mark_ready(updated)
-        updated.filler_spoken = False
-    else:
-        _mark_missing(updated)
+    _apply_status(
+        updated,
+        got=got,
+        invoked=invoked,
+        marked_searching=marked_searching,
+        prior_status=prior_status,
+        prior_hash=prior_hash,
+        prior_subject=prior_subject,
+    )
 
     return _finish(
         updated,
         reply=reply,
-        tool=agent_tool_name or ("facts" if need_list else None),
+        tool=agent_tool_name or ("facts" if missing else None),
         subject=decision.subject,
         started=started,
-        needed=True,
-        branch_slugs=decision.branch_slugs,
+        needed=bool(missing or decision.need),
+        branch_slugs=branch_slugs,
     )

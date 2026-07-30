@@ -87,11 +87,12 @@ class _FakeTool:
 
 
 def test_run_contexter_без_allow_searching():
-    """Аргумента allow_searching больше нет; needs и branches есть."""
+    """Аргумента allow_searching больше нет; needs, profile и branches есть."""
     params = inspect.signature(run_contexter).parameters
     assert "allow_searching" not in params
     assert "branches" in params
     assert "needs" in params
+    assert "profile" in params
 
 
 async def test_need_false_не_требуется():
@@ -340,9 +341,13 @@ async def test_needs_без_агента_и_searching_до_справочник�
 
     tool = _Facts()
     agent = _FakeAgent(ContextDecision(need=False))
-    # Без city_slug — _load_branches не ходит в справочник.
     out = await run_contexter(
-        ConversationContext(dynamic_turn=2),
+        ConversationContext(
+            city_slug="perm",
+            city_name="Пермь",
+            static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+            dynamic_turn=2,
+        ),
         reply="сколько стоит?",
         tools=[tool],
         needs=["price"],
@@ -373,7 +378,11 @@ async def test_needs_пустой_ответ_missing(monkeypatch):
             return ""
 
     out = await run_contexter(
-        ConversationContext(),
+        ConversationContext(
+            city_slug="perm",
+            city_name="Пермь",
+            static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        ),
         reply="цена?",
         tools=[_EmptyFacts()],
         needs=["price"],
@@ -381,6 +390,67 @@ async def test_needs_пустой_ответ_missing(monkeypatch):
     )
     assert out.dynamic_status == DYN_MISSING
     assert out.dynamic_reply_hash == reply_hash("цена?")
+
+
+async def test_без_города_city_meta_статус_не_трогается():
+    """Профиль без города и потребность city_meta — справочник молчит, статус как был."""
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+        calls = 0
+
+        async def run(self, query, context, *, slugs=()):
+            self.calls += 1
+            return "не должен"
+
+    facts = _Facts()
+    seeded = ConversationContext(dynamic_status=DYN_READY, dynamic_reply_hash="old")
+    out = await run_contexter(
+        seeded,
+        reply="расскажите про сроки",
+        tools=[facts],
+        needs=["city_meta"],
+        profile={},
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert facts.calls == 0
+    assert out.dynamic_status == DYN_READY
+    assert out.dynamic_reply_hash == "old"
+
+
+async def test_город_есть_статики_нет_searching_до_вызова(monkeypatch):
+    """Город известен, статики нет — статус «в поиске» до первого вызова."""
+    from graph import contexter as contexter_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "_call_id", lambda: "local")
+
+    statuses_at_kb: list[str] = []
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+
+        async def run(self, query, context, *, slugs=()):
+            loaded = await mem.load("local")
+            assert loaded is not None
+            statuses_at_kb.append(loaded.dynamic_status)
+            return 'Факты:\n{"city": {"name": "Пермь"}}'
+
+    out = await run_contexter(
+        ConversationContext(),
+        reply="сроки?",
+        tools=[_Facts()],
+        needs=["city_meta"],
+        profile={"city": "Пермь"},
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert statuses_at_kb == [DYN_SEARCHING]
+    assert out.dynamic_status == DYN_READY
 
 
 async def test_без_needs_и_без_агента_статус_не_трогается():
@@ -427,7 +497,11 @@ async def test_возражение_не_отменяет_потребности
     agent = _FakeAgent(ContextDecision(need=True, tool="branches", subject="филиалы"))
     branches_tool = _FakeTool("branches", "не должен ответить")
     out = await run_contexter(
-        ConversationContext(static_text="Город: Пермь"),
+        ConversationContext(
+            city_slug="perm",
+            city_name="Пермь",
+            static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        ),
         reply="дороговато",
         tools=[facts, branches_tool],
         needs=["price"],
@@ -439,6 +513,40 @@ async def test_возражение_не_отменяет_потребности
     assert branches_tool.calls == []
     assert out.dynamic_status == DYN_READY
     assert "price_line" in out.dynamic_text
+
+
+async def test_ни_одного_вызова_статус_не_трогается_без_missing():
+    """Потребность есть, но данных хватает — вызовов нет, DYN_MISSING не появляется."""
+    seeded = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        dynamic_status=DYN_READY,
+        dynamic_reply_hash="keep",
+    )
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+        calls = 0
+
+        async def run(self, query, context, *, slugs=()):
+            self.calls += 1
+            return ""
+
+    facts = _Facts()
+    out = await run_contexter(
+        seeded,
+        reply="угу",
+        tools=[facts],
+        needs=["city_meta"],
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert facts.calls == 0
+    assert out.dynamic_status == DYN_READY
+    assert out.dynamic_reply_hash == "keep"
+    assert out.dynamic_status != DYN_MISSING
 
 
 async def test_возражение_без_needs_не_требуется():
@@ -467,7 +575,7 @@ async def test_возражение_без_needs_не_требуется():
 
 
 async def test_филиалы_не_грузятся_если_агент_не_за_ними(monkeypatch):
-    """Без инструмента branches справочник филиалов не зовём."""
+    """Даже при инструменте branches справочник не зовём, пока агент не выбрал его."""
     from graph import contexter as contexter_module
 
     calls: list[str] = []
@@ -481,7 +589,7 @@ async def test_филиалы_не_грузятся_если_агент_не_з�
     out = await run_contexter(
         ConversationContext(city_slug="perm"),
         reply="угу",
-        tools=[_FakeTool("faq", "ответ")],
+        tools=[_FakeTool("branches", "не должен"), _FakeTool("faq", "ответ")],
         agent=_FakeAgent(ContextDecision(need=False)),
     )
     assert calls == []
@@ -516,7 +624,7 @@ async def test_филиалы_грузятся_когда_агент_выбра�
         tools=[tool],
         agent=agent,
     )
-    assert calls  # хотя бы один поход: для агента и/или для инструмента
+    assert calls  # хотя бы один поход: для валидации слагов и/или инструмента
     assert all(c == "perm" for c in calls)
     assert tool.calls == ["Ленина"]
     assert out.dynamic_status == DYN_READY
