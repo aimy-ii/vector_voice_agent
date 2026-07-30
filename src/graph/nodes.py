@@ -472,6 +472,12 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
+    # Новый шаг — со счётчиком 0 до инкремента; после плюса считать нельзя.
+    new_step_id = next(
+        (s.id for s in head if int(progress.attempts.get(s.id, 0)) == 0),
+        None,
+    )
+
     # Шаг попал в шапку — генератор мог его отработать, для чекера задан.
     for head_step in head:
         prev = int(progress.attempts.get(head_step.id, 0))
@@ -522,6 +528,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "current_step": step.id if step is not None else None,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
+        "head_new_step": new_step_id,
         "route": route,
     }
 
@@ -835,6 +842,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         attempts=state.get("step_attempts") or {},
         dynamic_status=ctx.dynamic_status,
         searching_retry=searching_retry,
+        new_step_id=state.get("head_new_step"),
     )
     system_len = len(messages[0].content) if messages else 0
     stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)

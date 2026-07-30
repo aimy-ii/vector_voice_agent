@@ -93,22 +93,31 @@ def _gender_speech_rule(gender: str) -> str:
     return "О себе — в женском роде: «поняла», «посмотрела», «уточнила». Мужской род — ошибка."
 
 
-def naturalness_block(*, ask_for_move: bool) -> str:
+def naturalness_block(*, ask_for_move: bool, pending_only: bool = False) -> str:
     """Собирает блок естественности реплики.
 
     Args:
         ask_for_move: True — требовать заканчивать вопросом или предложением
             (в шапке есть незакрытый вопрос). False — этот пункт не включать.
+        pending_only: True — ход к собеседнику только по уже висящему вопросу,
+            без новой темы; False — обычная формулировка пункта.
 
     Returns:
         Текстовый блок для системного сообщения.
     """
     lines = ["Естественность:"]
     if ask_for_move:
-        lines.append(
-            "- Реплика заканчивается ходом к собеседнику — вопросом или конкретным "
-            "предложением. Исключение — только прощание."
-        )
+        if pending_only:
+            lines.append(
+                "- Реплика заканчивается ходом к собеседнику по уже висящему "
+                "вопросу — переформулировать его проще или помочь ответить, "
+                "а не открывать новую тему. Исключение — только прощание."
+            )
+        else:
+            lines.append(
+                "- Реплика заканчивается ходом к собеседнику — вопросом или конкретным "
+                "предложением. Исключение — только прощание."
+            )
     lines.extend(
         [
             "- Режим живого телефонного разговора, а не рекламного "
@@ -385,6 +394,7 @@ def steps_block(
     *,
     attempts: Mapping[str, int],
     context_text: str = "",
+    new_step_id: str | None = None,
 ) -> str:
     """Описывает шапку: уже заданные и один новый.
 
@@ -394,6 +404,8 @@ def steps_block(
         facts: факты хода (без перечня городов).
         attempts: счётчики попыток.
         context_text: документ контекста для проверки нехватки знаний.
+        new_step_id: шаг, впервые попавший в шапку на этот ход; ``None`` —
+            шапка целиком из висящих, новый вопрос задавать нельзя.
 
     Returns:
         Текстовый блок.
@@ -404,14 +416,28 @@ def steps_block(
             "подводить разговор к завершению."
         )
 
-    lines = [
-        "Шапка скрипта на этот ход — текущие незакрытые шаги. Новый вопрос — "
-        "только один; спрашивать только то, что в этих шагах, ничего сверх. "
-        "Уже спрашивавшиеся (ответа ещё нет) — незакрытая задача: "
-        "вернуться к ним после побочного обмена. Не затыкать ими каждую реплику. "
-        "Если в задачах есть и рассказ, и вопрос — рассказать и задать этот "
-        "вопрос в одной реплике, а не разносить на два хода."
-    ]
+    if new_step_id is not None:
+        intro = (
+            "Шапка скрипта на этот ход — текущие незакрытые шаги. Новый вопрос — "
+            "только один; спрашивать только то, что в этих шагах, ничего сверх. "
+            "Уже спрашивавшиеся (ответа ещё нет) — незакрытая задача: "
+            "вернуться к ним после побочного обмена. Не затыкать ими каждую реплику. "
+            "Если в задачах есть и рассказ, и вопрос — рассказать и задать этот "
+            "вопрос в одной реплике, а не разносить на два хода."
+        )
+    else:
+        intro = (
+            "Шапка скрипта на этот ход — текущие незакрытые шаги. Новых вопросов "
+            "на этот ход нет: ни одного нового вопроса не задавать и не придумывать. "
+            "Работать с тем, что уже висит: помочь человеку ответить, "
+            "переформулировать проще, снять затруднение, дать недостающий факт. "
+            "Ход к собеседнику делать по висящему шагу, а не новой темой. "
+            "Уже спрашивавшиеся (ответа ещё нет) — незакрытая задача: "
+            "вернуться к ним после побочного обмена. Не затыкать ими каждую реплику. "
+            "Если в задачах есть и рассказ, и вопрос — рассказать и задать этот "
+            "вопрос в одной реплике, а не разносить на два хода."
+        )
+    lines = [intro]
     for step in steps:
         lines.append("")
         lines.extend(
@@ -453,7 +479,14 @@ def step_block(
     bundle: list[AnyStep] = [step]
     if next_step is not None:
         bundle.append(next_step)
-    return steps_block(bundle, profile, facts, attempts=counts, context_text=context_text)
+    return steps_block(
+        bundle,
+        profile,
+        facts,
+        attempts=counts,
+        context_text=context_text,
+        new_step_id=bundle[-1].id,
+    )
 
 
 def facts_block(facts: Mapping[str, Any]) -> str:
@@ -575,6 +608,7 @@ def build_turn_messages(
     attempts: Mapping[str, int] | None = None,
     dynamic_status: str = "",
     searching_retry: bool = False,
+    new_step_id: str | None = None,
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к генератору.
 
@@ -596,6 +630,8 @@ def build_turn_messages(
         attempts: счётчики попыток.
         dynamic_status: статус динамики контекста.
         searching_retry: повторный «в поиске» после заглушки.
+        new_step_id: шаг, впервые взятый в шапку на этот ход; ``None`` —
+            шапка из висящих, новый вопрос задавать нельзя.
 
     Returns:
         Список сообщений: одно системное и хвост истории.
@@ -612,9 +648,10 @@ def build_turn_messages(
         head = []
 
     ask_for_move = bool(head)
+    pending_only = ask_for_move and new_step_id is None
     blocks: list[str] = [
         persona_block(),
-        naturalness_block(ask_for_move=ask_for_move),
+        naturalness_block(ask_for_move=ask_for_move, pending_only=pending_only),
         unknown_block(script),
     ]
     status_note = dynamic_status_block(status=dynamic_status, searching_retry=searching_retry)
@@ -632,7 +669,16 @@ def build_turn_messages(
     if facts_text:
         blocks.append(facts_text)
 
-    blocks.append(steps_block(head, profile, facts, attempts=counts, context_text=ctx_for_steps))
+    blocks.append(
+        steps_block(
+            head,
+            profile,
+            facts,
+            attempts=counts,
+            context_text=ctx_for_steps,
+            new_step_id=new_step_id,
+        )
+    )
     if not script.is_sales:
         blocks.append(aside_block(script, asides_done))
     filler = filler_spoken_block(spoken_filler)

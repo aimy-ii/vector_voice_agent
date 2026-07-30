@@ -663,3 +663,64 @@ async def test_филиал_проверяется_по_перечислению
 def test_context_block_пустой():
     assert context_block("") == ""
     assert "Пермь" in context_block("город Пермь")
+
+
+def test_шапка_из_висящих_запрещает_новый_вопрос(script):
+    """Без нового шага — запрет сочинять вопрос, нет «новый вопрос — только один»."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name"), script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        attempts={"name": 2, "city": 2},
+        new_step_id=None,
+    )
+    content = messages[0].content
+    lowered = content.lower()
+    assert "ни одного нового вопроса не задавать" in lowered
+    assert "новый вопрос — только один" not in lowered
+
+
+def test_шапка_с_новым_шагом_текст_прежний(script):
+    """Есть новый шаг — вводная как раньше, запрета сочинять нет."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name"), script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        attempts={"name": 2, "city": 1},
+        new_step_id="city",
+    )
+    content = messages[0].content
+    assert "новый вопрос — только один" in content.lower()
+    assert "нового вопроса не задавать" not in content.lower()
+
+
+def test_naturalness_pending_only_отличается_от_обычного():
+    """pending_only меняет пункт про ход к собеседнику, остальное общее."""
+    ordinary = naturalness_block(ask_for_move=True, pending_only=False)
+    pending = naturalness_block(ask_for_move=True, pending_only=True)
+    assert ordinary != pending
+    assert "вопросом или конкретным" in ordinary.lower()
+    assert "висящему" in pending.lower()
+    assert "новую тему" in pending.lower()
+    assert "не оценивать" in ordinary.lower() and "не оценивать" in pending.lower()
+
+
+def test_build_turn_messages_без_new_step_id_обратная_совместимость(script):
+    """Вызов без new_step_id не падает и собирает системное сообщение."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[HumanMessage(content="здравствуйте")],
+        asides_done=[],
+    )
+    assert isinstance(messages[0], SystemMessage)
+    assert messages[0].content
+    assert messages[-1].content == "здравствуйте"

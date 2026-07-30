@@ -76,6 +76,10 @@ class CallState(TypedDict, total=False):
         city_slug / city_name / branch_slug: фиксации справочника.
         conversation_context: единый документ контекста.
         head_steps: шапка шагов этого хода.
+        head_new_step: идентификатор шага, взятого в шапку впервые на этом
+            ходу; ``None`` — новых шагов нет, добор отсечён или все шаги
+            висящие. Считать по счётчикам в промпте нельзя: к моменту
+            генерации они уже увеличены.
         spoken_filler: заглушка, ушедшая в эфир до генератора.
         last_filler_turn: номер хода, на котором звучала заглушка.
         branch_candidates: отобранные резолвером слаги филиалов.
@@ -113,6 +117,7 @@ class CallState(TypedDict, total=False):
     current_step: str | None
     next_step: str | None
     head_steps: list[str]
+    head_new_step: str | None
     outcome: str | None
 
     tool_log: list[dict[str, Any]]
@@ -159,6 +164,7 @@ def new_state_defaults() -> dict[str, Any]:
         "current_step": None,
         "next_step": None,
         "head_steps": [],
+        "head_new_step": None,
         "outcome": None,
         "tool_log": [],
         "turn": 0,

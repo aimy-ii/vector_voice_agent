@@ -876,6 +876,31 @@ async def test_счётчик_растёт_у_всех_шагов_шапки(
     # Свежий who_studies тоже в шапке — счётчик с нуля.
     assert attempts.get("who_studies") == 1
     assert state["head_steps"] == ["name", "city", "who_studies"]
+    assert state.get("head_new_step") == "who_studies"
+
+
+async def test_head_new_step_none_когда_все_висящие(
+    spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
+):
+    """Мягкий потолок: шапка из висящих — head_new_step is None."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 2)
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="ну не знаю пока")],
+            "step_status": {"name": "pending", "city": "pending"},
+            "step_attempts": {"name": 1, "city": 1},
+            "step_taken_turn": {"name": 1, "city": 1},
+            "turn": 3,
+        }
+    )
+    assert state["head_steps"] == ["name", "city"]
+    assert state.get("head_new_step") is None
 
 
 async def test_taken_turn_всем_шапке_без_перезаписи(
