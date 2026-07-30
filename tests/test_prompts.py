@@ -128,7 +128,7 @@ def test_системное_сообщение_содержит_ключевые
 
 
 def test_системное_сообщение_содержит_правила_реакции_и_хвостов(script):
-    """Реакция по делу, конец реплики и запрет пустых проверок — замены, не дубли."""
+    """Реакция по делу и запрет пустых проверок в конце — без дежурных хвостов."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -141,18 +141,17 @@ def test_системное_сообщение_содержит_правила_�
     assert "Если по ответу человека есть что сказать по делу" in content
     assert "без предисловия" in content
     assert "Вежливые пустышки" in content
-    assert "Реплика всегда заканчивается передачей хода собеседнику" in content
-    assert "Что скажете?" in content
-    assert "Пока всё понятно?" in content
-    assert "Продолжу?" in content
-    assert "Молчать после рассказа нельзя" in content
+    assert "Пустая проверка в конце запрещена" in content
+    assert "любой ответ не меняет следующий шаг" in content
     assert "Спрашивать согласие с содержанием" in content
     assert "пустая проверка, на которую человек отвечает «да»" in content
-    assert "Короткий возврат хода после рассказа" in content
-    assert "запретом не считается" in content
     assert "рассказать и задать этот вопрос в одной реплике" in content
     assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
     assert "в живой речи не встречаются" in content
+    assert "Реплика всегда заканчивается передачей хода собеседнику" not in content
+    assert "Короткий возврат хода после рассказа" not in content
+    assert "запретом не считается" not in content
+    assert "Молчать после рассказа нельзя" not in content
     assert "Каждая реплика заканчивается вопросом или конкретным предложением" not in content
     assert "Проверочный вопрос в конце рассказа спрашивает о том" not in content
     assert "Спрашивать надо предметно" not in content
@@ -167,24 +166,21 @@ def test_системное_сообщение_содержит_правила_�
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
 
 
-def test_правила_передачи_хода_и_запрета_проверок_идут_подряд():
-    """Передача хода и запрет пустых проверок стоят рядом как одно целое."""
-    turn_idx = next(
-        i for i, rule in enumerate(SPEECH_RULES) if "передачей хода собеседнику" in rule
+def test_правила_окончания_и_запрета_проверок_идут_подряд():
+    """Окончание реплики и запрет согласия с содержанием стоят рядом."""
+    end_idx = next(
+        i for i, rule in enumerate(SPEECH_RULES) if "Пустая проверка в конце запрещена" in rule
     )
-    check_idx = next(
-        i
-        for i, rule in enumerate(SPEECH_RULES)
-        if "согласие с содержанием" in rule and "запретом не считается" in rule
-    )
-    assert check_idx == turn_idx + 1
-    turn_rule = SPEECH_RULES[turn_idx]
+    check_idx = next(i for i, rule in enumerate(SPEECH_RULES) if "согласие с содержанием" in rule)
+    assert check_idx == end_idx + 1
+    end_rule = SPEECH_RULES[end_idx]
     check_rule = SPEECH_RULES[check_idx]
-    assert "Что скажете?" in turn_rule
-    assert "Пока всё понятно?" in turn_rule
-    assert "Продолжу?" in turn_rule
-    assert "Молчать после рассказа нельзя" in turn_rule
-    assert "Короткий возврат хода после рассказа" in check_rule
+    assert "вопросом по делу" in end_rule or "вопрос по делу" in end_rule
+    assert "любой ответ не меняет следующий шаг" in end_rule
+    assert "пустая проверка" in check_rule.lower()
+    assert "запретом не считается" not in check_rule
+    assert "Что скажете?" not in end_rule
+    assert "Продолжу?" not in end_rule
 
 
 def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
@@ -202,11 +198,12 @@ def test_скрипты_v1_v4_собирают_ход_с_правилами_ре
         assert isinstance(messages[0], SystemMessage)
         content = messages[0].content
         assert "Если по ответу человека есть что сказать по делу" in content
-        assert "Реплика всегда заканчивается передачей хода собеседнику" in content
+        assert "Пустая проверка в конце запрещена" in content
         assert "Спрашивать согласие с содержанием" in content
-        assert "запретом не считается" in content
         assert "рассказать и задать этот вопрос в одной реплике" in content
         assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
+        assert "Реплика всегда заканчивается передачей хода собеседнику" not in content
+        assert "запретом не считается" not in content
         assert "Каждая реплика заканчивается вопросом или конкретным предложением" not in content
         assert "Проверочный вопрос в конце рассказа спрашивает о том" not in content
         assert "Реплика состоит из двух частей" not in content
@@ -762,6 +759,69 @@ def test_naturalness_не_пересказывать_ответ_клиента(s
     content = messages[0].content.lower()
     assert "не повторять" in content
     assert "отметка" in content
+
+
+def test_naturalness_запрет_пустых_проверок_в_конце(script):
+    """Конец реплики — вопрос по делу или ничего; пустые проверки запрещены."""
+    text = naturalness_block(ask_for_move=True).lower()
+    assert "пустая проверка" in text
+    assert "не меняет следующий шаг" in text
+    assert "продолжу?" in text
+    assert "теорию удобнее" in text
+    assert "одинаковый конец не повторяется" in text
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "пустая проверка" in content
+    assert "не меняет следующий шаг" in content
+    assert "двигал" in content or "двигает разговор" in content
+
+
+def test_naturalness_добавлять_новое_а_не_пересказывать_вопрос(script):
+    """Ответ обязан добавить новое; пересказ вопроса клиента — не ответ."""
+    text = naturalness_block(ask_for_move=True).lower()
+    assert "ещё не знает" in text
+    assert "тавтология" in text or "другими словами — не ответ" in text
+    assert "ручной коробкой" in text
+    assert "лада гранта" in text
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "ещё не знает" in content
+    assert "пересказом вопроса" in content or "другими словами — не ответ" in content
+
+
+def test_naturalness_называть_данные_сразу_из_контекста(script):
+    """Данные из контекста произносятся в этой же реплике, без отложенного обещания."""
+    text = naturalness_block(ask_for_move=True).lower()
+    assert "прямо сейчас" in text
+    assert "назову" in text
+    assert "комендантская" in text
+    assert "коломяжский" in text
+    assert "следующая реплика обязана" in text
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "прямо сейчас" in content
+    assert "целиком" in content
 
 
 def test_naturalness_редкое_обращение_по_имени(script):
