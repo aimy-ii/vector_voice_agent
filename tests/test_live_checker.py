@@ -595,6 +595,7 @@ async def test_check_pass_логирует_висящие_перед_модел�
 async def test_live_check_контекстер_пишет_динамику_в_кеш(script, monkeypatch, _offline_context):
     """Лайв-канал читает контекст из кеша с городом и пишет только динамику."""
     from graph.context import DYN_READY, ConversationContext
+    from tests.conftest import FakeKB
 
     text = "какие филиалы у Ленина?"
     fact = "Филиалы под запрос: ул. Ленина, 1."
@@ -620,12 +621,18 @@ async def test_live_check_контекстер_пишет_динамику_в_к
         name = "branches"
         description = "филиалы"
 
-        async def run(self, query: str, context: ConversationContext) -> str:
+        async def run(self, query: str, context: ConversationContext, *, slugs=()) -> str:
             assert context.city_slug == "perm"
             return fact
 
     async def _decide(*a, **k):
-        return ContextDecision(need=True, tool="branches", query="Ленина", subject="филиалы")
+        return ContextDecision(
+            need=True,
+            tool="branches",
+            query="Ленина",
+            subject="филиалы",
+            branch_slugs=["perm_lenina"],
+        )
 
     async def fake_load(_state):
         return progress
@@ -633,7 +640,14 @@ async def test_live_check_контекстер_пишет_динамику_в_к
     async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
 
+    fake_kb = FakeKB(
+        cities=[],
+        city=None,
+        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
+        branch=None,
+    )
     monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
 
     with (
         patch("graph.checker_graph._checker_client", client),
@@ -660,3 +674,116 @@ async def test_live_check_контекстер_пишет_динамику_в_к
     assert fact in loaded.dynamic_text
     assert loaded.city_slug == "perm"
     assert loaded.static_text == "Город: Пермь"
+
+
+async def test_live_check_тянет_филиалы_города_для_агента(script, monkeypatch, _offline_context):
+    """При городе без филиала лайв тянет list_branches и передаёт агенту."""
+    from graph.context import ConversationContext
+    from tests.conftest import FakeKB
+
+    text = "какие филиалы у Ленина?"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            city_name="Пермь",
+        ),
+    )
+
+    branches = [
+        {"slug": "perm_lenina", "address": "ул. Ленина, 1", "landmark": "центр"},
+        {"slug": "perm_mira", "address": "ул. Мира, 2"},
+    ]
+    fake_kb = FakeKB(cities=[], city=None, branches=branches, branch=None)
+    seen: dict[str, Any] = {}
+
+    async def _decide(reply, context, tools, *, branches=(), agent=None):
+        seen["branches"] = list(branches)
+        return ContextDecision(need=False)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert "list_branches" in fake_kb.calls
+    assert len(seen["branches"]) == 2
+    assert seen["branches"][0]["slug"] == "perm_lenina"
+
+
+async def test_live_check_при_выбранном_филиале_список_не_тянется(
+    script, monkeypatch, _offline_context
+):
+    """Если филиал уже выбран — list_branches для агента не зовём."""
+    from graph.context import ConversationContext
+    from tests.conftest import FakeKB
+
+    text = "а адрес какой?"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            city_name="Пермь",
+            branch_slug="perm_lenina",
+        ),
+    )
+
+    fake_kb = FakeKB(
+        cities=[],
+        city=None,
+        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
+        branch={"slug": "perm_lenina", "address": "ул. Ленина, 1"},
+    )
+    seen: dict[str, Any] = {}
+
+    async def _decide(reply, context, tools, *, branches=(), agent=None):
+        seen["branches"] = list(branches)
+        return ContextDecision(need=False)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert "list_branches" not in fake_kb.calls
+    assert seen["branches"] == []

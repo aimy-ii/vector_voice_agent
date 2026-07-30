@@ -16,6 +16,8 @@ from typing import Mapping, Sequence
 DEFAULT_SLUG = "default"
 #: Имя ключа с шаблонами, куда подставляется предмет.
 TEMPLATES_KEY = "templates"
+#: Знаки, после которых точку в конец фразы не добавляем.
+_TERMINAL_PUNCT = ".!?…,:;"
 
 _DATA_PATH = Path(__file__).resolve().parent / "data" / "situations.json"
 
@@ -43,12 +45,21 @@ def load_situations() -> Mapping[str, tuple[str, ...]]:
     return result
 
 
+def _ensure_terminal_punct(text: str) -> str:
+    """Гарантирует, что фраза заканчивается знаком препинания."""
+    if text and text[-1] not in _TERMINAL_PUNCT:
+        return text + "."
+    return text
+
+
 def pick_filler(subject: str | None, *, spoken: Sequence[str] = ()) -> str:
     """Готовая фраза-заглушка по предмету вопроса.
 
     Непустой предмет → случайный шаблон из ``templates`` с подстановкой
     ``{subject}``. Пустой → случайная фраза из ``default``. Молчания не бывает.
     Выбор мимо уже звучавших в этом звонке. Вызовов модели ноль.
+    Если после подстановки фраза не заканчивается знаком препинания —
+    добавляется точка, чтобы заглушка не склеивалась с репликой генератора.
 
     Args:
         subject: предмет вопроса одним-двумя словами или пусто.
@@ -60,12 +71,12 @@ def pick_filler(subject: str | None, *, spoken: Sequence[str] = ()) -> str:
     catalog = load_situations()
     text = (subject or "").strip()
     if text:
-        pool = [tpl.format(subject=text) for tpl in catalog[TEMPLATES_KEY]]
+        pool = [_ensure_terminal_punct(tpl.format(subject=text)) for tpl in catalog[TEMPLATES_KEY]]
     else:
-        pool = list(catalog[DEFAULT_SLUG])
+        pool = [_ensure_terminal_punct(p) for p in catalog[DEFAULT_SLUG]]
     used = set(spoken or [])
     fresh = [p for p in pool if p not in used]
     choice = random.choice(fresh or pool)
     if not choice:
-        return catalog[DEFAULT_SLUG][0]
+        return _ensure_terminal_punct(catalog[DEFAULT_SLUG][0])
     return choice

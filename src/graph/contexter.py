@@ -4,16 +4,16 @@
 для ситуативной заглушки и по результату выставляет статус динамики.
 Статику не трогает — её пишут ``lookup_node`` и прогрев лайв-канала.
 Возражения остаются тактикой скрипта: при совпадении статус «не требуется».
+
+Работает в лайв-канале: инструмент всегда дожидаемся, спешить некуда.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
-from core.config import settings
 from graph.context import (
     DYN_MISSING,
     DYN_NONE,
@@ -69,7 +69,10 @@ def _mark_missing(context: ConversationContext) -> None:
 
 
 def _mark_searching(context: ConversationContext, subject: str) -> None:
-    """Статус «в поиске»: заглушка в эфир, результат в этот ход не ждём."""
+    """Статус «в поиске»: заглушка в эфир, результат в этот ход не ждём.
+
+    Остаётся в контракте на случай, когда инструмент действительно долгий.
+    """
     context.dynamic_status = DYN_SEARCHING
     context.situation_slug = (subject or "").strip() or None
     context.filler_spoken = False
@@ -99,6 +102,7 @@ def _finish(
     subject: str,
     started: float,
     needed: bool,
+    branch_slugs: Sequence[str] = (),
 ) -> ConversationContext:
     """Выставляет ``dynamic_reply``, пишет лог и возвращает контекст."""
     updated.dynamic_reply = reply
@@ -111,6 +115,7 @@ def _finish(
             status=updated.dynamic_status,
             elapsed_ms=elapsed_ms,
             needed=needed,
+            branch_slugs_count=len(branch_slugs) if tool == "branches" else None,
         ),
         "done",
     )
@@ -124,13 +129,13 @@ async def run_contexter(
     tools: Sequence[ContextTool],
     objections: Mapping[str, Objection] | None = None,
     agent: ContextAgent | None = None,
-    allow_searching: bool = False,
+    branches: Sequence[Mapping[str, Any]] = (),
 ) -> ConversationContext:
     """Наполняет динамику контекста и ставит ей статус.
 
     Единственный писатель динамической части. Агент решает, нужен ли
     поход и каким инструментом. Возражения не трогает — это тактика
-    генератора.
+    генератора. Инструмент всегда дожидаемся — контекстер в лайв-канале.
 
     Args:
         context: текущий контекст разговора.
@@ -138,8 +143,7 @@ async def run_contexter(
         tools: реестр инструментов для агента.
         objections: возражения скрипта; при совпадении статус «не требуется».
         agent: подмена агента для офлайн-тестов.
-        allow_searching: True — при таймауте инструмента статус «в поиске»;
-            False — дождаться результата (лайв-канал).
+        branches: филиалы города для отбора слагов агентом.
 
     Returns:
         Контекст с обновлённой динамикой и статусом; статика без изменений.
@@ -159,7 +163,7 @@ async def run_contexter(
             needed=False,
         )
 
-    decision = await decide_context(reply, updated, tools, agent=agent)
+    decision = await decide_context(reply, updated, tools, agent=agent, branches=branches)
     if not decision.need:
         _mark_none(updated)
         return _finish(
@@ -169,6 +173,7 @@ async def run_contexter(
             subject=decision.subject,
             started=started,
             needed=False,
+            branch_slugs=decision.branch_slugs,
         )
 
     tool = _tool_by_name(tools, decision.tool)
@@ -181,27 +186,11 @@ async def run_contexter(
             subject=decision.subject,
             started=started,
             needed=False,
+            branch_slugs=decision.branch_slugs,
         )
 
     try:
-        if allow_searching:
-            found = await asyncio.wait_for(
-                tool.run(decision.query, updated),
-                timeout=settings.context_tool_timeout,
-            )
-        else:
-            found = await tool.run(decision.query, updated)
-    except TimeoutError:
-        # Только при allow_searching: короткий таймаут срывает ожидание.
-        _mark_searching(updated, decision.subject)
-        return _finish(
-            updated,
-            reply=reply,
-            tool=decision.tool,
-            subject=decision.subject,
-            started=started,
-            needed=True,
-        )
+        found = await tool.run(decision.query, updated, slugs=decision.branch_slugs)
     except Exception as exc:  # noqa: BLE001
         log.warning("Инструмент контекстера не ответил: %s", exc)
         found = ""
@@ -220,4 +209,5 @@ async def run_contexter(
         subject=decision.subject,
         started=started,
         needed=True,
+        branch_slugs=decision.branch_slugs,
     )

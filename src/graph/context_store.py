@@ -29,8 +29,12 @@ CONTEXT_FIELDS_STATIC: frozenset[str] = frozenset(
 CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(
     {"dynamic_text", "dynamic_status", "situation_slug", "filler_spoken", "dynamic_reply"}
 )
+#: Поля хода: пишет только основной ход после генерации.
+CONTEXT_FIELDS_TURN: frozenset[str] = frozenset({"last_agent_reply"})
 #: Все поля контекста (полная запись без слияния).
-CONTEXT_FIELDS_ALL: frozenset[str] = CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC
+CONTEXT_FIELDS_ALL: frozenset[str] = (
+    CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC | CONTEXT_FIELDS_TURN
+)
 
 
 def merge_context_fields(

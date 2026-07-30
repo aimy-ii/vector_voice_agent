@@ -6,6 +6,7 @@ from graph.context import DYN_NONE, DYN_READY, ConversationContext
 from graph.context_store import (
     CONTEXT_FIELDS_DYNAMIC,
     CONTEXT_FIELDS_STATIC,
+    CONTEXT_FIELDS_TURN,
     MemoryContextStore,
     merge_context_fields,
 )
@@ -101,3 +102,40 @@ def test_merge_не_затирает_непустую_статику_пусто�
     assert merged.city_name == "Пермь"
     assert merged.dynamic_text == "новое"
     assert merged.dynamic_status == DYN_READY
+
+
+async def test_поля_хода_пишутся_отдельно_не_затирают_статику_и_динамику(
+    memory_context_store: MemoryContextStore,
+):
+    """last_agent_reply пишется набором TURN и не трогает остальные поля."""
+    store = memory_context_store
+    base = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        city_name="Пермь",
+        dynamic_text="Филиалы под запрос: ул. Ленина, 1.",
+        dynamic_status=DYN_READY,
+        dynamic_reply="какие у Ленина?",
+        last_agent_reply="",
+    )
+    await store.save("c1", base)
+
+    turn_overlay = ConversationContext(
+        last_agent_reply="Рядом с Ленина есть филиал.",
+        static_text="",
+        dynamic_text="",
+        dynamic_status=DYN_NONE,
+    )
+    cached = await store.load("c1")
+    assert cached is not None
+    merged = merge_context_fields(cached, turn_overlay, CONTEXT_FIELDS_TURN)
+    await store.save("c1", merged)
+
+    loaded = await store.load("c1")
+    assert loaded is not None
+    assert loaded.last_agent_reply == "Рядом с Ленина есть филиал."
+    assert loaded.static_text == "Город: Пермь"
+    assert loaded.city_slug == "perm"
+    assert "Филиалы под запрос" in loaded.dynamic_text
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_reply == "какие у Ленина?"

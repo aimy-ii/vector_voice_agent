@@ -10,7 +10,6 @@ from langchain_core.messages import HumanMessage
 
 from graph import nodes as nodes_module
 from graph.context import DYN_MISSING, DYN_NONE, DYN_READY, DYN_SEARCHING, ConversationContext
-from graph.context_agent import ContextDecision
 from graph.context_store import MemoryContextStore
 from graph.prompts import build_turn_messages, dynamic_status_block
 from graph.state import new_state_defaults
@@ -121,17 +120,17 @@ async def test_генератор_в_поиске_отдаёт_заглушку_
 ):
     model["result"] = {"understood": [], "reply": "Продолжаем."}
 
-    async def _keep_searching(context, **kwargs: Any):
-        return context
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться из respond")
 
-    monkeypatch.setattr(nodes_module, "run_contexter", _keep_searching)
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
     reply = "а медкомиссия?"
     ctx = ConversationContext(
         static_text="Город: Пермь",
         dynamic_status=DYN_SEARCHING,
         situation_slug="медкомиссия",
         filler_spoken=False,
-        dynamic_reply="",
+        dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
     state: dict[str, Any] = {
@@ -149,6 +148,10 @@ async def test_генератор_в_поиске_отдаёт_заглушку_
     assert "медкомиссия" in filler
     assert out["conversation_context"]["filler_spoken"] is True
     assert any(filler in chunk for chunk in spoken)
+    # Между заглушкой и репликой генератора — пробел в spoken.
+    joined = "".join(spoken)
+    assert "Продолжаем." in joined
+    assert filler + " " in joined or filler.rstrip() + " " in joined
     assert model["calls"] == 1
 
 
@@ -162,18 +165,19 @@ async def test_генератор_повторный_в_поиске_фразу_
         calls.append("pick")
         return "НЕ ДОЛЖНА ЗВУЧАТЬ"
 
-    async def _keep_searching(context, **kwargs: Any):
-        return context
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться из respond")
 
     monkeypatch.setattr(nodes_module, "pick_filler", _no_pick)
-    monkeypatch.setattr(nodes_module, "run_contexter", _keep_searching)
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
     reply = "ну что там?"
     ctx = ConversationContext(
         static_text="Город: Пермь\nСекрет",
         dynamic_status=DYN_SEARCHING,
         situation_slug="филиалы",
         filler_spoken=True,
-        dynamic_reply="",
+        dynamic_reply=reply,
+        dynamic_text="Секретный факт",
     )
     await ctx_store.save("local", ctx)
     state: dict[str, Any] = {
@@ -183,7 +187,7 @@ async def test_генератор_повторный_в_поиске_фразу_
         "script_version": "2",
         "current_step": "name",
         "head_steps": ["name"],
-        "fillers_used": ["так, по филиалы… секундочку"],
+        "fillers_used": ["так, филиалы… секундочку."],
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
@@ -195,68 +199,56 @@ async def test_генератор_повторный_в_поиске_фразу_
     assert "пауза-заглушка уже звучала" in prompt.lower()
 
 
-async def test_контекстер_до_respond_кладёт_динамику(
+async def test_respond_читает_динамику_из_кеша_без_контекстера(
     spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
-    """Контекстер вызывается до генерации; ответ инструмента уже в промпте."""
+    """Основной ход только читает готовую динамику из кеша."""
     model["result"] = {"understood": [], "aside_id": None, "reply": "Медкомиссия отдельно."}
     fact = "Медкомиссия понадобится к началу практики."
+    reply = "а когда медкомиссию проходить?"
 
-    class _Tool:
-        name = "city_faq"
-        description = "faq"
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться из respond")
 
-        async def run(self, query: str, context: ConversationContext) -> str:
-            return fact
-
-    async def _decide(*a, **k):
-        return ContextDecision(
-            need=True, tool="city_faq", query="медкомиссия", subject="медкомиссия"
-        )
-
-    monkeypatch.setattr(nodes_module, "build_context_tools", lambda script: [_Tool()])
-    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        dynamic_text=fact,
+        dynamic_status=DYN_READY,
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
 
     state: dict[str, Any] = {
         **new_state_defaults(),
-        "messages": [HumanMessage(content="а когда медкомиссию проходить?")],
+        "messages": [HumanMessage(content=reply)],
         "script_id": "vector_ru",
         "script_version": "2",
         "current_step": "name",
         "head_steps": ["name"],
-        "conversation_context": {"static_text": "Город: Пермь"},
+        "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    ctx = out["conversation_context"]
-    assert ctx["dynamic_status"] == DYN_READY
-    assert fact in ctx["dynamic_text"]
     prompt = model["messages"][0].content
     assert fact in prompt
+    assert fact in out["conversation_context"]["dynamic_text"]
     assert model["calls"] == 1
 
 
-async def test_контекстер_на_lookup_кладёт_динамику(spoken, store, ctx_store, use_v2, monkeypatch):
-    """На маршруте lookup контекстер тоже наполняет динамику до respond."""
+async def test_lookup_не_зовёт_контекстер(spoken, store, ctx_store, use_v2, monkeypatch):
+    """На маршруте lookup контекстер не вызывается."""
     from tests.conftest import FakeKB
 
-    fact = "Медкомиссия понадобится к началу практики."
     fake = FakeKB(cities=[], city=None, branches=[], branch=None)
     monkeypatch.setattr(nodes_module, "vector_kb", fake)
 
-    class _Tool:
-        name = "city_faq"
-        description = "faq"
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться из lookup")
 
-        async def run(self, query: str, context: ConversationContext) -> str:
-            return fact
-
-    async def _decide(*a, **k):
-        return ContextDecision(
-            need=True, tool="city_faq", query="медкомиссия", subject="медкомиссия"
-        )
-
-    monkeypatch.setattr(nodes_module, "build_context_tools", lambda script: [_Tool()])
-    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+    # run_contexter больше не импортируется в nodes — шпион на модуле contexter.
+    if hasattr(nodes_module, "run_contexter"):
+        monkeypatch.setattr(nodes_module, "run_contexter", _spy)
 
     closed = {
         "name": "closed",
@@ -298,6 +290,11 @@ async def test_контекстер_на_lookup_кладёт_динамику(sp
         },
     }
     out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
-    ctx = out["conversation_context"]
-    assert ctx["dynamic_status"] == DYN_READY
-    assert fact in ctx["dynamic_text"]
+    # Lookup мог вернуть пустой патч или статику — динамики от контекстера нет.
+    ctx = out.get("conversation_context") or {}
+    assert (
+        ctx.get("dynamic_text", "") == ""
+        or "dynamic_text" not in ctx
+        or not ctx.get("dynamic_status")
+        or ctx.get("dynamic_status") in (DYN_NONE, None, "")
+    )

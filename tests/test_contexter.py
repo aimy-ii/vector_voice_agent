@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -10,7 +11,6 @@ from graph.context import (
     DYN_MISSING,
     DYN_NONE,
     DYN_READY,
-    DYN_SEARCHING,
     ConversationContext,
 )
 from graph.context_agent import ContextDecision
@@ -30,9 +30,11 @@ class _FakeAgent:
         self.decision = decision or ContextDecision()
         self.error = error
         self.calls: list[str] = []
+        self.branches: list = []
 
-    async def decide(self, reply, context, tools, faq_questions) -> ContextDecision:
+    async def decide(self, reply, context, tools, faq_questions, branches=()) -> ContextDecision:
         self.calls.append(reply)
+        self.branches = list(branches)
         if self.error is not None:
             raise self.error
         return self.decision
@@ -55,11 +57,13 @@ class _FakeTool:
         self.delay = delay
         self.hang = hang
         self.calls: list[str] = []
+        self.slugs_seen: list[list[str]] = []
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def run(self, query: str, context: ConversationContext) -> str:
+    async def run(self, query: str, context: ConversationContext, *, slugs=()) -> str:
         self.calls.append(query)
+        self.slugs_seen.append(list(slugs))
         self.started.set()
         if self.hang:
             await self.release.wait()
@@ -67,6 +71,13 @@ class _FakeTool:
         if self.delay:
             await asyncio.sleep(self.delay)
         return self.answer
+
+
+def test_run_contexter_без_allow_searching():
+    """Аргумента allow_searching больше нет в сигнатуре."""
+    params = inspect.signature(run_contexter).parameters
+    assert "allow_searching" not in params
+    assert "branches" in params
 
 
 async def test_need_false_не_требуется():
@@ -86,13 +97,20 @@ async def test_need_false_не_требуется():
 async def test_инструмент_вернул_текст_готово():
     tool = _FakeTool("branches", "Филиалы под запрос: ул. Ленина, 1.")
     agent = _FakeAgent(
-        ContextDecision(need=True, tool="branches", query="Ленина", subject="филиалы")
+        ContextDecision(
+            need=True,
+            tool="branches",
+            query="Ленина",
+            subject="филиалы",
+            branch_slugs=["perm_lenina"],
+        )
     )
     out = await run_contexter(
         ConversationContext(static_text="статика"),
         reply="какие у Ленина?",
         tools=[tool],
         agent=agent,
+        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
     )
     assert out.dynamic_status == DYN_READY
     assert "ул. Ленина" in out.dynamic_text
@@ -100,6 +118,7 @@ async def test_инструмент_вернул_текст_готово():
     assert out.static_text == "статика"
     assert out.filler_spoken is False
     assert tool.calls == ["Ленина"]
+    assert tool.slugs_seen == [["perm_lenina"]]
 
 
 async def test_пустой_ответ_не_нашлось():
@@ -118,39 +137,52 @@ async def test_пустой_ответ_не_нашлось():
     assert out.dynamic_reply == "а как на дайвинг?"
 
 
-async def test_таймаут_allow_searching_в_поиске(monkeypatch):
-    monkeypatch.setattr("graph.contexter.settings.context_tool_timeout", 0.05)
-    tool = _FakeTool("branches", "поздно", hang=True)
+async def test_долгий_инструмент_дожидается_готово():
+    """Таймаута нет: долгий инструмент отрабатывает до конца."""
+    tool = _FakeTool("branches", "Филиалы под запрос: ул. Мира, 2.", delay=0.05)
     agent = _FakeAgent(
-        ContextDecision(need=True, tool="branches", query="центр", subject="филиалы")
+        ContextDecision(
+            need=True,
+            tool="branches",
+            query="Мира",
+            subject="филиалы",
+            branch_slugs=["perm_mira"],
+        )
+    )
+    out = await run_contexter(
+        ConversationContext(city_slug="perm"),
+        reply="а на Мира?",
+        tools=[tool],
+        agent=agent,
+        branches=[{"slug": "perm_mira", "address": "ул. Мира, 2"}],
+    )
+    assert out.dynamic_status == DYN_READY
+    assert "Мира" in out.dynamic_text
+    assert out.situation_slug is None
+    assert tool.slugs_seen == [["perm_mira"]]
+
+
+async def test_branches_без_валидных_слагов_не_требуется():
+    """Инструмент branches без валидных слагов → need=False, статус не требуется."""
+    tool = _FakeTool("branches", "не должен ответить")
+    agent = _FakeAgent(
+        ContextDecision(
+            need=True,
+            tool="branches",
+            query="центр",
+            subject="филиалы",
+            branch_slugs=["чужой_слаг"],
+        )
     )
     out = await run_contexter(
         ConversationContext(city_slug="perm"),
         reply="какие в центре?",
         tools=[tool],
         agent=agent,
-        allow_searching=True,
+        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
     )
-    assert out.dynamic_status == DYN_SEARCHING
-    assert out.situation_slug == "филиалы"
-    assert out.dynamic_reply == "какие в центре?"
-    tool.release.set()
-
-
-async def test_таймаут_без_allow_searching_дожидается(monkeypatch):
-    monkeypatch.setattr("graph.contexter.settings.context_tool_timeout", 0.01)
-    tool = _FakeTool("branches", "Филиалы под запрос: ул. Мира, 2.", delay=0.05)
-    agent = _FakeAgent(ContextDecision(need=True, tool="branches", query="Мира", subject="филиалы"))
-    out = await run_contexter(
-        ConversationContext(city_slug="perm"),
-        reply="а на Мира?",
-        tools=[tool],
-        agent=agent,
-        allow_searching=False,
-    )
-    assert out.dynamic_status == DYN_READY
-    assert "Мира" in out.dynamic_text
-    assert out.situation_slug is None
+    assert out.dynamic_status == DYN_NONE
+    assert tool.calls == []
 
 
 async def test_возражение_не_требуется_без_вызова_агента():

@@ -23,6 +23,7 @@ from langgraph.runtime import Runtime
 from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
+    DYN_NONE,
     DYN_SEARCHING,
     ConversationContext,
     context_from_state,
@@ -31,10 +32,10 @@ from graph.context import (
 from graph.context_store import (
     CONTEXT_FIELDS_DYNAMIC,
     CONTEXT_FIELDS_STATIC,
+    CONTEXT_FIELDS_TURN,
     context_store,
     merge_context_fields,
 )
-from graph.contexter import run_contexter
 from graph.facts import collect_facts, needs_of
 from graph.fillers import branch_filler, city_filler, cost_filler
 from graph.history import (
@@ -57,7 +58,6 @@ from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.situations import pick_filler
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
-from graph.tools_registry import build_context_tools
 from kb.client import vector_kb
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
@@ -768,17 +768,8 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     # Общая заглушка без предмета не звучит: предмет обязателен.
 
-    # Статику пишем до контекстера — динамика другим каналом не затрёт.
-    await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC)
-    # Контекстер и на маршруте lookup: справка может прийти вместе с городом.
-    ctx = await run_contexter(
-        ctx,
-        reply=user_text,
-        tools=build_context_tools(script),
-        objections=script.objections,
-        allow_searching=True,
-    )
-    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+    # Статику пишем точечно — динамику печёт лайв-канал.
+    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC)
 
     stage("lookup", format_lookup_done(turn_calls), "done", calls=turn_calls)
     patch.update(
@@ -807,28 +798,28 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     spoken: list[str] = []
     ctx = await _load_context(state)
     user_text = last_user_text(state.get("messages") or [])
-    # Лайв-канал уже испёк динамику по этой реплике — повторный вызов не нужен.
-    if ctx.dynamic_reply.strip() != (user_text or "").strip():
-        ctx = await run_contexter(
-            ctx,
-            reply=user_text,
-            tools=build_context_tools(script),
-            objections=script.objections,
-            allow_searching=True,
-        )
-        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+    # Динамика из кеша: основной ход в модель за контекстом не ходит.
+    ctx_fresh = ctx.dynamic_reply.strip() == (user_text or "").strip()
     fillers_used = list(state.get("fillers_used") or [])
     spoken_filler: str | None = state.get("spoken_filler")
-    # Повторный «в поиске» после заглушки — на контекст не опираемся.
-    searching_retry = ctx.dynamic_status == DYN_SEARCHING and ctx.filler_spoken
-    if ctx.dynamic_status == DYN_SEARCHING and not ctx.filler_spoken:
-        phrase = pick_filler(ctx.situation_slug, spoken=fillers_used)
-        say(phrase + " ")
-        spoken.append(phrase)
-        fillers_used.append(phrase)
-        spoken_filler = phrase
-        ctx = ctx.model_copy(update={"filler_spoken": True})
-        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+    searching_retry = False
+    if ctx_fresh:
+        # Повторный «в поиске» после заглушки — на контекст не опираемся.
+        searching_retry = ctx.dynamic_status == DYN_SEARCHING and ctx.filler_spoken
+        if ctx.dynamic_status == DYN_SEARCHING and not ctx.filler_spoken:
+            phrase = pick_filler(ctx.situation_slug, spoken=fillers_used)
+            say(phrase + " ")
+            spoken.append(phrase + " ")
+            fillers_used.append(phrase)
+            spoken_filler = phrase
+            ctx = ctx.model_copy(update={"filler_spoken": True})
+            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+        context_text = "" if searching_retry else ctx.render()
+        dynamic_status = ctx.dynamic_status
+    else:
+        # Динамика относится к другой реплике — в промпт не отдаём.
+        context_text = (ctx.static_text or "").strip()
+        dynamic_status = DYN_NONE
 
     messages = build_turn_messages(
         script=script,
@@ -837,10 +828,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         facts=facts,
         history=state.get("messages") or [],
         asides_done=list(state.get("asides_done") or []),
-        context_text="" if searching_retry else ctx.render(),
+        context_text=context_text,
         spoken_filler=spoken_filler,
         attempts=state.get("step_attempts") or {},
-        dynamic_status=ctx.dynamic_status,
+        dynamic_status=dynamic_status,
         searching_retry=searching_retry,
         new_step_id=state.get("head_new_step"),
     )
@@ -967,6 +958,14 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         progress_patch["call_finished"] = True
 
     patch.update(progress_patch)
+
+    conversation_context = state.get("conversation_context") or {}
+    if spoken_text:
+        ctx = await _load_context(state)
+        ctx = ctx.model_copy(update={"last_agent_reply": spoken_text})
+        ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
+        conversation_context = ctx_patch["conversation_context"]
+
     # Пустой эфир (например пустая подстановка) — pending не ставим,
     # иначе was_delivered(planned_len=0) ложно закроет inform.
     pending_step = step.id if step is not None and spoken_text else None
@@ -983,7 +982,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "city_slug": state.get("city_slug"),
             "city_name": state.get("city_name"),
             "branch_slug": state.get("branch_slug"),
-            "conversation_context": state.get("conversation_context") or {},
+            "conversation_context": conversation_context,
         }
     )
     stage(

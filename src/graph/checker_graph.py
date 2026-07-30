@@ -275,12 +275,19 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
     script = _script_of(state)
     ctx = await _load_context(state)
+    branches: list[Any] = []
+    if ctx.city_slug and not ctx.branch_slug:
+        try:
+            branches = await vector_kb.list_branches(ctx.city_slug)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Лайв-канал: филиалы города не загрузились: %s", exc)
+            branches = []
     ctx = await run_contexter(
         ctx,
         reply=reply,
         tools=build_context_tools(script),
         objections=script.objections,
-        allow_searching=False,
+        branches=branches,
     )
     ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
     patch.update(ctx_patch)

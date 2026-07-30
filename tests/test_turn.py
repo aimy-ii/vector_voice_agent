@@ -1363,7 +1363,7 @@ async def test_ошибка_lookup_не_роняет_ход(
 async def test_respond_не_зовёт_контекстер_если_dynamic_reply_совпал(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
-    """Основной ход не зовёт контекстер повторно, если лайв уже испёк реплику."""
+    """Основной ход не зовёт контекстер: читает динамику из кеша при совпадении."""
     from graph.context import DYN_READY, ConversationContext
     from graph.context_store import MemoryContextStore
     from graph.state import new_state_defaults
@@ -1383,13 +1383,10 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
     )
     monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
 
-    calls: list[str] = []
-
     async def _spy(*args: Any, **kwargs: Any):
-        calls.append("contexter")
         raise AssertionError("контекстер не должен вызываться")
 
-    monkeypatch.setattr(nodes_module, "run_contexter", _spy)
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
     model["result"] = {"understood": [], "aside_id": None, "reply": "Рядом с Ленина есть филиал."}
 
     state: dict[str, Any] = {
@@ -1408,11 +1405,163 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
         },
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert calls == []
     assert fact in out["conversation_context"]["dynamic_text"]
     assert model["calls"] == 1
     prompt = model["messages"][0].content
     assert fact in prompt
+    assert "готово" in prompt.lower() or "Город: Пермь" in prompt
+
+
+async def test_respond_при_несовпадении_dynamic_reply_не_отдаёт_динамику(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Динамика другой реплики в системное не попадает, статус — не требуется."""
+    from graph.context import DYN_NONE, DYN_READY, ConversationContext
+    from graph.context_store import MemoryContextStore
+    from graph.state import new_state_defaults
+
+    fact = "Секретный факт про филиалы"
+    ctx_mem = MemoryContextStore()
+    await ctx_mem.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            dynamic_text=fact,
+            dynamic_status=DYN_READY,
+            dynamic_reply="старая реплика",
+        ),
+    )
+    monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
+
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться")
+
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+
+    seen: dict[str, Any] = {}
+    real_build = nodes_module.build_turn_messages
+
+    def _wrap_build(*args: Any, **kwargs: Any):
+        seen["context_text"] = kwargs.get("context_text")
+        seen["dynamic_status"] = kwargs.get("dynamic_status")
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _wrap_build)
+    model["result"] = {"understood": [], "aside_id": None, "reply": "Хорошо."}
+
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="новая реплика")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "dynamic_text": fact,
+            "dynamic_status": DYN_READY,
+            "dynamic_reply": "старая реплика",
+        },
+    }
+    await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    prompt = model["messages"][0].content
+    assert fact not in prompt
+    assert "Город: Пермь" in prompt
+    assert seen["dynamic_status"] == DYN_NONE
+    assert fact not in (seen["context_text"] or "")
+    assert model["calls"] == 1
+
+
+async def test_lookup_не_зовёт_контекстер(
+    spoken, store, checker, kb, resolvers, monkeypatch, use_v2
+):
+    """lookup_node не вызывает run_contexter."""
+    from graph.state import new_state_defaults
+
+    calls: list[str] = []
+
+    async def _spy(*args: Any, **kwargs: Any):
+        calls.append("contexter")
+        raise AssertionError("контекстер не должен вызываться из lookup")
+
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+
+    closed = _closed_through(
+        [
+            "name",
+            "city",
+            "who_studies",
+            "experience",
+            "transmission",
+            "terms",
+            "theory_format",
+            "included",
+            "practice",
+            "branch",
+        ],
+        until="branch",
+    )
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="а когда медкомиссию?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "step_status": closed,
+        "step_attempts": {sid: 1 for sid in closed},
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "branch_slug": "perm_chernyshevskogo",
+        "profile": {
+            "city": "Пермь",
+            "branch": "perm_chernyshevskogo",
+            "caller_name": "Мария",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "frozen": True,
+        },
+    }
+    await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
+    assert calls == []
+
+
+async def test_commit_кладёт_last_agent_reply_в_кеш(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store
+):
+    """commit_node пишет произнесённую реплику в last_agent_reply."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    await ctx_store.save(
+        "local",
+        ConversationContext(static_text="Город: Пермь", city_slug="perm"),
+    )
+    spoken_text = "Рядом с Ленина есть филиал."
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="какие филиалы?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "spoken": [spoken_text],
+        "turn_result": {"understood": [], "aside_id": None, "reply": spoken_text},
+        "conversation_context": {"static_text": "Город: Пермь", "city_slug": "perm"},
+    }
+    out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+    assert out["conversation_context"]["last_agent_reply"] == spoken_text
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert loaded.last_agent_reply == spoken_text
+    assert loaded.static_text == "Город: Пермь"
 
 
 def _closed_through(script_ids: list[str], *, until: str) -> dict[str, str]:

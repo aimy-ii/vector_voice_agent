@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from graph.situations import DEFAULT_SLUG, TEMPLATES_KEY, load_situations, pick_filler
+from graph.situations import (
+    DEFAULT_SLUG,
+    TEMPLATES_KEY,
+    _ensure_terminal_punct,
+    load_situations,
+    pick_filler,
+)
 
 
 def test_словарь_имеет_templates_и_default():
@@ -17,26 +23,47 @@ def test_словарь_имеет_templates_и_default():
     assert len(catalog[DEFAULT_SLUG]) >= 5
     assert len(catalog[TEMPLATES_KEY]) >= 5
     assert all("{subject}" in t for t in catalog[TEMPLATES_KEY])
+    assert all("по {subject}" not in t for t in catalog[TEMPLATES_KEY])
 
 
-def test_pick_filler_подстановка_предмета():
+def test_pick_filler_подстановка_предмета_именительный():
     phrase = pick_filler("филиалы")
     assert phrase
     assert "филиалы" in phrase
+    assert "по филиалы" not in phrase
+    assert "филиалы, да… секунду" in phrase or "филиалы" in phrase
+    assert phrase[-1] in ".!?…,:;"
+
+
+def test_pick_filler_шаблон_филиалы_да_секунду(monkeypatch):
+    """Конкретный шаблон даёт именительный без «по»."""
+    catalog = load_situations()
+    target = _ensure_terminal_punct("{subject}, да… секунду".format(subject="филиалы"))
+    monkeypatch.setattr(
+        "graph.situations.random.choice",
+        lambda pool: next(p for p in pool if p.startswith("филиалы, да")),
+    )
+    phrase = pick_filler("филиалы")
+    assert phrase == target
+    assert phrase == "филиалы, да… секунду."
+    assert "по филиалы" not in phrase
+    assert all(t.endswith("{subject}") or "{subject}" in t for t in catalog[TEMPLATES_KEY])
 
 
 def test_pick_filler_пустой_предмет_берёт_default():
     catalog = load_situations()
+    defaults = {_ensure_terminal_punct(p) for p in catalog[DEFAULT_SLUG]}
     phrase = pick_filler(None)
-    assert phrase in catalog[DEFAULT_SLUG]
-    assert pick_filler("") in catalog[DEFAULT_SLUG]
-    assert pick_filler("   ") in catalog[DEFAULT_SLUG]
+    assert phrase in defaults
+    assert pick_filler("") in defaults
+    assert pick_filler("   ") in defaults
+    assert phrase[-1] in ".!?…,:;"
 
 
 def test_pick_filler_мимо_уже_звучавших():
     catalog = load_situations()
     subject = "медкомиссия"
-    pool = [t.format(subject=subject) for t in catalog[TEMPLATES_KEY]]
+    pool = [_ensure_terminal_punct(t.format(subject=subject)) for t in catalog[TEMPLATES_KEY]]
     spoken = pool[:-1]
     phrase = pick_filler(subject, spoken=spoken)
     assert phrase == pool[-1]

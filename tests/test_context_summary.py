@@ -26,6 +26,7 @@ def test_статусы_динамики_константы_и_дефолт():
     assert ctx.situation_slug is None
     assert ctx.filler_spoken is False
     assert ctx.dynamic_reply == ""
+    assert ctx.last_agent_reply == ""
     assert ctx.render() == ""
 
 

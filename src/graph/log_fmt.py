@@ -148,6 +148,7 @@ def format_contexter_done(
     status: str,
     elapsed_ms: int,
     needed: bool = True,
+    branch_slugs_count: int | None = None,
 ) -> str:
     """Итог контекстера: решение агента и статус динамики.
 
@@ -157,6 +158,7 @@ def format_contexter_done(
         status: итоговый ``dynamic_status``.
         elapsed_ms: длительность работы в миллисекундах.
         needed: False — агент решил, что контекст не нужен.
+        branch_slugs_count: число отобранных слагов при инструменте ``branches``.
 
     Returns:
         Строка для ``[contexter|done]``.
@@ -165,8 +167,11 @@ def format_contexter_done(
         return "решение: контекст не нужен"
     tool_text = tool or "—"
     subject_text = (subject or "").strip()
+    slugs_part = ""
+    if branch_slugs_count is not None:
+        slugs_part = f", слагов {branch_slugs_count}"
     return (
-        f"решение: инструмент {tool_text}, предмет «{subject_text}», "
+        f"решение: инструмент {tool_text}, предмет «{subject_text}»{slugs_part}, "
         f"{elapsed_ms} мс; статус {status}"
     )
 

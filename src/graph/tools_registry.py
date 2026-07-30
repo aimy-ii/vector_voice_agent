@@ -7,10 +7,9 @@
 
 from __future__ import annotations
 
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from graph.context import ConversationContext, format_branch_static
-from graph.resolvers import resolve_branch
 from kb.client import vector_kb
 from script.build import CompiledScript
 
@@ -58,41 +57,59 @@ class ContextTool(Protocol):
     name: str
     description: str
 
-    async def run(self, query: str, context: ConversationContext) -> str:
+    async def run(
+        self,
+        query: str,
+        context: ConversationContext,
+        *,
+        slugs: Sequence[str] = (),
+    ) -> str:
         """Ответ инструмента текстом для динамики; пустая строка — не нашлось."""
         ...
 
 
 class BranchesTool:
-    """Подбор филиалов по району, улице, ориентиру или перечень «какие есть»."""
+    """Подтверждение адресов филиалов, отобранных агентом по реплике."""
 
     name = "branches"
     description = (
-        "Подобрать филиалы по району, улице, ориентиру или перечислить, "
-        "когда клиент спрашивает «а какие есть»."
+        "Подтвердить адреса филиалов, которые ты отобрал по реплике клиента: "
+        "в branch_slugs передай до трёх слагов из перечня города."
     )
 
-    async def run(self, query: str, context: ConversationContext) -> str:
-        """Отбирает до трёх филиалов города по запросу.
+    async def run(
+        self,
+        query: str,
+        context: ConversationContext,
+        *,
+        slugs: Sequence[str] = (),
+    ) -> str:
+        """Собирает адреса филиалов строго по переданным слагам.
 
         Args:
-            query: район, улица, ориентир или пусто для перечня.
+            query: не используется; отбор уже сделан агентом.
             context: текущий контекст; нужен ``city_slug``.
+            slugs: слаги филиалов в порядке агента, не больше трёх.
 
         Returns:
-            Строка «Филиалы под запрос: …» или пустая, если города/списка нет.
+            Строка «Филиалы под запрос: …» или пустая, если города/слагов нет.
         """
+        _ = query
         city_slug = (context.city_slug or "").strip()
-        if not city_slug:
+        if not city_slug or not slugs:
             return ""
         branches = await vector_kb.list_branches(city_slug)
         if not branches:
             return ""
-        resolution = await resolve_branch(query or "", branches)
         by_slug = {str(b.get("slug")): b for b in branches if b.get("slug")}
-        picked = [by_slug[s] for s in resolution.slugs if s in by_slug]
-        if not picked and resolution.selected and resolution.selected in by_slug:
-            picked = [by_slug[resolution.selected]]
+        picked: list[Any] = []
+        for slug in slugs:
+            branch = by_slug.get(str(slug))
+            if branch is None:
+                continue
+            picked.append(branch)
+            if len(picked) >= 3:
+                break
         if not picked:
             return ""
         parts: list[str] = []
@@ -116,7 +133,13 @@ class CityFaqTool:
         "В query передай вопрос дословно из перечня FAQ."
     )
 
-    async def run(self, query: str, context: ConversationContext) -> str:
+    async def run(
+        self,
+        query: str,
+        context: ConversationContext,
+        *,
+        slugs: Sequence[str] = (),
+    ) -> str:
         """Ищет точное совпадение вопроса в ``context.city_faq``.
 
         Сравнение по strip + lower, без матчинга по смыслу.
@@ -124,10 +147,12 @@ class CityFaqTool:
         Args:
             query: вопрос дословно из перечня, который видел агент.
             context: контекст с ``city_faq``.
+            slugs: не используется; оставлен для единого интерфейса.
 
         Returns:
             Текст ответа или пустая строка при отсутствии совпадения.
         """
+        _ = slugs
         needle = (query or "").strip().lower()
         if not needle:
             return ""
@@ -144,17 +169,25 @@ class BranchDetailsTool:
     name = "branch_details"
     description = "Адрес, часы и ориентир уже выбранного филиала."
 
-    async def run(self, query: str, context: ConversationContext) -> str:
+    async def run(
+        self,
+        query: str,
+        context: ConversationContext,
+        *,
+        slugs: Sequence[str] = (),
+    ) -> str:
         """Тянет мету филиала по ``context.branch_slug``.
 
         Args:
             query: не используется; оставлен для единого интерфейса.
             context: контекст с непустым ``branch_slug``.
+            slugs: не используется; оставлен для единого интерфейса.
 
         Returns:
             Текстовый блок филиала или пустая строка без слага / меты.
         """
         _ = query
+        _ = slugs
         branch_slug = (context.branch_slug or "").strip()
         if not branch_slug:
             return ""

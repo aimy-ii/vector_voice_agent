@@ -49,6 +49,9 @@ class ConversationContext(BaseModel):
         dynamic_reply: реплика клиента, по которой собрана текущая динамика.
             Нужна, чтобы основной ход не пересчитывал то, что лайв-канал
             уже испёк по этой же реплике.
+        last_agent_reply: последняя реплика бота. Пишет основной ход, читает
+            агент контекста в лайв-канале — там истории разговора нет, а без
+            неё «Да.» неотличимо от вопроса.
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
@@ -62,6 +65,7 @@ class ConversationContext(BaseModel):
     situation_slug: str | None = None
     filler_spoken: bool = False
     dynamic_reply: str = ""
+    last_agent_reply: str = ""
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -374,6 +378,7 @@ class ContextState(BaseModel):
     situation_slug: str | None = None
     filler_spoken: bool = False
     dynamic_reply: str = ""
+    last_agent_reply: str = ""
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
