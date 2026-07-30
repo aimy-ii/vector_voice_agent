@@ -150,8 +150,13 @@ def test_шаблоны_заглушек_без_предлога_и_многот
 
 
 def test_bridge_filler_настройки_есть():
-    assert Settings.model_fields["bridge_filler_delay"].default == 1.2
+    assert Settings.model_fields["bridge_first_delay"].default == 1.5
+    assert Settings.model_fields["bridge_next_delay"].default == 2.0
     assert Settings.model_fields["bridge_filler_limit"].default == 2
     bridges = Settings.model_fields["agent_bridge_fillers"].default_factory()
     assert bridges
     assert all("{place}" not in t and "{city}" not in t for t in bridges)
+    for tpl in bridges:
+        body = tpl.rstrip(".!?,:;")
+        assert " " in body, tpl
+        assert tpl.rstrip().endswith((".", "!", "?"))

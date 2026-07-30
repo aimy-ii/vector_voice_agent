@@ -39,15 +39,31 @@ def test_результат_оканчивается_точкой(monkeypatch):
     assert cost_filler([]).endswith(".")
 
 
-def test_подстановка_филиал_именительный(monkeypatch):
+def test_city_filler_подставляет_название_или_город(monkeypatch):
     monkeypatch.setattr(
         "graph.fillers.random.choice",
-        lambda pool: next(p for p in pool if p.startswith("Так, {place}")),
+        lambda pool: next(p for p in pool if p.startswith("Секунду, открываю")),
     )
-    phrase = branch_filler([])
-    assert phrase == "Так, филиал. Секунду, открою."
-    assert "по филиал" not in phrase
-    assert phrase.endswith(".")
+    assert city_filler([], place="Санкт-Петербург") == ("Секунду, открываю Санкт-Петербург.")
+    assert city_filler([]) == "Секунду, открываю город."
+
+
+def test_branch_filler_с_местом_и_без(monkeypatch):
+    templates = ["Угу, {place}. Сейчас посмотрю, что рядом."]
+    monkeypatch.setattr("graph.fillers.random.choice", lambda pool: pool[0])
+    assert branch_filler(templates, place="центр") == ("Угу, центр. Сейчас посмотрю, что рядом.")
+    assert branch_filler(templates) == "Угу, филиал. Сейчас посмотрю, что рядом."
+
+
+def test_ни_одна_фраза_не_оканчивается_многоточием():
+    for pool in (_DEFAULT_CITY, _DEFAULT_BRANCH, _DEFAULT_COST):
+        for tpl in pool:
+            assert not tpl.rstrip().endswith(("…", "...")), tpl
+
+
+def test_предлога_перед_плейсхолдером_нет():
+    for tpl in (*_DEFAULT_CITY, *_DEFAULT_BRANCH):
+        assert _PREPOSITION_BEFORE_PLACE.search(tpl) is None, tpl
 
 
 def test_city_и_branch_из_настроек_оканчиваются_точкой():
@@ -64,7 +80,8 @@ def test_city_и_branch_из_настроек_оканчиваются_точк�
         phrase = branch_filler([tpl])
         assert phrase is not None
         assert phrase.endswith(".")
-        assert "по филиал" not in phrase
+        assert "по филиал." not in phrase
+        assert "по филиал " not in phrase
         assert "…" not in phrase and "..." not in phrase
 
 
@@ -82,16 +99,22 @@ def test_предмет_вне_набора_даёт_none():
     assert cost_filler([]) is not None
 
 
-def test_bridge_filler_мимо_уже_звучавших_без_плейсхолдеров(monkeypatch):
+def test_bridge_filler_мимо_звучавших_без_плейсхолдеров_и_односложных(monkeypatch):
     templates = [
-        "Так, вижу.",
-        "Ага, нашла.",
-        "Сейчас.",
+        "Так, сейчас посмотрю.",
+        "Секунду, уточняю.",
+        "Ага, вижу.",
     ]
     monkeypatch.setattr("graph.fillers.random.choice", lambda pool: pool[0])
-    phrase = bridge_filler(templates, used=["Так, вижу."])
-    assert phrase == "Ага, нашла."
+    phrase = bridge_filler(templates, used=["Так, сейчас посмотрю."])
+    assert phrase == "Секунду, уточняю."
     assert "{place}" not in phrase
     assert "{city}" not in phrase
     assert phrase.endswith(".")
-    assert bridge_filler([], used=["Так, вижу."]) is None
+    assert " " in phrase.rstrip(".")
+    assert bridge_filler([], used=["Так, сейчас посмотрю."]) is None
+    defaults = Settings.model_fields["agent_bridge_fillers"].default_factory()
+    for tpl in defaults:
+        assert "{place}" not in tpl and "{city}" not in tpl
+        body = tpl.rstrip(".!?,:;")
+        assert " " in body, tpl

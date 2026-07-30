@@ -12,7 +12,6 @@ Redis-кеша и не ждёт лайв. Генератор плюсует сч
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Sequence
 from typing import Any
@@ -43,7 +42,6 @@ from graph.fillers import (
     SUBJECT_CITY,
     SUBJECT_COST,
     branch_filler,
-    bridge_filler,
     city_filler,
     cost_filler,
 )
@@ -63,9 +61,20 @@ from graph.profile_fill import fill_basic_profile
 from graph.progress import say, stage
 from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
-from graph.resolvers import BranchResolver, CityResolver, resolve_branch, resolve_city
+from graph.resolvers import (
+    BranchResolver,
+    CityResolver,
+    exact_city_match,
+    resolve_branch,
+    resolve_city,
+)
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.situations import pick_filler
+from graph.speech_bg import (
+    background_spoken,
+    start_background_speech,
+    stop_background_speech,
+)
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from kb.client import vector_kb
@@ -637,43 +646,61 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
         }
         return out
 
-    # Предметный зачин только при реальном поиске — до сетевых вызовов и раннего выхода.
+    # Предметный зачин только при реальном поиске — до тяжёлых сетевых вызовов.
+    fills_city = _step_fills_city(step)
+    if city_asked and fills_city and user_text:
+        search_text: str | None = user_text
+    elif city_asked and profile_city:
+        search_text = profile_city
+    else:
+        search_text = None
+    existing_slug = state.get("city_slug") or ctx.city_slug
+    need_city = bool(not existing_slug and search_text)
+
+    city_slug_known = existing_slug
+    fills_branch = any(_step_fills_branch(s) for s in head)
+    need_branch = bool(
+        branch_asked
+        and city_slug_known
+        and not (state.get("branch_slug") or ctx.branch_slug)
+        and fills_branch
+        and user_text
+    )
+
+    extra_needs_preview = [n for n in needs if n != "branches"]
+    need_price = bool(
+        "price" in extra_needs_preview
+        and city_slug_known
+        and not (ctx.static_text and "Стоимость" in ctx.static_text)
+    )
+
+    cities_prefetch: list[dict[str, Any]] | None = None
     if settings.lookup_fillers_enabled:
-        fills_city = _step_fills_city(step)
-        if city_asked and fills_city and user_text:
-            search_text: str | None = user_text
-        elif city_asked and profile_city:
-            search_text = profile_city
-        else:
-            search_text = None
-        existing_slug = state.get("city_slug") or ctx.city_slug
-        need_city = bool(not existing_slug and search_text)
-
-        city_slug_known = existing_slug
-        fills_branch = any(_step_fills_branch(s) for s in head)
-        need_branch = bool(
-            branch_asked
-            and city_slug_known
-            and not (state.get("branch_slug") or ctx.branch_slug)
-            and fills_branch
-            and user_text
-        )
-
-        extra_needs_preview = [n for n in needs if n != "branches"]
-        need_price = bool(
-            "price" in extra_needs_preview
-            and city_slug_known
-            and not (ctx.static_text and "Стоимость" in ctx.static_text)
-        )
-
         if need_city and allow_subject_filler:
+            # Название только из профиля/справочника — сырую реплику не подставляем.
+            city_place = str(state.get("city_name") or "").strip() or profile_city or None
+            if not city_place and search_text:
+                cities_prefetch = await vector_kb.list_cities()
+                exact = exact_city_match(search_text, cities_prefetch)
+                if exact and exact.name:
+                    city_place = exact.name
             _speak_filler(
-                city_filler(script.params.city_fillers, used=fillers_used),
+                city_filler(
+                    script.params.city_fillers,
+                    used=fillers_used,
+                    place=city_place,
+                ),
                 subject=SUBJECT_CITY,
             )
         elif need_branch and allow_subject_filler:
+            # Район/ориентир — только если уже разобран, не сырой текст клиента.
+            branch_place = str(profile.get("branch_area") or "").strip() or None
             _speak_filler(
-                branch_filler(script.params.branch_fillers, used=fillers_used),
+                branch_filler(
+                    script.params.branch_fillers,
+                    used=fillers_used,
+                    place=branch_place,
+                ),
                 subject=SUBJECT_BRANCH,
             )
         elif need_price and allow_subject_filler:
@@ -681,6 +708,20 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 cost_filler(script.params.fillers, used=fillers_used),
                 subject=SUBJECT_COST,
             )
+
+    # Фон на весь ход — и без зачина, и без похода в справочник.
+    call_id = _call_id()
+
+    def _on_bridge(phrase: str) -> None:
+        """Отдаёт связку в эфир с хвостовым пробелом-разделителем."""
+        say(phrase + " ")
+
+    await start_background_speech(
+        call_id,
+        templates=settings.agent_bridge_fillers,
+        used=fillers_used,
+        on_speak=_on_bridge,
+    )
 
     if not needs_lookup:
         # Нечего искать — не ждём справочник и не зовём контекстер.
@@ -693,17 +734,11 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     # Город: только если шаг city уже задавался/в шапке и слага ещё нет —
     # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
-    fills_city = _step_fills_city(step)
-    if city_asked and fills_city and user_text:
-        search_text = user_text
-    elif city_asked and profile_city:
-        search_text = profile_city
-    else:
-        search_text = None
-
-    existing_slug = state.get("city_slug") or ctx.city_slug
     if not existing_slug and search_text:
-        cities = await vector_kb.list_cities()
+        if cities_prefetch is not None:
+            cities = cities_prefetch
+        else:
+            cities = await vector_kb.list_cities()
         _note({"call": "list_cities", "found": len(cities)})
         resolution = await resolve_city(search_text, cities, resolver=_city_resolver)
         _note(
@@ -860,6 +895,23 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     ctx_fresh = ctx.dynamic_reply.strip() == (user_text or "").strip()
     fillers_used = list(state.get("fillers_used") or [])
     spoken_filler: str | None = state.get("spoken_filler")
+    call_id = _call_id()
+
+    def _absorb_bridges(phrases: list[str]) -> None:
+        """Добавляет прозвучавшие связки в spoken / fillers_used / spoken_filler."""
+        nonlocal spoken_filler
+        for phrase in phrases:
+            if not any(s.strip() == phrase for s in spoken):
+                spoken.append(phrase + " ")
+            if phrase not in fillers_used:
+                fillers_used.append(phrase)
+            if spoken_filler and phrase in spoken_filler:
+                continue
+            spoken_filler = f"{spoken_filler} {phrase}" if spoken_filler else phrase
+
+    # Связки, успевшие прозвучать в lookup, — в промпт до генерации.
+    _absorb_bridges(background_spoken(call_id))
+
     searching_retry = False
     if ctx_fresh:
         # Повторный «в поиске» после заглушки — на контекст не опираемся.
@@ -898,57 +950,15 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
 
-    bridge_task: asyncio.Task[None] | None = None
-
-    async def _bridge_chain() -> None:
-        """Пока модель молчит — короткие связки после зачина."""
-        nonlocal spoken_filler
-        try:
-            for _ in range(settings.bridge_filler_limit):
-                await asyncio.sleep(settings.bridge_filler_delay)
-                phrase = bridge_filler(
-                    settings.agent_bridge_fillers,
-                    used=fillers_used,
-                )
-                if not phrase:
-                    return
-                say(phrase + " ")
-                spoken.append(phrase + " ")
-                fillers_used.append(phrase)
-                if spoken_filler:
-                    spoken_filler = f"{spoken_filler} {phrase}"
-                else:
-                    spoken_filler = phrase
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Связка не удалась: %s", exc)
-
-    if spoken_filler:
-        bridge_task = asyncio.create_task(_bridge_chain())
-
-    def _cancel_bridge() -> None:
-        """Отменяет цепочку связок, если она ещё бежит."""
-        if bridge_task is not None and not bridge_task.done():
-            bridge_task.cancel()
+    def _stop_bg() -> None:
+        """Снимает фон и забирает оставшиеся связки."""
+        _absorb_bridges(stop_background_speech(call_id))
 
     def _on_delta(delta: str) -> None:
-        _cancel_bridge()
+        _stop_bg()
         streamed.append(delta)
         spoken.append(delta)
         say(delta)
-
-    async def _await_bridge_cancelled() -> None:
-        """Дожидается остановки задачи связок после cancel."""
-        if bridge_task is None:
-            return
-        _cancel_bridge()
-        try:
-            await bridge_task
-        except asyncio.CancelledError:
-            pass
-        except Exception:  # noqa: BLE001
-            pass
 
     try:
         try:
@@ -964,7 +974,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         except LLMTurnFailed as exc:
             reason = str(exc) or "неизвестная причина"
             log.warning("Подстановка фолбэка: %s", reason)
-            if not spoken:
+            if not streamed:
                 say(script.params.fallback)
                 spoken.append(script.params.fallback)
             stage("respond", "модель не ответила, отдана аварийная реплика", "done")
@@ -977,7 +987,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 "fillers_used": fillers_used,
             }
     finally:
-        await _await_bridge_cancelled()
+        _stop_bg()
 
     result = _safe_result(raw)
     streamed_text = "".join(streamed)

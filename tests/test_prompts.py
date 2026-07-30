@@ -805,3 +805,25 @@ def test_build_turn_messages_без_filler_subject_обратная_совмес
     )
     assert "продолжить" in messages[0].content.lower()
     assert "подводку к теме не делать" not in messages[0].content.lower()
+
+
+def test_naturalness_живая_связка_с_ответом_клиента():
+    """Реплика начинается с услышанного и связывается со следующим шагом."""
+    from graph.prompts import naturalness_block
+
+    text = naturalness_block(ask_for_move=True).lower()
+    assert "только что сказал" in text or "человек только что" in text
+    assert "понятно, андрей" in text
+    assert "значит, учиться будете сами" in text
+
+
+def test_unknown_запрет_выдумывать_филиал(script):
+    """Без филиала в фактах нельзя утверждать наличие по району."""
+    from graph.prompts import unknown_block
+
+    text = unknown_block(script).lower()
+    assert "филиал" in text
+    assert "районе" in text or "район" in text
+    assert "придумывать" in text
+    # Обратная совместимость: вызов без новых аргументов.
+    assert script.params.unknown.split()[0].lower() in text or "не придумывать" in text

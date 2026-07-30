@@ -2,7 +2,8 @@
 
 Только из данных, вызовов модели ноль. Предмет подставляет код из закрытого
 набора: город, филиал, стоимость. Свободный текст клиента в шаблон не
-попадает никогда. Нет предмета — нет заглушки.
+попадает никогда. Нет предмета — нет заглушки. Название города или район
+из резолвера передаётся отдельно аргументом ``place``.
 """
 
 from __future__ import annotations
@@ -30,9 +31,9 @@ _DEFAULT_CITY = (
 
 _DEFAULT_BRANCH = (
     "Минутку, гляну адреса.",
-    "Угу, {place}. Сейчас посмотрю, что рядом.",
-    "{place}, да. Сейчас подберу пару адресов.",
-    "Так, {place}. Секунду, открою.",
+    "Угу, сейчас посмотрю, что рядом.",
+    "Секунду, подберу пару адресов.",
+    "Так, сейчас открою по филиалам.",
 )
 
 _DEFAULT_COST = (
@@ -72,6 +73,7 @@ def pick_filler(
     subject: str | None,
     used: Sequence[str] | None = None,
     defaults: Sequence[str] = (),
+    place: str | None = None,
 ) -> str | None:
     """Выбирает фразу-заглушку без вызова модели.
 
@@ -80,6 +82,7 @@ def pick_filler(
         subject: предмет из ``FILLER_SUBJECTS``; иначе молчим.
         used: уже звучавшие фразы в этом звонке.
         defaults: запасные шаблоны.
+        place: название города или район из резолвера; пусто — слово предмета.
 
     Returns:
         Готовая фраза для эфира или ``None``, если предмета нет.
@@ -92,10 +95,11 @@ def pick_filler(
     used_set = set(used or [])
     fresh = [t for t in pool if t not in used_set]
     choice = random.choice(fresh or list(pool))
+    label = (place or "").strip() or subject
     if "{place}" in choice:
-        phrase = choice.format(place=subject)
+        phrase = choice.format(place=label)
     elif "{city}" in choice:
-        phrase = choice.format(city=subject)
+        phrase = choice.format(city=label)
     else:
         # Шаблон без плейсхолдера — предмет всё равно зафиксирован кодом.
         phrase = choice
@@ -106,12 +110,14 @@ def city_filler(
     templates: Sequence[str],
     *,
     used: Sequence[str] | None = None,
+    place: str | None = None,
 ) -> str | None:
-    """Заглушка на поиск города; предмет всегда «город».
+    """Заглушка на поиск города.
 
     Args:
         templates: шаблоны из скрипта или настроек.
         used: уже звучавшие фразы в этом звонке.
+        place: название города из профиля или справочника; пусто — «город».
 
     Returns:
         Готовая фраза или ``None``.
@@ -121,6 +127,7 @@ def city_filler(
         subject=SUBJECT_CITY,
         used=used,
         defaults=_DEFAULT_CITY,
+        place=place,
     )
 
 
@@ -128,12 +135,14 @@ def branch_filler(
     templates: Sequence[str],
     *,
     used: Sequence[str] | None = None,
+    place: str | None = None,
 ) -> str | None:
-    """Заглушка на поиск филиала; предмет всегда «филиал».
+    """Заглушка на поиск филиала.
 
     Args:
         templates: шаблоны из скрипта или настроек.
         used: уже звучавшие фразы в этом звонке.
+        place: район или ориентир из резолвера; пусто — «филиал».
 
     Returns:
         Готовая фраза или ``None``.
@@ -143,6 +152,7 @@ def branch_filler(
         subject=SUBJECT_BRANCH,
         used=used,
         defaults=_DEFAULT_BRANCH,
+        place=place,
     )
 
 
@@ -173,9 +183,9 @@ def bridge_filler(
     *,
     used: Sequence[str] | None = None,
 ) -> str | None:
-    """Короткая связка, пока генератор ещё не начал отвечать.
+    """Связка речевого фона, пока ответ ещё не готов.
 
-    Предмет не подставляется: связка идёт после зачина, тема уже названа.
+    Предмет не подставляется: тема уже названа зачином или вопросом клиента.
 
     Args:
         templates: шаблоны из настроек.
