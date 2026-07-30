@@ -120,8 +120,6 @@ def resolvers(monkeypatch):
     branch = SelectBranch(BranchResolution(slugs=[], selected=None))
     monkeypatch.setattr(nodes_module, "_city_resolver", city)
     monkeypatch.setattr(nodes_module, "_branch_resolver", branch)
-    monkeypatch.setattr("graph.checker_graph._city_resolver", city)
-    monkeypatch.setattr("graph.checker_graph._branch_resolver", branch)
     return city, branch
 
 
@@ -413,7 +411,7 @@ async def test_образец_в_промпте_склейки_мимо_моде
                 "static_text": "Город: Пермь",
                 "city_slug": "perm",
                 "city_name": "Пермь",
-                "ready_reply_hash": reply_hash("механика"),
+                "dynamic_reply_hash": reply_hash("механика"),
             },
         }
     )
@@ -994,7 +992,7 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
             dynamic_text=fact,
             dynamic_status=DYN_READY,
             dynamic_reply=reply,
-            ready_reply_hash=digest,
+            dynamic_reply_hash=digest,
         ),
     )
     monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
@@ -1018,7 +1016,7 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
             "dynamic_text": fact,
             "dynamic_status": DYN_READY,
             "dynamic_reply": reply,
-            "ready_reply_hash": digest,
+            "dynamic_reply_hash": digest,
         },
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
@@ -1029,12 +1027,13 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
     assert "готово" in prompt.lower() or "Город: Пермь" in prompt
 
 
-async def test_respond_при_несовпадении_dynamic_reply_не_отдаёт_динамику(
+async def test_respond_при_чужом_searching_hash_полная_сборка(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
-    """Динамика другой реплики в системное не попадает, статус — не требуется."""
-    from graph.context import DYN_NONE, DYN_READY, ConversationContext
+    """SEARCHING с чужим хешем — полная сборка; накопленная динамика остаётся."""
+    from graph.context import DYN_READY, DYN_SEARCHING, ConversationContext
     from graph.context_store import MemoryContextStore
+    from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     fact = "Секретный факт про филиалы"
@@ -1045,7 +1044,8 @@ async def test_respond_при_несовпадении_dynamic_reply_не_отд
             static_text="Город: Пермь",
             city_slug="perm",
             dynamic_text=fact,
-            dynamic_status=DYN_READY,
+            dynamic_status=DYN_SEARCHING,
+            dynamic_reply_hash=reply_hash("старая реплика"),
             dynamic_reply="старая реплика",
         ),
     )
@@ -1056,15 +1056,6 @@ async def test_respond_при_несовпадении_dynamic_reply_не_отд
 
     monkeypatch.setattr("graph.contexter.run_contexter", _spy)
 
-    seen: dict[str, Any] = {}
-    real_build = nodes_module.build_turn_messages
-
-    def _wrap_build(*args: Any, **kwargs: Any):
-        seen["context_text"] = kwargs.get("context_text")
-        seen["dynamic_status"] = kwargs.get("dynamic_status")
-        return real_build(*args, **kwargs)
-
-    monkeypatch.setattr(nodes_module, "build_turn_messages", _wrap_build)
     model["result"] = {"understood": [], "aside_id": None, "reply": "Хорошо."}
 
     state: dict[str, Any] = {
@@ -1078,17 +1069,31 @@ async def test_respond_при_несовпадении_dynamic_reply_не_отд
             "static_text": "Город: Пермь",
             "city_slug": "perm",
             "dynamic_text": fact,
-            "dynamic_status": DYN_READY,
+            "dynamic_status": DYN_SEARCHING,
+            "dynamic_reply_hash": reply_hash("старая реплика"),
             "dynamic_reply": "старая реплика",
         },
     }
-    await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
     prompt = model["messages"][0].content
-    assert fact not in prompt
+    assert "Шапка скрипта" in prompt
+    assert fact in prompt
     assert "Город: Пермь" in prompt
-    assert seen["dynamic_status"] == DYN_NONE
-    assert fact not in (seen["context_text"] or "")
     assert model["calls"] == 1
+
+    # DYN_READY — тоже полная, динамика в промпте.
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        dynamic_text=fact,
+        dynamic_status=DYN_READY,
+        dynamic_reply="старая реплика",
+    )
+    await ctx_mem.save("local", ctx)
+    state["conversation_context"] = ctx.model_dump()
+    await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert fact in model["messages"][0].content
 
 
 async def test_commit_кладёт_last_agent_reply_в_кеш(
@@ -1165,20 +1170,21 @@ async def test_ход_не_ходит_в_справочник(
 async def test_ready_hash_полная_и_короткая_сборка(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
 ):
-    """Ветвление по ready_reply_hash и needs_kb шапки."""
-    from graph.context import ConversationContext
+    """Ветвление по DYN_SEARCHING и dynamic_reply_hash текущей реплики."""
+    from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING, ConversationContext
     from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     reply = "какие филиалы у Просвещения?"
     model["result"] = {"reply": "Сейчас уточню филиалы."}
+    digest = reply_hash(reply)
 
-    # Совпадает с репликой — полная сборка.
+    # Статус в поиске по этой реплике — короткая сборка.
     ctx = ConversationContext(
         static_text="Город: Пермь",
-        dynamic_status="готово",
-        dynamic_text="Филиалы: Ленина",
-        ready_reply_hash=reply_hash(reply),
+        dynamic_status=DYN_SEARCHING,
+        pending_fields=["branch"],
+        dynamic_reply_hash=digest,
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
@@ -1193,39 +1199,53 @@ async def test_ready_hash_полная_и_короткая_сборка(
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is False
-    assert "Шапка скрипта" in model["messages"][0].content
+    assert out.get("expect_continuation") is True
+    assert "Шапка скрипта" not in model["messages"][0].content
 
-    # Не совпадает и шапке нужны данные — короткая сборка.
+    # Чужой хеш — полная сборка, даже при «в поиске».
     ctx = ConversationContext(
         static_text="Город: Пермь",
-        dynamic_status="в поиске",
+        dynamic_status=DYN_SEARCHING,
         pending_fields=["branch"],
-        ready_reply_hash="",
+        dynamic_reply_hash=reply_hash("другая реплика"),
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
     state["conversation_context"] = ctx.model_dump()
-    model["result"] = {"reply": "Сейчас уточню."}
+    model["result"] = {"reply": "Ближайшие на Ленина."}
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is True
-    assert "Шапка скрипта" not in model["messages"][0].content
-    assert "уточня" in model["messages"][0].content.lower()
+    assert out.get("expect_continuation") is False
+    assert "Шапка скрипта" in model["messages"][0].content
 
-    # Не совпадает, но шапке данные не нужны — полная сборка.
-    ctx = ConversationContext(static_text="Город: Пермь", ready_reply_hash="")
+    # DYN_READY и DYN_MISSING — полная сборка.
+    for status in (DYN_READY, DYN_MISSING):
+        ctx = ConversationContext(
+            static_text="Город: Пермь",
+            dynamic_status=status,
+            dynamic_reply_hash=digest,
+            dynamic_reply=reply,
+        )
+        await ctx_store.save("local", ctx)
+        state["conversation_context"] = ctx.model_dump()
+        model["result"] = {"reply": "Ок."}
+        out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+        assert out.get("expect_continuation") is False
+        assert "Шапка скрипта" in model["messages"][0].content
+
+    # Шапка с потребностями сама по себе короткую сборку не включает.
+    ctx = ConversationContext(static_text="Город: Пермь")
     await ctx_store.save("local", ctx)
     state = {
         **new_state_defaults(),
         "messages": [HumanMessage(content=reply)],
         "script_id": "vector_ru",
         "script_version": "2",
-        "current_step": "name",
-        "head_steps": ["name"],
+        "current_step": "branch",
+        "head_steps": ["branch"],
         "turn": 2,
         "conversation_context": ctx.model_dump(),
     }
-    model["result"] = {"reply": "Как к вам обращаться?"}
+    model["result"] = {"reply": "Какой район?"}
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
     assert "Шапка скрипта" in model["messages"][0].content
@@ -1234,8 +1254,9 @@ async def test_ready_hash_полная_и_короткая_сборка(
 async def test_continuation_всегда_полная_сборка(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
 ):
-    """На turn_kind=continuation всегда полная сборка, даже без ready_reply_hash."""
-    from graph.context import ConversationContext
+    """На turn_kind=continuation всегда полная сборка, даже при SEARCHING."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     monkeypatch.setattr(
@@ -1246,8 +1267,8 @@ async def test_continuation_всегда_полная_сборка(
     ctx = ConversationContext(
         static_text="Город: Пермь",
         dynamic_text="Филиалы: Ленина",
-        dynamic_status="готово",
-        ready_reply_hash="",
+        dynamic_status=DYN_SEARCHING,
+        dynamic_reply_hash=reply_hash(reply),
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
@@ -1298,7 +1319,7 @@ async def test_continuation_не_растит_счётчики(
                 "city_name": "Пермь",
                 "dynamic_status": "готово",
                 "dynamic_reply": "Пермь",
-                "ready_reply_hash": "",
+                "dynamic_reply_hash": "",
             },
         }
     )

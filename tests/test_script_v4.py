@@ -244,7 +244,13 @@ def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, da
 
 
 def test_реестр_инструментов_всегда_branches_faq_details(script_v4, script):
-    """Реестр одинаков для продаж и legacy: филиалы, FAQ, детали филиала."""
+    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, факты."""
     for compiled in (script_v4, script):
         tools = build_context_tools(compiled)
-        assert [t.name for t in tools] == ["branches", "city_faq", "branch_details"]
+        assert [t.name for t in tools] == [
+            "city",
+            "branches",
+            "city_faq",
+            "branch_details",
+            "facts",
+        ]

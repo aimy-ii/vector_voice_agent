@@ -829,8 +829,8 @@ def test_build_waiting_messages_короче_без_статики_и_факто
         script,
         messages=history,
         profile={"city": "Пермь"},
-        pending_fields=["branch"],
-        step=script.step("branch"),
+        pending_fields=[],
+        step=script.step("name"),
         history_limit=4,
     )
     full = build_turn_messages(
@@ -848,5 +848,9 @@ def test_build_waiting_messages_короче_без_статики_и_факто
     assert "43900" not in content
     assert "Шапка скрипта" not in content
     assert "Требования:" not in content
+    # Инструкция ожидания — без примера про филиалы; предмет назвать обязательно.
+    instruction = content.split("Ведущий шаг:")[0].split("Анкета")[0].split("Форма")[0]
+    assert "филиал" not in instruction.lower()
+    assert "предмет" in content.lower()
     assert len(waiting) - 1 == 4
     assert len(content) * 2 < len(full[0].content)

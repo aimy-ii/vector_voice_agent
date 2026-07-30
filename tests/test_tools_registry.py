@@ -7,26 +7,50 @@ from typing import Any
 import pytest
 
 from graph.context import ConversationContext
-from graph.tools_registry import BranchesTool, CityFaqTool
+from graph.resolvers import CityResolution
+from graph.tools_registry import BranchesTool, CityFaqTool, CityTool, FactsTool
+from script.build import build_script
+from script.source import JsonScriptSource
 
 
 class _FakeKB:
     """Заглушка справочника: филиалы без вызова модели."""
 
-    def __init__(self, branches: list[dict[str, Any]]) -> None:
-        self._branches = branches
+    def __init__(
+        self,
+        *,
+        branches: list[dict[str, Any]] | None = None,
+        cities: list[dict[str, Any]] | None = None,
+        city: dict[str, Any] | None = None,
+    ) -> None:
+        self._branches = branches or []
+        self._cities = cities or []
+        self._city = city
         self.calls: list[str] = []
         self.model_calls = 0
+        self.collect_needs: list[str] | None = None
 
     async def list_branches(self, city_slug: str) -> list[dict[str, Any]]:
         self.calls.append(f"list_branches:{city_slug}")
         return list(self._branches)
 
+    async def list_cities(self) -> list[dict[str, Any]]:
+        self.calls.append("list_cities")
+        return list(self._cities)
+
+    async def get_city(self, city_slug: str) -> dict[str, Any] | None:
+        self.calls.append(f"get_city:{city_slug}")
+        return self._city
+
+    async def get_branch(self, branch_slug: str) -> dict[str, Any] | None:
+        self.calls.append(f"get_branch:{branch_slug}")
+        return None
+
 
 @pytest.fixture()
 def branches_kb(monkeypatch) -> _FakeKB:
     kb = _FakeKB(
-        [
+        branches=[
             {"slug": "a", "address": "ул. А, 1", "landmark": "парк"},
             {"slug": "b", "address": "ул. Б, 2", "landmark": ""},
             {"slug": "c", "address": "ул. В, 3", "landmark": "метро"},
@@ -73,3 +97,56 @@ async def test_city_faq_игнорирует_slugs():
         city_faq=[{"question": "Медкомиссия?", "answer": "Нужна к практике."}]
     )
     assert await tool.run("Медкомиссия?", ctx, slugs=["ignored"]) == "Нужна к практике."
+
+
+async def test_city_tool_слаг_из_перечня_и_статика(monkeypatch, data_dir):
+    """Инструмент города возвращает слаг из перечня и кладёт статику."""
+    kb = _FakeKB(
+        cities=[{"slug": "perm", "name": "Пермь"}],
+        city={
+            "slug": "perm",
+            "name": "Пермь",
+            "categories": [],
+            "vehicles": {},
+            "price": {"amount": 10000, "is_from": True},
+        },
+    )
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+
+    class _Resolver:
+        async def resolve(self, text, cities):
+            return CityResolution(slug="perm", name="Пермь", is_district=False)
+
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "2")
+    script = build_script(raw)
+    tool = CityTool(script, resolver=_Resolver())
+    ctx = ConversationContext()
+    text = await tool.run("Пермь", ctx)
+    assert "Пермь" in text
+    assert ctx.city_slug == "perm"
+    assert ctx.city_name == "Пермь"
+    assert "Статика разговора" in ctx.static_text
+    assert kb.calls == ["list_cities", "get_city:perm"]
+
+
+async def test_facts_tool_зовёт_collect_facts(monkeypatch, data_dir):
+    """Инструмент фактов зовёт collect_facts с переданными потребностями."""
+    seen: dict[str, Any] = {}
+
+    async def fake_collect(kb, *, script, needs, city_slug, branch_slug, want_city_choices):
+        seen["needs"] = list(needs)
+        seen["city_slug"] = city_slug
+        seen["want_city_choices"] = want_city_choices
+        return {"price_line": "от 10000"}, [{"call": "get_city"}]
+
+    monkeypatch.setattr("graph.facts.collect_facts", fake_collect)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB())
+
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "2")
+    script = build_script(raw)
+    tool = FactsTool(script, needs=["price", "city_meta"])
+    ctx = ConversationContext(city_slug="perm")
+    text = await tool.run("", ctx)
+    assert seen["needs"] == ["price", "city_meta"]
+    assert seen["city_slug"] == "perm"
+    assert "price_line" in text

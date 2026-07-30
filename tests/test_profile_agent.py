@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from langchain_core.messages import AIMessage, HumanMessage
+
 from graph.profile_agent import ProfileGuess, ProfileValue, guess_profile
 
 
@@ -17,12 +19,34 @@ class _FakeAgent:
         self.result = result or ProfileGuess()
         self.error = error
         self.calls = 0
+        self.history_seen: list = []
+        self.reply_seen: str = ""
 
-    async def guess(self, reply, known, fields):
+    async def guess(self, reply, known, fields, history=()):
         self.calls += 1
+        self.reply_seen = reply
+        self.history_seen = list(history)
         if self.error is not None:
             raise self.error
         return self.result
+
+
+async def test_агент_получает_хвост_диалога():
+    """Агент видит хвост истории, а не одну реплику."""
+    agent = _FakeAgent(ProfileGuess(values=[ProfileValue(key="transmission", value="механика")]))
+    history = [
+        AIMessage(content="Механика или автомат?"),
+        HumanMessage(content="механику"),
+    ]
+    result = await guess_profile(
+        "механику",
+        known={},
+        fields=[("transmission", "Коробка")],
+        history=history,
+        agent=agent,
+    )
+    assert agent.history_seen == history
+    assert [(v.key, v.value) for v in result.values] == [("transmission", "механика")]
 
 
 async def test_отбрасывает_ключи_вне_перечня_и_пустые():
@@ -40,6 +64,7 @@ async def test_отбрасывает_ключи_вне_перечня_и_пус
         "Меня зовут Андрей",
         known={},
         fields=[("caller_name", "Имя"), ("city", "Город")],
+        history=[HumanMessage(content="Меня зовут Андрей")],
         agent=agent,
     )
     assert [(v.key, v.value) for v in result.values] == [("caller_name", "Андрей")]

@@ -54,9 +54,9 @@ class ConversationContext(BaseModel):
             неё «Да.» неотличимо от вопроса.
         dynamic_turn: номер хода, на котором выставлен статус динамики.
         last_reply_hash: хеш реплики, по которой контекстер уже отработал.
-        ready_reply_hash: хеш реплики, по которой лайв-канал закончил всю
-            работу — разбор справочника и контекстер. Ход сравнивает его с
-            текущей репликой и по несовпадению понимает, что данные ещё готовятся.
+        dynamic_reply_hash: хеш реплики, по которой выставлен текущий статус
+            динамики. Ход сравнивает его с текущей репликой: без совпадения
+            статус прошлого хода не подхватывается.
         pending_fields: ключи полей профиля, которые лайв-канал сейчас
             разбирает; для формы это состояние «уточняется».
         city_slug: слаг города после фиксации.
@@ -75,7 +75,7 @@ class ConversationContext(BaseModel):
     last_agent_reply: str = ""
     dynamic_turn: int = 0
     last_reply_hash: str = ""
-    ready_reply_hash: str = ""
+    dynamic_reply_hash: str = ""
     pending_fields: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
@@ -395,7 +395,7 @@ class ContextState(BaseModel):
     last_agent_reply: str = ""
     dynamic_turn: int = 0
     last_reply_hash: str = ""
-    ready_reply_hash: str = ""
+    dynamic_reply_hash: str = ""
     pending_fields: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None

@@ -1,7 +1,8 @@
-"""Агент профиля: что удалось понять из реплики клиента.
+"""Агент профиля: что удалось понять из хвоста диалога.
 
 Быстрая модель, короткая схема. Разбор профиля — оптимизация, не обязанность:
 ошибка или таймаут → пустой результат, лайв-канал не роняем.
+Статусов и походов за данными не делает — только фиксирует результат разговора.
 """
 
 from __future__ import annotations
@@ -10,7 +11,7 @@ import logging
 import re
 from typing import Mapping, Protocol, Sequence
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from graph.names import given_name
@@ -25,6 +26,9 @@ _FIELD_KEY = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 
 #: Поля имени — значение прогоняется через ``given_name``.
 _NAME_KEYS = frozenset({"caller_name", "student_name"})
+
+#: Сколько последних сообщений отдаём агенту как хвост диалога.
+_HISTORY_TAIL = 8
 
 
 class ProfileValue(BaseModel):
@@ -48,8 +52,9 @@ class ProfileAgent(Protocol):
         reply: str,
         known: Mapping[str, str],
         fields: Sequence[tuple[str, str]],
+        history: Sequence[BaseMessage] = (),
     ) -> ProfileGuess:
-        """Разбирает реплику: какие поля профиля удалось понять."""
+        """Разбирает хвост диалога: какие поля профиля удалось понять."""
 
 
 def profile_fields_of(script: CompiledScript) -> list[tuple[str, str]]:
@@ -84,6 +89,20 @@ def _step_requirements(step: AnyStep) -> str:
     return ""
 
 
+def _format_history(history: Sequence[BaseMessage], *, limit: int = _HISTORY_TAIL) -> str:
+    """Хвост диалога текстом для промпта агента."""
+    if not history:
+        return "— пусто"
+    tail = list(history)[-max(1, limit) :]
+    lines: list[str] = []
+    for message in tail:
+        role = "бот" if message.type == "ai" else "клиент"
+        text = str(getattr(message, "content", "") or "").strip()
+        if text:
+            lines.append(f"{role}: {text}")
+    return "\n".join(lines) if lines else "— пусто"
+
+
 class LlmProfileAgent:
     """Агент профиля на быстрой модели."""
 
@@ -92,6 +111,7 @@ class LlmProfileAgent:
         reply: str,
         known: Mapping[str, str],
         fields: Sequence[tuple[str, str]],
+        history: Sequence[BaseMessage] = (),
     ) -> ProfileGuess:
         """Один вызов быстрой модели; при ошибке — пустой результат."""
         if not fields or not (reply or "").strip():
@@ -104,16 +124,20 @@ class LlmProfileAgent:
             if value:
                 known_lines.append(f"- {key}: {value}")
         known_block = "\n".join(known_lines) if known_lines else "- пока ничего"
+        history_block = _format_history(history)
 
         system = (
-            "Ты разбираешь реплику клиента и заполняешь поля профиля.\n"
-            "Ключ поля — строго из перечня. Значение — как назвал клиент, "
-            "без домыслов.\n"
+            "Ты разбираешь хвост диалога и заполняешь поля профиля.\n"
+            "Ключ поля — строго из перечня. Значение — только то, что "
+            "прозвучало в диалоге, без домыслов.\n"
             "Уже заполненные поля не перезаписывай и не дублируй.\n"
-            "В реплике нет нового про поля из перечня — верни пустой список."
+            "Без вопроса бота короткая реплика клиента («механика») "
+            "сама по себе может быть ответом — смотри хвост.\n"
+            "В диалоге нет нового про поля из перечня — верни пустой список."
         )
         human = (
-            f"Реплика клиента: {reply}\n"
+            f"Хвост диалога:\n{history_block}\n"
+            f"Текущая реплика клиента: {reply}\n"
             f"Перечень полей:\n{field_lines}\n"
             f"Уже известно:\n{known_block}"
         )
@@ -138,6 +162,7 @@ async def guess_profile(
     *,
     known: Mapping[str, str],
     fields: Sequence[tuple[str, str]],
+    history: Sequence[BaseMessage] = (),
     agent: ProfileAgent | None = None,
 ) -> ProfileGuess:
     """Точка входа агента профиля с валидацией результата.
@@ -146,6 +171,7 @@ async def guess_profile(
         reply: реплика клиента.
         known: уже заполненный профиль.
         fields: перечень ``(key, title)`` из скрипта.
+        history: хвост истории разговора (без одной реплики смысл теряется).
         agent: подмена для офлайн-тестов.
 
     Returns:
@@ -156,7 +182,7 @@ async def guess_profile(
     worker = agent or LlmProfileAgent()
     allowed = {key for key, _title in fields}
     try:
-        guess = await worker.guess(reply, known, fields)
+        guess = await worker.guess(reply, known, fields, history)
     except Exception as exc:  # noqa: BLE001
         log.warning("Агент профиля упал: %s", exc)
         return ProfileGuess()

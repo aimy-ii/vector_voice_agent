@@ -11,11 +11,24 @@ from graph.context import (
     DYN_MISSING,
     DYN_NONE,
     DYN_READY,
+    DYN_SEARCHING,
     ConversationContext,
 )
 from graph.context_agent import ContextDecision
-from graph.contexter import run_contexter
+from graph.context_store import MemoryContextStore
+from graph.contexter import reply_hash, run_contexter
 from script.models import Objection
+
+
+@pytest.fixture(autouse=True)
+def _offline_contexter_store(monkeypatch):
+    """Офлайн: кеш контекста в памяти, без Redis."""
+    from graph import contexter as contexter_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "_call_id", lambda: "local")
+    return mem
 
 
 class _FakeAgent:
@@ -74,21 +87,24 @@ class _FakeTool:
 
 
 def test_run_contexter_без_allow_searching():
-    """Аргумента allow_searching больше нет в сигнатуре."""
+    """Аргумента allow_searching больше нет; needs и branches есть."""
     params = inspect.signature(run_contexter).parameters
     assert "allow_searching" not in params
     assert "branches" in params
+    assert "needs" in params
 
 
 async def test_need_false_не_требуется():
     agent = _FakeAgent(ContextDecision(need=False))
+    seeded = ConversationContext(static_text="Город: Пермь", dynamic_status=DYN_READY)
     out = await run_contexter(
-        ConversationContext(static_text="Город: Пермь"),
+        seeded,
         reply="да, хорошо",
         tools=[],
         agent=agent,
     )
-    assert out.dynamic_status == DYN_NONE
+    # Нет потребностей и агент не зовёт инструмент — статус не трогаем.
+    assert out.dynamic_status == DYN_READY
     assert out.situation_slug is None
     assert out.dynamic_reply == "да, хорошо"
     assert agent.calls == ["да, хорошо"]
@@ -287,3 +303,100 @@ async def test_изменённая_реплика_зовёт_агента():
     assert agent2.calls == ["А пересдача?"]
     assert tool2.calls == ["пересдача"]
     assert second.last_reply_hash != first.last_reply_hash
+
+
+async def test_needs_без_агента_и_searching_до_справочника(monkeypatch):
+    """Потребности шага исполняются без агента; SEARCHING в кеше до KB."""
+    from graph import contexter as contexter_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "_call_id", lambda: "local")
+
+    class _NoBranches:
+        async def list_branches(self, city_slug):
+            raise AssertionError("list_branches не должен зваться до facts")
+
+    monkeypatch.setattr(contexter_module, "vector_kb", _NoBranches())
+
+    statuses_at_kb: list[str] = []
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+
+        def __init__(self) -> None:
+            self.needs: list[str] = []
+            self.calls = 0
+
+        async def run(self, query, context, *, slugs=()):
+            self.calls += 1
+            loaded = await mem.load("local")
+            assert loaded is not None
+            statuses_at_kb.append(loaded.dynamic_status)
+            assert loaded.dynamic_reply_hash == reply_hash("сколько стоит?")
+            assert self.needs == ["price"]
+            return 'Факты справочника:\n{"price_line": "от 10000"}'
+
+    tool = _Facts()
+    agent = _FakeAgent(ContextDecision(need=False))
+    # Без city_slug — _load_branches не ходит в справочник.
+    out = await run_contexter(
+        ConversationContext(dynamic_turn=2),
+        reply="сколько стоит?",
+        tools=[tool],
+        needs=["price"],
+        agent=agent,
+    )
+    assert agent.calls == ["сколько стоит?"]
+    assert tool.calls == 1
+    assert statuses_at_kb == [DYN_SEARCHING]
+    assert out.dynamic_status == DYN_READY
+    assert "price_line" in out.dynamic_text
+    assert out.dynamic_reply_hash == reply_hash("сколько стоит?")
+
+
+async def test_needs_пустой_ответ_missing(monkeypatch):
+    """Поход был, данных нет — DYN_MISSING."""
+    from graph import contexter as contexter_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "_call_id", lambda: "local")
+
+    class _EmptyFacts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+
+        async def run(self, query, context, *, slugs=()):
+            return ""
+
+    out = await run_contexter(
+        ConversationContext(),
+        reply="цена?",
+        tools=[_EmptyFacts()],
+        needs=["price"],
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert out.dynamic_status == DYN_MISSING
+    assert out.dynamic_reply_hash == reply_hash("цена?")
+
+
+async def test_без_needs_и_без_агента_статус_не_трогается():
+    """Нет потребностей и агент не зовёт инструмент — статус как был."""
+    seeded = ConversationContext(
+        dynamic_status=DYN_READY,
+        dynamic_text="было",
+        dynamic_reply_hash="old",
+    )
+    out = await run_contexter(
+        seeded,
+        reply="угу",
+        tools=[],
+        needs=(),
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert out.dynamic_status == DYN_READY
+    assert out.dynamic_text == "было"
+    assert out.dynamic_reply_hash == "old"

@@ -134,6 +134,8 @@ async def test_генератор_без_ready_hash_берёт_waiting(
         raise AssertionError("контекстер не должен вызываться из respond")
 
     monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+    from graph.contexter import reply_hash
+
     reply = "а какие филиалы рядом?"
     ctx = ConversationContext(
         static_text="Город: Пермь",
@@ -141,7 +143,7 @@ async def test_генератор_без_ready_hash_берёт_waiting(
         dynamic_turn=1,
         pending_fields=["branch"],
         dynamic_reply=reply,
-        ready_reply_hash="",
+        dynamic_reply_hash=reply_hash(reply),
     )
     await ctx_store.save("local", ctx)
     state: dict[str, Any] = {
@@ -158,7 +160,7 @@ async def test_генератор_без_ready_hash_берёт_waiting(
     assert out.get("expect_continuation") is True
     prompt = model["messages"][0].content
     assert "Шапка скрипта" not in prompt
-    assert "уточняешь" in prompt.lower() or "уточня" in prompt.lower()
+    assert "предмет" in prompt.lower() or "готовиш" in prompt.lower()
     assert model["calls"] == 1
 
 
@@ -181,7 +183,7 @@ async def test_respond_читает_динамику_из_кеша_без_кон
         dynamic_text=fact,
         dynamic_status=DYN_READY,
         dynamic_reply=reply,
-        ready_reply_hash=reply_hash(reply),
+        dynamic_reply_hash=reply_hash(reply),
     )
     await ctx_store.save("local", ctx)
 

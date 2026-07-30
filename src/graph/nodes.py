@@ -27,6 +27,7 @@ from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
     DYN_NONE,
+    DYN_SEARCHING,
     ConversationContext,
     context_from_state,
 )
@@ -560,28 +561,19 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     profile = dict(state.get("profile") or {})
     is_continuation = turn_kind == "continuation"
 
-    # Готовность по реплике: лайв закончил разбор и контекстер по этой реплике.
-    if is_continuation:
-        fresh = True
-    elif user_text:
-        fresh = ctx.ready_reply_hash == reply_hash(user_text)
-    else:
-        fresh = True
-    needs_kb = any(needs_of(s) for s in head)
-    waiting = not fresh and needs_kb
+    # Статус «в поиске» по этой реплике — короткая сборка; иначе полная.
+    # На продолжении всегда полная. Хеш чужой реплики не подхватываем.
+    searching = (
+        not is_continuation
+        and bool(user_text)
+        and ctx.dynamic_status == DYN_SEARCHING
+        and ctx.dynamic_reply_hash == reply_hash(user_text)
+    )
+    context_text = ctx.render()
+    dynamic_status = ctx.dynamic_status or DYN_NONE
+    pending_fields = list(ctx.pending_fields or [])
 
-    if fresh:
-        context_text = ctx.render()
-        dynamic_status = ctx.dynamic_status or DYN_NONE
-        pending_fields = list(ctx.pending_fields or [])
-    else:
-        # Данные ещё готовятся или относятся к другой реплике — статику можно,
-        # динамику чужой реплики в промпт не отдаём.
-        context_text = (ctx.static_text or "").strip()
-        dynamic_status = DYN_NONE
-        pending_fields = list(ctx.pending_fields or []) if waiting else []
-
-    if waiting:
+    if searching:
         messages = build_waiting_messages(
             script,
             messages=state.get("messages") or [],
