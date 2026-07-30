@@ -758,6 +758,8 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     # Пустой эфир — pending не ставим. На продолжении шаги не трогаем.
     pending_step = step.id if step is not None and spoken_text and not is_continuation else None
+    # Флаг считает respond_node; сюда доезжает через состояние — не затираем.
+    expect_continuation = bool(state.get("expect_continuation"))
     patch.update(
         {
             "profile": profile,
@@ -774,15 +776,19 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "city_name": state.get("city_name"),
             "branch_slug": state.get("branch_slug"),
             "conversation_context": conversation_context,
-            "expect_continuation": bool(state.get("expect_continuation")),
+            "expect_continuation": expect_continuation,
         }
     )
     stage(
         "commit",
         (
-            f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}»"
+            f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
+            f"ожидание продолжения={expect_continuation}"
             if spoken_text
-            else f"шаг {step.id if step else '—'}, в эфир ничего не ушло"
+            else (
+                f"шаг {step.id if step else '—'}, в эфир ничего не ушло, "
+                f"ожидание продолжения={expect_continuation}"
+            )
         ),
         "done",
         profile_keys=sorted(profile),

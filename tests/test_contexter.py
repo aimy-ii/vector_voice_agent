@@ -390,6 +390,86 @@ async def test_needs_пустой_ответ_missing(monkeypatch):
     )
     assert out.dynamic_status == DYN_MISSING
     assert out.dynamic_reply_hash == reply_hash("цена?")
+    assert out.empty_needs == ["price"]
+
+
+async def test_пустой_поход_запоминается_и_повторно_не_идёт(monkeypatch):
+    """Пустой facts → empty_needs; следующий вызов за той же потребностью не ходит."""
+    from graph import contexter as contexter_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "_call_id", lambda: "local")
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+        calls = 0
+
+        async def run(self, query, context, *, slugs=()):
+            self.calls += 1
+            return ""
+
+    facts = _Facts()
+    seeded = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+    )
+    first = await run_contexter(
+        seeded,
+        reply="сколько стоит?",
+        tools=[facts],
+        needs=["price"],
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert facts.calls == 1
+    assert first.empty_needs == ["price"]
+    assert first.dynamic_status == DYN_MISSING
+
+    second = await run_contexter(
+        first,
+        reply="а цена какая?",
+        tools=[facts],
+        needs=["price"],
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert facts.calls == 1
+    assert second.empty_needs == ["price"]
+    # Вызовов не было — статус прошлого хода не затираем на MISSING заново.
+    assert second.dynamic_status == DYN_MISSING
+
+
+async def test_успешный_поход_не_попадает_в_empty_needs(monkeypatch):
+    """Данные получены — потребность в empty_needs не попадает."""
+    from graph import contexter as contexter_module
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "_call_id", lambda: "local")
+
+    class _Facts:
+        name = "facts"
+        description = "факты"
+        needs: list[str] = []
+
+        async def run(self, query, context, *, slugs=()):
+            return 'Факты справочника:\n{"price_line": "от 10000"}'
+
+    out = await run_contexter(
+        ConversationContext(
+            city_slug="perm",
+            city_name="Пермь",
+            static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        ),
+        reply="сколько?",
+        tools=[_Facts()],
+        needs=["price"],
+        agent=_FakeAgent(ContextDecision(need=False)),
+    )
+    assert out.dynamic_status == DYN_READY
+    assert "price" not in out.empty_needs
 
 
 async def test_без_города_city_meta_статус_не_трогается():

@@ -59,6 +59,9 @@ class ConversationContext(BaseModel):
             статус прошлого хода не подхватывается.
         pending_fields: ключи полей профиля, которые лайв-канал сейчас
             разбирает; для формы это состояние «уточняется».
+        empty_needs: потребности, за которыми уже ходили и справочник
+            вернул пусто. Повторно за ними не ходим до конца звонка:
+            данных в справочнике нет, и следующая попытка ничего не изменит.
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
@@ -77,6 +80,7 @@ class ConversationContext(BaseModel):
     last_reply_hash: str = ""
     dynamic_reply_hash: str = ""
     pending_fields: list[str] = Field(default_factory=list)
+    empty_needs: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -397,6 +401,7 @@ class ContextState(BaseModel):
     last_reply_hash: str = ""
     dynamic_reply_hash: str = ""
     pending_fields: list[str] = Field(default_factory=list)
+    empty_needs: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -463,6 +468,8 @@ def missing_needs(
 
     Потребность остаётся, если нужного нет в контексте и есть от чего
     плясать: городских данных не существует, пока не известен город.
+    Потребности из ``empty_needs`` отбрасываются — справочник уже ответил
+    пусто, повторный поход ничего не даст.
 
     Args:
         context: текущий контекст разговора.
@@ -477,10 +484,14 @@ def missing_needs(
     if profile and str(profile.get("branch") or "").strip():
         branch_selected = True
 
+    empty = {str(n).strip() for n in (context.empty_needs or []) if str(n).strip()}
+
     missing: list[str] = []
     for raw in needs:
         need = str(raw).strip()
         if not need:
+            continue
+        if need in empty:
             continue
         if need == "city_choices":
             if not city_known:
@@ -500,3 +511,33 @@ def missing_needs(
         else:
             missing.append(need)
     return missing
+
+
+def record_empty_needs(
+    context: ConversationContext,
+    needs: Sequence[str],
+    *,
+    found: bool,
+) -> None:
+    """Обновляет ``empty_needs`` по результату похода в справочник.
+
+    Пустой ответ — потребности запоминаются: за ними больше не ходим.
+    Данные получены — потребности из списка убираются, если были.
+
+    Args:
+        context: контекст разговора; список меняется на месте.
+        needs: потребности этого похода.
+        found: инструмент вернул данные.
+    """
+    cleaned = [str(n).strip() for n in needs if str(n).strip()]
+    if not cleaned:
+        return
+    if found:
+        drop = set(cleaned)
+        context.empty_needs = [n for n in context.empty_needs if n not in drop]
+        return
+    known = set(context.empty_needs)
+    for need in cleaned:
+        if need not in known:
+            context.empty_needs.append(need)
+            known.add(need)

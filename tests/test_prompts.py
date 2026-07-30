@@ -852,6 +852,8 @@ def test_build_waiting_messages_короче_без_статики_и_факто
     instruction = content.split("Ведущий шаг:")[0].split("Анкета")[0].split("Форма")[0]
     assert "филиал" not in instruction.lower()
     assert "предмет" in content.lower()
+    assert "восьми слов" in content.lower() or "восемь слов" in content.lower()
+    assert "придаточн" in content.lower()
     assert len(waiting) - 1 == 4
     assert len(content) * 2 < len(full[0].content)
 

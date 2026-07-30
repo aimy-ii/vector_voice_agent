@@ -84,3 +84,21 @@ def test_missing_needs_price_и_branch_meta():
 def test_missing_needs_неизвестная_считается_нужной():
     """Незнакомая потребность всегда остаётся."""
     assert missing_needs(ConversationContext(), ["custom_fact"]) == ["custom_fact"]
+
+
+def test_missing_needs_не_возвращает_empty_needs():
+    """Потребность из empty_needs не считается недостающей."""
+    from graph.context import record_empty_needs
+
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        empty_needs=["price"],
+    )
+    assert missing_needs(ctx, ["price", "branches"]) == ["branches"]
+    assert missing_needs(ctx, ["price"]) == []
+
+    # После успешного похода потребность уходит — missing снова её видит.
+    record_empty_needs(ctx, ["price"], found=True)
+    assert ctx.empty_needs == []
+    assert missing_needs(ctx, ["price"]) == ["price"]

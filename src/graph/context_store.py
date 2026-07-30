@@ -37,6 +37,7 @@ CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(
         "last_reply_hash",
         "dynamic_reply_hash",
         "pending_fields",
+        "empty_needs",
     }
 )
 #: Поля хода: пишет только основной ход после генерации.

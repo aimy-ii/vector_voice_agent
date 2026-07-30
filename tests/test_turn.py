@@ -1238,8 +1238,82 @@ async def test_ready_hash_полная_и_короткая_сборка(
         state["conversation_context"] = ctx.model_dump()
         model["result"] = {"reply": "Ок."}
         out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-        assert out.get("expect_continuation") is False
-        assert "Шапка скрипта" in model["messages"][0].content
+    assert out.get("expect_continuation") is False
+    assert "Шапка скрипта" in model["messages"][0].content
+
+
+async def test_commit_протаскивает_expect_continuation(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+):
+    """Флаг из respond доезжает в патч commit: waiting → True, полная → False."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    reply = "какие филиалы у Просвещения?"
+    digest = reply_hash(reply)
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        dynamic_status=DYN_SEARCHING,
+        pending_fields=["branch"],
+        dynamic_reply_hash=digest,
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "profile": {"city": "Пермь"},
+        "turn": 2,
+        "conversation_context": ctx.model_dump(),
+    }
+    model["result"] = {"reply": "Сейчас подберу филиалы."}
+    respond_out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert respond_out.get("expect_continuation") is True
+
+    commit_state = {
+        **state,
+        **respond_out,
+        "spoken": respond_out.get("spoken") or ["Сейчас подберу филиалы."],
+    }
+    commit_out = await nodes_module.commit_node(commit_state, None)  # type: ignore[arg-type]
+    assert commit_out.get("expect_continuation") is True
+
+    # Полная сборка — флаг False и в respond, и в commit.
+    ctx_full = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        dynamic_text="Филиалы под запрос: ул. Ленина, 1.",
+    )
+    await ctx_store.save("local", ctx_full)
+    state_full = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "profile": {"city": "Пермь"},
+        "turn": 3,
+        "conversation_context": ctx_full.model_dump(),
+    }
+    model["result"] = {"reply": "Ближайший на Ленина."}
+    respond_full = await nodes_module.respond_node(state_full, None)  # type: ignore[arg-type]
+    assert respond_full.get("expect_continuation") is False
+    commit_full_state = {
+        **state_full,
+        **respond_full,
+        "spoken": respond_full.get("spoken") or ["Ближайший на Ленина."],
+    }
+    commit_full = await nodes_module.commit_node(commit_full_state, None)  # type: ignore[arg-type]
+    assert commit_full.get("expect_continuation") is False
 
 
 async def test_respond_без_знаний_полная_сборка(

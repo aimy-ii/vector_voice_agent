@@ -23,6 +23,7 @@ from graph.context import (
     DYN_SEARCHING,
     ConversationContext,
     missing_needs,
+    record_empty_needs,
 )
 from graph.context_agent import ContextAgent, decide_context
 from graph.context_store import (
@@ -284,11 +285,14 @@ async def _fulfill_needs(
         if city_tool is not None:
             invoked = True
             found = await _run_tool(city_tool, reply, context)
+            got_city = bool((found or "").strip()) or (
+                bool(context.city_slug) and context.city_slug != city_before
+            )
             if (found or "").strip():
                 _append_dynamic(context, found)
+            if got_city:
                 got = True
-            elif context.city_slug and context.city_slug != city_before:
-                got = True
+            record_empty_needs(context, ["city_choices"], found=got_city)
 
     fact_needs = [n for n in needs if n in FACT_NEEDS]
     if fact_needs:
@@ -297,21 +301,32 @@ async def _fulfill_needs(
             facts_tool.needs = list(fact_needs)  # type: ignore[attr-defined]
             invoked = True
             found = await _run_tool(facts_tool, "", context)
-            if (found or "").strip():
+            preview = (found or "").strip()
+            log.info(
+                "Контекстер facts: потребности=%s, ответ=%s",
+                fact_needs,
+                preview[:200] if preview else "«пусто»",
+            )
+            got_facts = bool(preview) or (
+                bool(context.city_slug) and context.city_slug != city_before
+            )
+            if preview:
                 _append_dynamic(context, found)
+            if got_facts:
                 got = True
-            elif context.city_slug and context.city_slug != city_before:
-                got = True
+            record_empty_needs(context, fact_needs, found=got_facts)
 
     if "branch_meta" in needs and context.branch_slug:
         details = _tool_by_name(tools, "branch_details")
         if details is not None:
             invoked = True
             found = await _run_tool(details, "", context)
-            if (found or "").strip() or (
-                context.branch_slug and context.branch_slug != branch_before
-            ):
+            got_branch = bool((found or "").strip()) or (
+                bool(context.branch_slug) and context.branch_slug != branch_before
+            )
+            if got_branch:
                 got = True
+            record_empty_needs(context, ["branch_meta"], found=got_branch)
 
     return got, invoked
 
