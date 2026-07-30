@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.checker import (
     CheckerVerdict,
+    checker_system_prompt,
     close_delivered_inform,
     history_slice_for,
     run_checker,
@@ -20,13 +21,22 @@ class FakeChecker:
         self.verdicts = list(verdicts)
         self.calls: list[dict] = []
 
-    async def judge(self, *, history_slice, client_reply, step, step_text):
+    async def judge(
+        self,
+        *,
+        history_slice,
+        client_reply,
+        step,
+        step_text,
+        attempts: int = 0,
+    ):
         self.calls.append(
             {
                 "history_slice": history_slice,
                 "client_reply": client_reply,
                 "step_id": step.id,
                 "step_text": step_text,
+                "attempts": attempts,
             }
         )
         if not self.verdicts:
@@ -395,3 +405,58 @@ def test_close_delivered_inform_только_inform(script):
         delivered=True,
     )
     assert after_check.status.get("practice") != "closed"
+
+
+def test_checker_system_prompt_ветка_asked():
+    """Ветки asked дают разный текст с нужными смысловыми правилами."""
+    asked = checker_system_prompt(asked=True)
+    not_asked = checker_system_prompt(asked=False)
+
+    assert asked != not_asked
+    assert "повторить" in asked
+    assert "после" in asked and "вопрос" in asked
+    assert "где угодно" in not_asked
+    assert "срезе" in not_asked
+
+
+async def test_фейковый_судья_получает_attempts(script):
+    """В судью уходит счётчик попыток шага из прогресса."""
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
+    await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="Андрей")],
+        profile={},
+        turn=2,
+        client=client,
+        attempt_limit=3,
+    )
+    assert client.calls
+    assert client.calls[0]["attempts"] == 2
+
+
+async def test_просьба_повторить_не_закрывает_и_цикл_рвётся(script):
+    """step_closed=false на просьбе повторить — шаг pending, дальше по шапке нет."""
+    client = FakeChecker(
+        [
+            CheckerVerdict(reply_usable=True, step_closed=False),
+            CheckerVerdict(reply_usable=True, step_closed=True),
+        ]
+    )
+    progress = ScriptProgress(
+        status={"name": "pending", "city": "pending"},
+        attempts={"name": 1, "city": 1},
+    )
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="отвлёкся, не услышал, повторите")],
+        profile={},
+        turn=2,
+        client=client,
+    )
+    assert updated.status.get("name") == "pending"
+    assert updated.status.get("city") != "closed"
+    assert len(client.calls) == 1
+    assert client.calls[0]["step_id"] == "name"

@@ -49,7 +49,15 @@ async def test_шаг_на_пороге_закрывается_диалогом_
     """Модель/fills смотрят раньше счётчика — основание «диалог»."""
 
     class _Judge:
-        async def judge(self, *, history_slice, client_reply, step, step_text):
+        async def judge(
+            self,
+            *,
+            history_slice,
+            client_reply,
+            step,
+            step_text,
+            attempts: int = 0,
+        ):
             return CheckerVerdict(
                 reply_usable=True,
                 step_closed=True,
@@ -75,7 +83,15 @@ async def test_шаг_на_пороге_без_закрытия_моделью_�
     """Модель не закрыла — после неё срабатывает счётчик."""
 
     class _Judge:
-        async def judge(self, *, history_slice, client_reply, step, step_text):
+        async def judge(
+            self,
+            *,
+            history_slice,
+            client_reply,
+            step,
+            step_text,
+            attempts: int = 0,
+        ):
             return CheckerVerdict(
                 reply_usable=True,
                 step_closed=False,
@@ -103,7 +119,15 @@ async def test_шаг_на_пороге_без_закрытия_моделью_�
 
 async def test_признак_asks_inform_из_чекера(script):
     class _Judge:
-        async def judge(self, *, history_slice, client_reply, step, step_text):
+        async def judge(
+            self,
+            *,
+            history_slice,
+            client_reply,
+            step,
+            step_text,
+            attempts: int = 0,
+        ):
             return CheckerVerdict(
                 reply_usable=True,
                 step_closed=False,

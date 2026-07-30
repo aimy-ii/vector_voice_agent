@@ -42,13 +42,22 @@ class FakeChecker:
         self.verdicts = list(verdicts)
         self.calls: list[dict] = []
 
-    async def judge(self, *, history_slice, client_reply, step, step_text):
+    async def judge(
+        self,
+        *,
+        history_slice,
+        client_reply,
+        step,
+        step_text,
+        attempts: int = 0,
+    ):
         self.calls.append(
             {
                 "history_slice": history_slice,
                 "client_reply": client_reply,
                 "step_id": step.id,
                 "step_text": step_text,
+                "attempts": attempts,
             }
         )
         if not self.verdicts:
