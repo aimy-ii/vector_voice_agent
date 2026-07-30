@@ -80,12 +80,10 @@ class CallState(TypedDict, total=False):
             ходу; ``None`` — новых шагов нет, добор отсечён или все шаги
             висящие. Считать по счётчикам в промпте нельзя: к моменту
             генерации они уже увеличены.
-        spoken_filler: заглушка, ушедшая в эфир до генератора.
-        filler_subject: предмет прозвучавшей заглушки («город», «филиал»,
-            «стоимость») или ``None``, если прозвучал короткий отклик без
-            предмета. Нужен генератору: после заглушки с предметом тема уже
-            названа, подводку делать нельзя.
-        last_filler_turn: номер хода, на котором звучала заглушка.
+        expect_continuation: после реплики бот сам запустит следующий ход
+            без реплики клиента (контекст ещё готовится).
+        turn_kind: ``client`` — обычный ход по реплике клиента;
+            ``continuation`` — продолжение собственной речи бота.
         branch_candidates: отобранные резолвером слаги филиалов.
         partial_reply: накопленный распознанный текст текущей реплики
             клиента; вход служебного графа ``vector_checker``.
@@ -135,15 +133,12 @@ class CallState(TypedDict, total=False):
     delivered_step: str | None
 
     facts: dict[str, Any]
-    route: str | None
     spoken: list[str]
-    spoken_filler: str | None
-    filler_subject: str | None
-    fillers_used: list[str]
-    last_filler_turn: int
     branch_candidates: list[str]
     turn_result: dict[str, Any]
     call_finished: bool
+    expect_continuation: bool
+    turn_kind: str
     partial_reply: str
     partial_utterance_id: str
     partial_is_final: bool
@@ -180,15 +175,12 @@ def new_state_defaults() -> dict[str, Any]:
         "last_delivered": True,
         "delivered_step": None,
         "facts": {},
-        "route": None,
         "spoken": [],
-        "spoken_filler": None,
-        "filler_subject": None,
-        "fillers_used": [],
-        "last_filler_turn": 0,
         "branch_candidates": [],
         "turn_result": {},
         "call_finished": False,
+        "expect_continuation": False,
+        "turn_kind": "client",
         "partial_reply": "",
         "partial_utterance_id": "",
         "partial_is_final": False,

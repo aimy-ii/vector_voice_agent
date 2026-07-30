@@ -34,7 +34,7 @@ from graph.prompts import (
 )
 
 #: Число правил речи — замена формулировок не увеличивает набор.
-_SPEECH_RULES_COUNT = 19
+_SPEECH_RULES_COUNT = 21
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -450,7 +450,6 @@ def test_запрет_механики_ровно_один_раз(script):
         facts={"city": {"name": "Пермь"}},
         history=[],
         asides_done=[],
-        spoken_filler="Секунду, гляну.",
         context_text="Город: Пермь",
     )
     content = messages[0].content
@@ -743,70 +742,6 @@ def test_naturalness_правило_подводки_к_теме(script):
     assert "подводк" in messages[0].content.lower()
 
 
-def test_filler_subject_запрещает_подводку(script):
-    with_subject = build_turn_messages(
-        script=script,
-        steps=[script.step("city")],
-        profile={},
-        facts={},
-        history=[],
-        asides_done=[],
-        spoken_filler="Секунду, открываю город. Так, вижу.",
-        filler_subject="город",
-    )
-    content = with_subject[0].content.lower()
-    assert "продолжить" in content
-    assert "подводку" in content
-    assert "не делать" in content
-
-    without_subject = build_turn_messages(
-        script=script,
-        steps=[script.step("city")],
-        profile={},
-        facts={},
-        history=[],
-        asides_done=[],
-        spoken_filler="Секунду.",
-        filler_subject=None,
-    )
-    content_ack = without_subject[0].content.lower()
-    assert "подводку к теме не делать" not in content_ack
-    assert "подводка к теме при этом уместна" in content_ack
-
-
-def test_spoken_filler_запрещает_начало_с_подтверждения(script):
-    """При непустом spoken_filler — продолжить начатую реплику, без подтверждения."""
-    for subject in ("филиал", None):
-        messages = build_turn_messages(
-            script=script,
-            steps=[script.step("city")],
-            profile={},
-            facts={},
-            history=[],
-            asides_done=[],
-            spoken_filler="Угу, минутку.",
-            filler_subject=subject,
-        )
-        content = messages[0].content.lower()
-        assert "продолжить" in content
-        assert "подтверждающ" in content
-        assert "междомет" in content
-
-
-def test_build_turn_messages_без_filler_subject_обратная_совместимость(script):
-    messages = build_turn_messages(
-        script=script,
-        steps=[script.step("name")],
-        profile={},
-        facts={},
-        history=[HumanMessage(content="привет")],
-        asides_done=[],
-        spoken_filler="Секунду, гляну.",
-    )
-    assert "продолжить" in messages[0].content.lower()
-    assert "подводку к теме не делать" not in messages[0].content.lower()
-
-
 def test_naturalness_живая_связка_с_ответом_клиента():
     """Реплика начинается с услышанного и связывается со следующим шагом."""
     from graph.prompts import naturalness_block
@@ -827,3 +762,58 @@ def test_unknown_запрет_выдумывать_филиал(script):
     assert "придумывать" in text
     # Обратная совместимость: вызов без новых аргументов.
     assert script.params.unknown.split()[0].lower() in text or "не придумывать" in text
+
+
+def test_profile_block_pending_в_уточняется_не_в_неизвестном(script):
+    from graph.prompts import profile_block
+
+    text = profile_block(
+        script,
+        {"caller_name": "Мария"},
+        pending_fields=["city"],
+    )
+    assert "уточняется" in text.lower()
+    assert "city" in text
+    # В секции неизвестного city не дублируется.
+    unknown_part = text.split("Чего ещё не знаем")[-1] if "Чего ещё не знаем" in text else ""
+    assert "- city" not in unknown_part
+
+
+def test_build_waiting_messages_короче_без_статики_и_фактов(script):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from graph.prompts import build_turn_messages, build_waiting_messages
+
+    history = [
+        AIMessage(content="В каком городе?"),
+        HumanMessage(content="Пермь"),
+        AIMessage(content="Какой район?"),
+        HumanMessage(content="Просвещения"),
+        AIMessage(content="Секунду."),
+        HumanMessage(content="Ну что?"),
+    ]
+    waiting = build_waiting_messages(
+        script,
+        messages=history,
+        profile={"city": "Пермь"},
+        pending_fields=["branch"],
+        step=script.step("branch"),
+        history_limit=4,
+    )
+    full = build_turn_messages(
+        script=script,
+        steps=[script.step("branch")],
+        profile={"city": "Пермь"},
+        facts={"price_line": "Стоимость — 43900"},
+        history=history,
+        asides_done=[],
+        context_text="Статика: Пермь, автопарк Solaris",
+        pending_fields=["branch"],
+    )
+    content = waiting[0].content
+    assert "Статика:" not in content
+    assert "43900" not in content
+    assert "Шапка скрипта" not in content
+    assert "Требования:" not in content
+    assert len(waiting) - 1 == 4
+    assert len(content) * 2 < len(full[0].content)

@@ -139,3 +139,54 @@ async def test_поля_хода_пишутся_отдельно_не_затир
     assert "Филиалы под запрос" in loaded.dynamic_text
     assert loaded.dynamic_status == DYN_READY
     assert loaded.dynamic_reply == "какие у Ленина?"
+
+
+async def test_dynamic_turn_hash_pending_пишутся_с_динамикой(
+    memory_context_store: MemoryContextStore,
+):
+    """dynamic_turn, last_reply_hash и pending_fields — набор динамики."""
+    store = memory_context_store
+    base = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        city_name="Пермь",
+    )
+    await store.save("c1", base)
+
+    dynamic_overlay = ConversationContext(
+        dynamic_text="Ищем филиалы.",
+        dynamic_status=DYN_READY,
+        dynamic_reply="какие филиалы?",
+        dynamic_turn=3,
+        last_reply_hash="abc123",
+        pending_fields=["branch"],
+    )
+    cached = await store.load("c1")
+    assert cached is not None
+    merged = merge_context_fields(cached, dynamic_overlay, CONTEXT_FIELDS_DYNAMIC)
+    await store.save("c1", merged)
+
+    # Статика поверх не затирает динамические поля.
+    static_overlay = ConversationContext(
+        static_text="Город: Пермь\nФилиал",
+        city_slug="perm",
+        city_name="Пермь",
+        branch_slug="perm_lenina",
+        frozen=True,
+        dynamic_turn=0,
+        last_reply_hash="",
+        pending_fields=[],
+    )
+    cached = await store.load("c1")
+    assert cached is not None
+    final = merge_context_fields(cached, static_overlay, CONTEXT_FIELDS_STATIC)
+    await store.save("c1", final)
+
+    loaded = await store.load("c1")
+    assert loaded is not None
+    assert loaded.static_text.startswith("Город: Пермь")
+    assert loaded.branch_slug == "perm_lenina"
+    assert loaded.dynamic_turn == 3
+    assert loaded.last_reply_hash == "abc123"
+    assert loaded.pending_fields == ["branch"]
+    assert "Ищем филиалы" in loaded.dynamic_text

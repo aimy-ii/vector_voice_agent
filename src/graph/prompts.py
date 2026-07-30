@@ -16,7 +16,7 @@ from typing import Any, Mapping, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.config import settings
-from graph.context import DYN_MISSING
+from graph.context import DYN_MISSING, DYN_READY
 from graph.names import given_name
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
@@ -44,6 +44,8 @@ SPEECH_RULES: tuple[str, ...] = (
     "Спрашивать согласие с содержанием («такой вариант / формат / подход устраивает, подходит, удобен» и любые переделки) — нельзя: это пустая проверка, на которую человек отвечает «да» и разговор не двигается. Короткий возврат хода после рассказа («Что скажете?», «Пока всё понятно?», «Продолжу?») обязателен и запретом не считается: он отдаёт слово, а не просит одобрить сказанное.",
     "Вопрос звучит так, как спросил бы человек в разговоре. Служебные обороты — «подскажите, пожалуйста», «уточню», «по такому-то вопросу определились», «рассматриваете ли вы» — в живой речи не встречаются. Короткий прямой вопрос: «В каком городе будете учиться?», «Механика или автомат?»",
     "На отвеченное переспроса нет. Если в одной реплике человек ответил сразу на несколько вещей — принять всё и не спрашивать заново.",
+    "Реплика опирается на историю разговора — на то, что сказал человек, и на то, что бот говорил до этого. Не повторять сказанное, не начинать заново, не задавать вопрос, ответ на который уже прозвучал.",
+    "Утверждать наличие филиала в конкретном районе, у метро или на улице можно только если он есть в контексте. Нет — сказать, что уточняешь, либо назвать те, что есть. Придумывать филиал по названию района запрещено.",
     "Обращение по имени и только по имени, отчество не используется никогда. Имя звучит ровно дважды: когда человек представился и при прощании.",
     "Если реплика клиента бессвязна, оборвана или не отвечает на заданный вопрос — переспросить коротко, а не додумывать смысл и не отвечать про себя.",
     "Разговор сворачивается только тогда, когда человек сам прощается словами: «до свидания», «мне пора», «я перезвоню». Молчание и короткие ответы «да», «нет», «понятно» — не повод прощаться.",
@@ -150,8 +152,8 @@ def naturalness_block(*, ask_for_move: bool, pending_only: bool = False) -> str:
             "- Одна реплика клиента может закрыть несколько шагов — зафиксировать всё "
             "прозвучавшее в understood, даже если спрашивали не об этом.",
             "- Обращение по имени и только по имени; отчество не используется никогда.",
-            "- Не начинать со второго вступления, если перед этим уже прозвучала "
-            "фраза-заглушка: продолжать с места, без повторного «добрый день».",
+            "- Не начинать со второго вступления, если разговор уже идёт: "
+            "продолжать с места, без повторного «добрый день».",
             "- НЕ оценивать и НЕ комментировать выбор клиента и его данные. Не хвалить "
             "выбор («хороший выбор», «отличный вариант»), не оценивать возраст, "
             "опыт, город, коробку («возраст подходит», «отличная категория»). "
@@ -211,44 +213,91 @@ def persona_block() -> str:
     )
 
 
-def profile_block(script: CompiledScript, profile: Mapping[str, str]) -> str:
-    """Показывает, что уже известно о собеседнике.
+def profile_block(
+    script: CompiledScript,
+    profile: Mapping[str, str],
+    *,
+    pending_fields: Sequence[str] = (),
+) -> str:
+    """Показывает форму профиля в трёх состояниях.
 
-    В формате продаж форма профиля не объявляется: показываем то, что уже
-    записано в профиль по именам полей из требований шагов.
+    Секции: что известно, что уточняется прямо сейчас, чего ещё не знаем.
+    Поле из ``pending_fields`` попадает во вторую секцию, даже если значение
+    пустое, и не дублируется в третьей. В формате продаж перечень полей не
+    объявлен — секции «чего не знаем» нет, а «уточняется» будет.
 
     Args:
         script: скомпилированный скрипт.
         profile: собранный профиль.
+        pending_fields: поля, которые лайв-канал сейчас разбирает.
 
     Returns:
         Текстовый блок для системного сообщения.
     """
+    pending = {str(key).strip() for key in pending_fields if str(key).strip()}
     known: list[str] = []
+    clarifying: list[str] = []
     unknown: list[str] = []
+
+    def _label(key: str, field: Any = None) -> str:
+        if field is None:
+            return key
+        whose = "звонящий" if field.role == "caller" else "будущий курсант"
+        return f"{key} ({field.title}, {whose})"
 
     if script.is_sales:
         for key, raw_value in sorted(profile.items()):
             raw = str(raw_value).strip()
+            if key in pending:
+                value = given_name(raw) if key in {"caller_name", "student_name"} and raw else raw
+                line = f"- {key}: {value}" if value else f"- {key}"
+                clarifying.append(line)
+                continue
             if not raw:
                 continue
             value = given_name(raw) if key in {"caller_name", "student_name"} else raw
             known.append(f"- {key}: {value}")
+        for key in sorted(pending):
+            if any(line.startswith(f"- {key}") for line in clarifying):
+                continue
+            clarifying.append(f"- {key}")
         parts = ["Что уже известно:"]
         parts.append("\n".join(known) if known else "- пока ничего")
+        if clarifying:
+            parts.append(
+                "\nЧто уточняется прямо сейчас (поле разбирается — "
+                "переспрашивать не надо, скоро будет известно):"
+            )
+            parts.append("\n".join(clarifying))
         return "\n".join(parts)
 
     for key, field in script.profile_fields.items():
-        whose = "звонящий" if field.role == "caller" else "будущий курсант"
         raw = str(profile.get(key, "")).strip()
         value = given_name(raw) if key in {"caller_name", "student_name"} and raw else raw
-        if value:
-            known.append(f"- {key} ({field.title}, {whose}): {value}")
+        label = _label(key, field)
+        if key in pending:
+            line = f"- {label}: {value}" if value else f"- {label}"
+            clarifying.append(line)
+        elif value:
+            known.append(f"- {label}: {value}")
         else:
-            unknown.append(f"- {key} ({field.title}, {whose})")
+            unknown.append(f"- {label}")
+
+    for key in sorted(pending):
+        if key in script.profile_fields:
+            continue
+        if any(line.startswith(f"- {key}") for line in clarifying):
+            continue
+        clarifying.append(f"- {key}")
 
     parts = ["Что уже известно:"]
     parts.append("\n".join(known) if known else "- пока ничего")
+    if clarifying:
+        parts.append(
+            "\nЧто уточняется прямо сейчас (поле разбирается — "
+            "переспрашивать не надо, скоро будет известно):"
+        )
+        parts.append("\n".join(clarifying))
     if unknown:
         parts.append("\nЧего ещё не знаем (переспрашивать известное — ошибка):")
         parts.append("\n".join(unknown))
@@ -535,67 +584,51 @@ def facts_block(facts: Mapping[str, Any]) -> str:
     )
 
 
-def filler_spoken_block(
-    spoken_filler: str | None,
-    *,
-    filler_subject: str | None = None,
-) -> str:
-    """Сообщает генератору, что реплика уже начата вслух и её надо продолжить.
-
-    Args:
-        spoken_filler: всё, что ушло в эфир на этом ходу до генератора
-            (зачин и связки), дословно.
-        filler_subject: предмет заглушки («город», «филиал», «стоимость»)
-            или ``None``, если предмета не было.
-
-    Returns:
-        Текстовый блок или пустая строка.
-    """
-    text = (spoken_filler or "").strip()
-    if not text:
-        return ""
-    # Признак, не список слов: модель обойдёт запрет синонимом.
-    continue_rule = (
-        "Реплика уже начата и произнесена вслух дословно так: "
-        f"«{text}». Задача — продолжить её одной связной речью с того места, "
-        "где она оборвалась. Не здороваться заново, не начинать с "
-        "подтверждающего слова или междометия, не пересказывать зачин своими "
-        "словами и не объявлять тему повторно, если она уже названа. "
-        "Плохо: прозвучало «Секунду, открываю Санкт-Петербург. Так, вижу.» → "
-        "«Так, сейчас. В Санкт-Петербурге у нас 11 филиалов.». "
-        "Хорошо: прозвучало «Секунду, открываю Санкт-Петербург. Так, вижу.» → "
-        "«Филиалов одиннадцать, в каком районе удобнее заниматься?»."
-    )
-    if filler_subject:
-        return (
-            f"{continue_rule} Тема «{filler_subject}» уже названа вслух: "
-            "подводку к теме не делать, сразу к сути."
-        )
-    return f"{continue_rule} Подводка к теме при этом уместна."
-
-
 def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
     """Инструкция генератору по статусу динамики контекста.
 
+    Ветка ``DYN_SEARCHING`` сюда не входит — её обслуживает
+    ``build_waiting_messages``.
+
     Args:
         status: ``dynamic_status`` из контекста.
-        searching_retry: повторный заход при «в поиске» после заглушки.
+        searching_retry: устаревший флаг; игнорируется.
 
     Returns:
         Текстовый блок или пустая строка.
     """
+    del searching_retry
     if status == DYN_MISSING:
         return (
             "По нужному факту в данных ничего нет. Тактично сказать, что этого "
             "нет, и вести разговор дальше — не выдумывать."
         )
-    if searching_retry:
-        return (
-            "Поиск по факту ещё не завершён, пауза-заглушка уже звучала. "
-            "На контекст по этому вопросу не опираться — ответить технично и "
-            "вести разговор дальше."
-        )
+    if status == DYN_READY:
+        return ""
     return ""
+
+
+def continuation_block(*, turn_kind: str) -> str:
+    """Правило для хода-продолжения собственной речи бота.
+
+    Args:
+        turn_kind: ``client`` или ``continuation``.
+
+    Returns:
+        Текстовый блок или пустая строка.
+    """
+    if turn_kind != "continuation":
+        return ""
+    return (
+        "Это продолжение вашей собственной речи: реплики клиента не было. "
+        "Продолжать с того места, где остановились, ответом по существу того, "
+        "что обещали уточнить. Не здороваться, не начинать с подтверждающего "
+        "слова, не переспрашивать сказанное человеком. "
+        "Прозвучало: «Сейчас уточню, какие филиалы рядом с Просвещения.» "
+        "Плохо: «Понятно. Итак, по филиалам…» "
+        "Хорошо: «Ближайшие — Комендантская площадь и Коломяжский проспект. "
+        "Какой удобнее?»"
+    )
 
 
 def aside_block(script: CompiledScript, done: Sequence[str]) -> str:
@@ -638,6 +671,61 @@ def unknown_block(script: CompiledScript) -> str:
     )
 
 
+def build_waiting_messages(
+    script: CompiledScript,
+    *,
+    messages: Sequence[BaseMessage],
+    profile: Mapping[str, str],
+    pending_fields: Sequence[str],
+    step: AnyStep | None,
+    history_limit: int,
+    turn_kind: str = "client",
+) -> list[BaseMessage]:
+    """Собирает укороченный запрос к генератору для реплики ожидания.
+
+    Реплика короткая и нужна быстро, поэтому в промпт не идут статика
+    города, факты и шапка шагов: только правила речи, ведущий шаг одной
+    строкой, что уточняется, и хвост диалога.
+
+    Args:
+        script: скомпилированный скрипт.
+        messages: история разговора.
+        profile: профиль клиента.
+        pending_fields: поля, которые сейчас разбираются.
+        step: ведущий шаг, чтобы не терять нить.
+        history_limit: сколько последних сообщений оставить.
+        turn_kind: ``client`` или ``continuation``.
+
+    Returns:
+        Список сообщений: одно системное и обрезанный хвост истории.
+    """
+    lines = [
+        f"Роль: {settings.agent_name}, {settings.agent_role} «{settings.agent_company}».",
+        "К клиенту только на «Вы». Тон живой, без канцелярита.",
+        "Одна-две коротких фразы.",
+        "Задача: сказать своими словами, что сейчас уточняешь, и удержать "
+        "разговор. Что именно уточняется — понять из хвоста диалога: "
+        "спросили про филиалы, значит уточняются филиалы.",
+        "Не выдумывать данные, не называть цифры и адреса, не начинать заново, не здороваться.",
+        "Реплика опирается на историю разговора. Не повторять сказанное, "
+        "не задавать вопрос, ответ на который уже прозвучал.",
+    ]
+    cont = continuation_block(turn_kind=turn_kind)
+    if cont:
+        lines.append(cont)
+    if step is not None:
+        name = getattr(step, "name", None) or getattr(step, "goal", None) or step.id
+        lines.append(f"Ведущий шаг: {step.id} — {name}.")
+    form = profile_block(script, profile, pending_fields=pending_fields)
+    lines.append(form)
+
+    limit = max(1, int(history_limit))
+    tail = list(messages)[-limit:]
+    if not tail:
+        tail = [HumanMessage(content="(клиент молчит)")]
+    return [SystemMessage(content="\n".join(lines)), *tail]
+
+
 def build_turn_messages(
     *,
     script: CompiledScript,
@@ -649,18 +737,17 @@ def build_turn_messages(
     asides_done: Sequence[str],
     next_step: AnyStep | None = None,
     context_text: str = "",
-    spoken_filler: str | None = None,
-    filler_subject: str | None = None,
     attempts: Mapping[str, int] | None = None,
     dynamic_status: str = "",
-    searching_retry: bool = False,
     new_step_id: str | None = None,
+    pending_fields: Sequence[str] = (),
+    turn_kind: str = "client",
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к генератору.
 
     Порядок: персона + естественность + unknown → статика контекста →
-    профиль → факты хода → шапка → возражения → заглушка → инструкция схемы →
-    хвост истории.
+    профиль → факты хода → шапка → возражения → инструкция схемы →
+    хвост истории. Ветка ``DYN_SEARCHING`` сюда не входит.
 
     Args:
         script: скомпилированный скрипт.
@@ -672,13 +759,12 @@ def build_turn_messages(
         asides_done: отработанные возражения.
         next_step: следующий шаг (совместимость).
         context_text: документ контекста.
-        spoken_filler: всё, что уже ушло в эфир на этом ходу (зачин и связки).
-        filler_subject: предмет заглушки или ``None``, если предмета не было.
         attempts: счётчики попыток.
-        dynamic_status: статус динамики контекста.
-        searching_retry: повторный «в поиске» после заглушки.
+        dynamic_status: статус динамики контекста (``готово`` / ``не нашлось``).
         new_step_id: шаг, впервые взятый в шапку на этот ход; ``None`` —
             шапка из висящих, новый вопрос задавать нельзя.
+        pending_fields: поля профиля, которые сейчас разбираются.
+        turn_kind: ``client`` или ``continuation``.
 
     Returns:
         Список сообщений: одно системное и хвост истории.
@@ -701,16 +787,19 @@ def build_turn_messages(
         naturalness_block(ask_for_move=ask_for_move, pending_only=pending_only),
         unknown_block(script),
     ]
-    status_note = dynamic_status_block(status=dynamic_status, searching_retry=searching_retry)
+    cont = continuation_block(turn_kind=turn_kind)
+    if cont:
+        blocks.append(cont)
+    status_note = dynamic_status_block(status=dynamic_status)
     if status_note:
         blocks.append(status_note)
     ctx_for_steps = ""
-    if context_text and not searching_retry:
+    if context_text:
         ctx = context_block(context_text)
         if ctx:
             blocks.append(ctx)
         ctx_for_steps = context_text
-    blocks.append(profile_block(script, profile))
+    blocks.append(profile_block(script, profile, pending_fields=pending_fields))
 
     facts_text = facts_block(facts)
     if facts_text:
@@ -728,9 +817,6 @@ def build_turn_messages(
     )
     if not script.is_sales:
         blocks.append(aside_block(script, asides_done))
-    filler = filler_spoken_block(spoken_filler, filler_subject=filler_subject)
-    if filler:
-        blocks.append(filler)
     blocks.append(
         "Вернуть ответ строго по схеме. В поле reply — только то, что звучит "
         "вслух: живой разговорный русский, без списков и канцелярита."

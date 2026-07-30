@@ -787,3 +787,168 @@ async def test_live_check_при_выбранном_филиале_список_
 
     assert "list_branches" not in fake_kb.calls
     assert seen["branches"] == []
+
+
+async def test_live_lookup_ставит_searching_и_чистит_pending(script, monkeypatch, _offline_context):
+    """Лайв-канал: DYN_SEARCHING с номером хода и pending, затем READY/MISSING."""
+    from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING, ConversationContext
+    from graph.resolvers import BranchResolution
+    from tests.conftest import FakeKB
+
+    text = "Просвещения, какой филиал ближе?"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(
+        status={
+            "name": "closed",
+            "city": "closed",
+            "who_studies": "closed",
+            "experience": "closed",
+            "transmission": "closed",
+            "terms": "closed",
+            "theory_format": "closed",
+            "included": "closed",
+            "practice": "closed",
+            "branch": "pending",
+        },
+        attempts={"branch": 1},
+        taken_turn={"branch": 2},
+        profile={"city": "Пермь", "caller_name": "Мария"},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"city": "Пермь", "caller_name": "Мария"},
+        turn=3,
+    )
+    state["city_slug"] = "perm"
+    state["city_name"] = "Пермь"
+    state["current_step"] = "branch"
+    state["head_steps"] = ["branch"]
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            city_name="Пермь",
+        ),
+    )
+
+    branches = [
+        {"slug": "perm_lenina", "address": "ул. Ленина, 1", "landmark": "центр"},
+        {"slug": "perm_mira", "address": "ул. Мира, 2"},
+    ]
+    fake_kb = FakeKB(cities=[], city=None, branches=branches, branch=None)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    class _Branch:
+        async def resolve(self, text, branches):
+            return BranchResolution(slugs=["perm_lenina"], selected=None)
+
+    async def _decide(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.checker_graph._branch_resolver", _Branch())
+    monkeypatch.setattr("graph.nodes._branch_resolver", _Branch())
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+
+    saved_ctx_statuses: list[tuple[str, list[str], int]] = []
+    original_save = _offline_context.save
+
+    async def save_wrap(call_id, context):
+        saved_ctx_statuses.append(
+            (
+                context.dynamic_status,
+                list(context.pending_fields or []),
+                int(context.dynamic_turn or 0),
+            )
+        )
+        return await original_save(call_id, context)
+
+    monkeypatch.setattr(_offline_context, "save", save_wrap)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert any(s == DYN_SEARCHING for s, _, _ in saved_ctx_statuses)
+    searching = next(t for t in saved_ctx_statuses if t[0] == DYN_SEARCHING)
+    assert searching[1] == ["branch"]
+    assert searching[2] == 3
+    final_ctx = out.get("conversation_context") or {}
+    assert final_ctx.get("pending_fields") in ([], None)
+    assert final_ctx.get("dynamic_status") in {DYN_READY, DYN_MISSING}
+    dyn = final_ctx.get("dynamic_text") or ""
+    assert "branch_options" in dyn or out.get("branch_candidates") or "Ленина" in dyn
+
+
+async def test_live_lookup_ошибка_даёт_missing(script, monkeypatch, _offline_context):
+    from graph.context import DYN_MISSING
+    from tests.conftest import FakeKB
+
+    text = "Пермь"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(
+        status={"name": "closed", "city": "pending"},
+        attempts={"city": 1},
+        taken_turn={"city": 1},
+        profile={"caller_name": "Мария"},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"caller_name": "Мария"},
+        turn=2,
+    )
+    state["current_step"] = "city"
+    state["head_steps"] = ["city"]
+
+    class BoomKB(FakeKB):
+        async def list_cities(self):
+            raise RuntimeError("kb down")
+
+    fake_kb = BoomKB(cities=[], city=None, branches=[], branch=None)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def _decide(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    ctx = out.get("conversation_context") or {}
+    assert ctx.get("dynamic_status") == DYN_MISSING
+    assert ctx.get("pending_fields") in ([], None)

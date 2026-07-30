@@ -236,3 +236,54 @@ async def test_инструмент_вне_реестра_не_требуетс�
         agent=_FakeAgent(decision),
     )
     assert out.dynamic_status == DYN_NONE
+
+
+def test_reply_hash_нормализует_регистр_и_пробелы():
+    from graph.contexter import reply_hash
+
+    assert reply_hash("  Привет   Мир ") == reply_hash("привет мир")
+    assert reply_hash("А") != reply_hash("Б")
+
+
+async def test_повтор_реплики_не_зовёт_агента():
+    agent = _FakeAgent(ContextDecision(need=True, tool="faq", query="медкомиссия"))
+    tool = _FakeTool("faq", "Ответ про медкомиссию.")
+    ctx = ConversationContext()
+    first = await run_contexter(ctx, reply="А медкомиссия?", tools=[tool], agent=agent)
+    assert agent.calls == ["А медкомиссия?"]
+    assert tool.calls == ["медкомиссия"]
+    assert first.last_reply_hash
+
+    agent2 = _FakeAgent(ContextDecision(need=True, tool="faq", query="медкомиссия"))
+    tool2 = _FakeTool("faq", "Другой ответ.")
+    second = await run_contexter(
+        first,
+        reply="  а   МЕДКОМИССИЯ? ",
+        tools=[tool2],
+        agent=agent2,
+    )
+    assert agent2.calls == []
+    assert tool2.calls == []
+    assert second.dynamic_text == first.dynamic_text
+
+
+async def test_изменённая_реплика_зовёт_агента():
+    agent = _FakeAgent(ContextDecision(need=True, tool="faq", query="медкомиссия"))
+    tool = _FakeTool("faq", "Ответ.")
+    first = await run_contexter(
+        ConversationContext(),
+        reply="А медкомиссия?",
+        tools=[tool],
+        agent=agent,
+    )
+    agent2 = _FakeAgent(ContextDecision(need=True, tool="faq", query="пересдача"))
+    tool2 = _FakeTool("faq", "Про пересдачу.")
+    second = await run_contexter(
+        first,
+        reply="А пересдача?",
+        tools=[tool2],
+        agent=agent2,
+    )
+    assert agent2.calls == ["А пересдача?"]
+    assert tool2.calls == ["пересдача"]
+    assert second.last_reply_hash != first.last_reply_hash

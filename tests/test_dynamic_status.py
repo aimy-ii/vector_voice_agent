@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage
 from graph import nodes as nodes_module
 from graph.context import DYN_MISSING, DYN_NONE, DYN_READY, DYN_SEARCHING, ConversationContext
 from graph.context_store import MemoryContextStore
-from graph.prompts import build_turn_messages, dynamic_status_block
+from graph.prompts import build_turn_messages, build_waiting_messages, dynamic_status_block
 from graph.state import new_state_defaults
 from script.store import MemoryScriptStore
 
@@ -82,23 +82,6 @@ def test_промпт_не_нашлось_инструкция(script):
     assert "ничего нет" in messages[0].content.lower()
 
 
-def test_промпт_повторный_поиск_без_контекста(script):
-    messages = build_turn_messages(
-        script=script,
-        steps=[],
-        profile={},
-        facts={},
-        history=[],
-        asides_done=[],
-        context_text="Секретный факт про медкомиссию",
-        dynamic_status=DYN_SEARCHING,
-        searching_retry=True,
-    )
-    content = messages[0].content
-    assert "медкомиссию" not in content
-    assert "пауза-заглушка уже звучала" in content.lower()
-
-
 def test_промпт_готово_и_не_требуется_как_обычно(script):
     for status in (DYN_NONE, DYN_READY, ""):
         messages = build_turn_messages(
@@ -112,24 +95,51 @@ def test_промпт_готово_и_не_требуется_как_обычн�
             dynamic_status=status,
         )
         assert "Город: Пермь" in messages[0].content
-        assert "пауза-заглушка уже звучала" not in messages[0].content.lower()
 
 
-async def test_генератор_в_поиске_отдаёт_заглушку_с_предметом(
+def test_waiting_короче_полного(script):
+    """Укороченный промпт ожидания не тянет статику и факты."""
+    history = [HumanMessage(content=f"реплика {i}") for i in range(6)]
+    waiting = build_waiting_messages(
+        script,
+        messages=history,
+        profile={"caller_name": "Мария"},
+        pending_fields=["branch"],
+        step=script.step("branch"),
+        history_limit=4,
+    )
+    full = build_turn_messages(
+        script=script,
+        steps=[script.step("branch")],
+        profile={"caller_name": "Мария"},
+        facts={"price_line": "Стоимость — 10000"},
+        history=history,
+        asides_done=[],
+        context_text="Статика города: Пермь, филиалы по адресам…",
+        pending_fields=["branch"],
+    )
+    assert "Статика города" not in waiting[0].content
+    assert "Стоимость — 10000" not in waiting[0].content
+    assert "Шапка скрипта" not in waiting[0].content
+    assert len(waiting) - 1 <= 4
+    assert len(waiting[0].content) * 2 < len(full[0].content)
+
+
+async def test_генератор_в_поиске_берёт_waiting(
     spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
-    model["result"] = {"understood": [], "reply": "Продолжаем."}
+    model["result"] = {"understood": [], "reply": "Секунду, уточняю филиалы."}
 
     async def _spy(*args: Any, **kwargs: Any):
         raise AssertionError("контекстер не должен вызываться из respond")
 
     monkeypatch.setattr("graph.contexter.run_contexter", _spy)
-    reply = "а медкомиссия?"
+    reply = "а какие филиалы рядом?"
     ctx = ConversationContext(
         static_text="Город: Пермь",
         dynamic_status=DYN_SEARCHING,
-        situation_slug="медкомиссия",
-        filler_spoken=False,
+        dynamic_turn=1,
+        pending_fields=["branch"],
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
@@ -138,65 +148,17 @@ async def test_генератор_в_поиске_отдаёт_заглушку_
         "messages": [HumanMessage(content=reply)],
         "script_id": "vector_ru",
         "script_version": "2",
-        "current_step": "name",
-        "head_steps": ["name"],
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "turn": 2,
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    filler = out.get("spoken_filler") or ""
-    assert filler
-    assert "медкомиссия" in filler
-    assert out["conversation_context"]["filler_spoken"] is True
-    assert any(filler in chunk for chunk in spoken)
-    # Между заглушкой и репликой генератора — пробел в spoken.
-    joined = "".join(spoken)
-    assert "Продолжаем." in joined
-    assert filler + " " in joined or filler.rstrip() + " " in joined
-    assert model["calls"] == 1
-
-
-async def test_генератор_повторный_в_поиске_фразу_не_повторяет(
-    spoken, store, ctx_store, model, use_v2, monkeypatch
-):
-    model["result"] = {"understood": [], "reply": "Давайте дальше."}
-    calls: list[str] = []
-
-    def _no_pick(*args: Any, **kwargs: Any) -> str:
-        calls.append("pick")
-        return "НЕ ДОЛЖНА ЗВУЧАТЬ"
-
-    async def _spy(*args: Any, **kwargs: Any):
-        raise AssertionError("контекстер не должен вызываться из respond")
-
-    monkeypatch.setattr(nodes_module, "pick_filler", _no_pick)
-    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
-    reply = "ну что там?"
-    ctx = ConversationContext(
-        static_text="Город: Пермь\nСекрет",
-        dynamic_status=DYN_SEARCHING,
-        situation_slug="филиалы",
-        filler_spoken=True,
-        dynamic_reply=reply,
-        dynamic_text="Секретный факт",
-    )
-    await ctx_store.save("local", ctx)
-    state: dict[str, Any] = {
-        **new_state_defaults(),
-        "messages": [HumanMessage(content=reply)],
-        "script_id": "vector_ru",
-        "script_version": "2",
-        "current_step": "name",
-        "head_steps": ["name"],
-        "fillers_used": ["так, филиалы… секундочку."],
-        "conversation_context": ctx.model_dump(),
-    }
-    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert calls == []
-    assert "НЕ ДОЛЖНА ЗВУЧАТЬ" not in "".join(spoken)
-    assert out["conversation_context"]["filler_spoken"] is True
+    assert out.get("expect_continuation") is True
     prompt = model["messages"][0].content
-    assert "Секрет" not in prompt
-    assert "пауза-заглушка уже звучала" in prompt.lower()
+    assert "Шапка скрипта" not in prompt
+    assert "уточняешь" in prompt.lower() or "уточня" in prompt.lower()
+    assert model["calls"] == 1
 
 
 async def test_respond_читает_динамику_из_кеша_без_контекстера(
@@ -232,69 +194,5 @@ async def test_respond_читает_динамику_из_кеша_без_кон
     prompt = model["messages"][0].content
     assert fact in prompt
     assert fact in out["conversation_context"]["dynamic_text"]
+    assert out.get("expect_continuation") is False
     assert model["calls"] == 1
-
-
-async def test_lookup_не_зовёт_контекстер(spoken, store, ctx_store, use_v2, monkeypatch):
-    """На маршруте lookup контекстер не вызывается."""
-    from tests.conftest import FakeKB
-
-    fake = FakeKB(cities=[], city=None, branches=[], branch=None)
-    monkeypatch.setattr(nodes_module, "vector_kb", fake)
-
-    async def _spy(*args: Any, **kwargs: Any):
-        raise AssertionError("контекстер не должен вызываться из lookup")
-
-    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
-    # run_contexter больше не импортируется в nodes — шпион на модуле contexter.
-    if hasattr(nodes_module, "run_contexter"):
-        monkeypatch.setattr(nodes_module, "run_contexter", _spy)
-
-    closed = {
-        "name": "closed",
-        "city": "closed",
-        "who_studies": "closed",
-        "experience": "closed",
-        "transmission": "closed",
-        "terms": "closed",
-        "theory_format": "closed",
-        "included": "closed",
-        "practice": "closed",
-        "branch": "closed",
-    }
-    state: dict[str, Any] = {
-        **new_state_defaults(),
-        "messages": [HumanMessage(content="а когда медкомиссию проходить?")],
-        "script_id": "vector_ru",
-        "script_version": "2",
-        "step_status": closed,
-        "step_attempts": {sid: 1 for sid in closed},
-        "city_slug": "perm",
-        "city_name": "Пермь",
-        "branch_slug": "perm_chernyshevskogo",
-        "profile": {
-            "city": "Пермь",
-            "branch": "perm_chernyshevskogo",
-            "caller_name": "Мария",
-            "student_is_caller": "да",
-            "experience": "впервые",
-            "transmission": "механика",
-            "theory_format": "очно",
-        },
-        "conversation_context": {
-            "static_text": "Город: Пермь\nСтоимость обучения — от 43900 рублей.",
-            "city_slug": "perm",
-            "city_name": "Пермь",
-            "branch_slug": "perm_chernyshevskogo",
-            "frozen": True,
-        },
-    }
-    out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
-    # Lookup мог вернуть пустой патч или статику — динамики от контекстера нет.
-    ctx = out.get("conversation_context") or {}
-    assert (
-        ctx.get("dynamic_text", "") == ""
-        or "dynamic_text" not in ctx
-        or not ctx.get("dynamic_status")
-        or ctx.get("dynamic_status") in (DYN_NONE, None, "")
-    )

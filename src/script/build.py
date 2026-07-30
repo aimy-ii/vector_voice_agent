@@ -102,15 +102,12 @@ class CompiledScript:
 def params_from_settings() -> ScriptParams:
     """Собирает параметры скрипта из настроек агента.
 
-    Для нового формата в файле скрипта params нет: заглушки и фраза при
-    сбое живут рядом с персоной. Формулировки цены для продаж приходят
+    Для нового формата в файле скрипта params нет: фраза при сбое и
+    unknown живут рядом с персоной. Формулировки цены для продаж приходят
     из базы вместе со стоимостью — сюда кладутся запасные шаблоны.
     """
     return ScriptParams(
         price=settings.agent_price_texts,
-        fillers=list(settings.agent_fillers),
-        city_fillers=list(settings.agent_city_fillers),
-        branch_fillers=list(settings.agent_branch_fillers),
         unknown=settings.agent_unknown,
         fallback=settings.agent_fallback,
     )

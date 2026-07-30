@@ -1,4 +1,4 @@
-"""Тесты имени, заглушек, контекста и саммари."""
+"""Тесты имени, контекста и саммари."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from graph.context import (
     format_city_static,
     merge_static,
 )
-from graph.fillers import city_filler
 from graph.names import given_name
 from graph.summary import build_summary
 
@@ -27,6 +26,9 @@ def test_статусы_динамики_константы_и_дефолт():
     assert ctx.filler_spoken is False
     assert ctx.dynamic_reply == ""
     assert ctx.last_agent_reply == ""
+    assert ctx.dynamic_turn == 0
+    assert ctx.last_reply_hash == ""
+    assert ctx.pending_fields == []
     assert ctx.render() == ""
 
 
@@ -34,28 +36,6 @@ def test_имя_три_случая():
     assert given_name("Андрей Андреевич") == "Андрей"
     assert given_name("Андрей Петров") == "Андрей Петров"
     assert given_name("Мария Ивановна") == "Мария"
-
-
-def test_заглушка_без_вызова_модели():
-    phrase = city_filler(["так, {place}… секунду, открываю по {place}"])
-    assert phrase is not None
-    assert "город" in phrase
-    assert "поищу" not in phrase.lower()
-
-
-def test_в_заглушку_не_попадает_чужой_текст():
-    from graph.fillers import FILLER_SUBJECTS, pick_filler
-
-    phrase = pick_filler(
-        ["так, {place}… открываю по {place}"],
-        subject="город",
-    )
-    assert phrase is not None
-    assert "себя" not in phrase
-    assert "Для" not in phrase
-    assert pick_filler(["так, {place}"], subject="себя") is None
-    assert pick_filler(["так"], subject=None) is None
-    assert FILLER_SUBJECTS == frozenset({"город", "филиал", "стоимость"})
 
 
 def test_контекст_статика_один_раз_цена_фразой(fake_kb):

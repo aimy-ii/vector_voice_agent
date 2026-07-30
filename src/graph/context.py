@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 DYN_NONE = "не требуется"
 #: Ответ уже в статике или накопленном — можно генерить.
 DYN_READY = "готово"
-#: Идёт поиск; генератор отдаёт заглушку (один заход).
+#: Идёт поиск; генератор отдаёт реплику ожидания.
 DYN_SEARCHING = "в поиске"
 #: Поиск завершился без результата.
 DYN_MISSING = "не нашлось"
@@ -44,7 +44,7 @@ class ConversationContext(BaseModel):
         dynamic_status: статус динамики; ставит контекстер, читает генератор.
         situation_slug: предмет вопроса одним-двумя словами («медкомиссия»,
             «филиалы», «пересдача»), который контекстер отдаёт вместе со
-            статусом «в поиске»; из него собирается фраза-заглушка.
+            статусом «в поиске».
         filler_spoken: заглушка по этому предмету уже произнесена (один заход).
         dynamic_reply: реплика клиента, по которой собрана текущая динамика.
             Нужна, чтобы основной ход не пересчитывал то, что лайв-канал
@@ -52,6 +52,11 @@ class ConversationContext(BaseModel):
         last_agent_reply: последняя реплика бота. Пишет основной ход, читает
             агент контекста в лайв-канале — там истории разговора нет, а без
             неё «Да.» неотличимо от вопроса.
+        dynamic_turn: номер хода, на котором выставлен статус, чтобы снять
+            зависший «в поиске», если лайв-канал упал после его установки.
+        last_reply_hash: хеш реплики, по которой контекстер уже отработал.
+        pending_fields: ключи полей профиля, которые лайв-канал сейчас
+            разбирает; для формы это состояние «уточняется».
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
@@ -66,6 +71,9 @@ class ConversationContext(BaseModel):
     filler_spoken: bool = False
     dynamic_reply: str = ""
     last_agent_reply: str = ""
+    dynamic_turn: int = 0
+    last_reply_hash: str = ""
+    pending_fields: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -382,6 +390,9 @@ class ContextState(BaseModel):
     filler_spoken: bool = False
     dynamic_reply: str = ""
     last_agent_reply: str = ""
+    dynamic_turn: int = 0
+    last_reply_hash: str = ""
+    pending_fields: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None

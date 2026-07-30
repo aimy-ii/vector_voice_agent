@@ -1,8 +1,8 @@
 """Контекстер: агент с инструментами, единственный писатель динамики.
 
 Решает, нужен ли контекст под реплику, выбирает инструмент, отдаёт предмет
-для ситуативной заглушки и по результату выставляет статус динамики.
-Статику не трогает — её пишут ``lookup_node`` и прогрев лайв-канала.
+и по результату выставляет статус динамики.
+Статику не трогает — её пишет лайв-канал при разборе города и филиала.
 Возражения остаются тактикой скрипта: при совпадении статус «не требуется».
 
 Работает в лайв-канале: инструмент всегда дожидаемся, спешить некуда.
@@ -10,7 +10,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import time
 from typing import Any, Mapping, Sequence
 
@@ -29,6 +31,25 @@ from graph.tools_registry import ContextTool
 from script.models import Objection
 
 log = logging.getLogger(__name__)
+
+#: Схлопывание повторных пробелов при нормализации реплики для хеша.
+_WS = re.compile(r"\s+")
+
+
+def reply_hash(reply: str) -> str:
+    """Считает sha256 нормализованной реплики.
+
+    Нормализация: обрезка пробелов, нижний регистр, схлопывание повторных
+    пробелов. Нужна, чтобы повтор той же реплики не гонял агента и инструменты.
+
+    Args:
+        reply: реплика клиента.
+
+    Returns:
+        Шестнадцатеричный дайджест sha256.
+    """
+    normalized = _WS.sub(" ", (reply or "").strip().lower())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _triggers_catalogue(
@@ -69,7 +90,7 @@ def _mark_missing(context: ConversationContext) -> None:
 
 
 def _mark_searching(context: ConversationContext, subject: str) -> None:
-    """Статус «в поиске»: заглушка в эфир, результат в этот ход не ждём.
+    """Статус «в поиске»: результат в этот ход не ждём.
 
     Остаётся в контракте на случай, когда инструмент действительно долгий.
     """
@@ -104,8 +125,9 @@ def _finish(
     needed: bool,
     branch_slugs: Sequence[str] = (),
 ) -> ConversationContext:
-    """Выставляет ``dynamic_reply``, пишет лог и возвращает контекст."""
+    """Выставляет ``dynamic_reply`` и хеш, пишет лог и возвращает контекст."""
     updated.dynamic_reply = reply
+    updated.last_reply_hash = reply_hash(reply)
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     stage(
         "contexter",
@@ -150,6 +172,10 @@ async def run_contexter(
     """
     started = time.perf_counter()
     updated = context.model_copy(deep=True)
+    digest = reply_hash(reply)
+    if digest and digest == (updated.last_reply_hash or ""):
+        stage("contexter", "повтор реплики, пропуск", "done")
+        return updated
 
     # Возражения — тактика разговора в скрипте, контекстер не обрабатывает.
     if objections and find_aside(reply, _triggers_catalogue(objections)):

@@ -1,8 +1,8 @@
 r"""Служебный граф чекера в реальном времени.
 
-Лайв-канал: закрывает шаги, дозаполняет базовый профиль, греет контекст
-под предстоящий шаг. В ``messages`` не пишет, реплик в эфир не выдаёт.
-Прогрев не на пути хода генератора — ошибка только в лог.
+Лайв-канал: закрывает шаги, разбирает город и филиал, собирает факты,
+греет контекст под предстоящий шаг. В ``messages`` не пишет, реплик в эфир
+не выдаёт. Ошибка только в лог — ход генератора не роняет.
 
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
@@ -17,6 +17,7 @@ r"""Служебный граф чекера в реальном времени.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
@@ -26,22 +27,38 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
-from graph.context import merge_static
+from graph.context import (
+    DYN_MISSING,
+    DYN_NONE,
+    DYN_READY,
+    DYN_SEARCHING,
+    ConversationContext,
+    merge_static,
+)
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import run_contexter
-from graph.facts import needs_of
-from graph.log_fmt import format_live_check_state
+from graph.facts import collect_facts, needs_of
+from graph.log_fmt import format_live_check_state, format_lookup_done
 from graph.nodes import (
+    _branch_resolver,
     _call_id,
     _checker_client,
+    _city_resolver,
+    _field_step_attempts,
+    _lead_from_progress,
     _load_context,
     _load_progress,
     _merge_profile,
+    _price_phrase_for,
     _save_context,
     _save_progress,
+    _script_of,
+    _step_fills_branch,
+    _step_fills_city,
+    _step_needs_lookup,
 )
-from graph.profile_fill import fill_basic_profile
 from graph.progress import stage
+from graph.resolvers import resolve_branch, resolve_city
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
 from kb.client import vector_kb
@@ -95,12 +112,317 @@ def is_new_utterance(
     return utterance_id != last_utterance_id
 
 
-def _script_of(state: CallState):
+def _script_of_state(state: CallState):
     """Скомпилированный скрипт из реестра по полям состояния."""
     return registry.get(
         state.get("script_id") or settings.script_id,
         state.get("script_version") or settings.script_version,
     )
+
+
+def _facts_to_dynamic(facts: dict[str, Any]) -> str:
+    """Сериализует факты хода в текст для динамики контекста.
+
+    Args:
+        facts: факты, собранные из справочника.
+
+    Returns:
+        Текст для ``dynamic_text`` или пустая строка.
+    """
+    payload = {
+        key: value
+        for key, value in facts.items()
+        if value not in (None, "", [], {}) and key not in {"city_choices", "branches_total"}
+    }
+    if not payload:
+        return ""
+    return "Факты справочника:\n" + json.dumps(payload, ensure_ascii=False, indent=1)
+
+
+async def _lookup_in_live(
+    state: CallState,
+    *,
+    reply: str,
+    progress,
+    profile: dict[str, str],
+    ctx: ConversationContext,
+) -> tuple[ConversationContext, dict[str, Any], dict[str, str]]:
+    """Разбор города, филиала и фактов — бывший ``_lookup_body`` основного хода.
+
+    Перед походом выставляет ``DYN_SEARCHING`` и ``pending_fields``; по итогу
+    — ``DYN_READY`` или ``DYN_MISSING``. Ошибки справочника не роняют узел.
+
+    Args:
+        state: состояние звонка.
+        reply: накопленная реплика клиента.
+        progress: прогресс из кеша.
+        profile: слитый профиль.
+        ctx: текущий контекст.
+
+    Returns:
+        Обновлённый контекст, патч состояния (слаги, кандидаты, журнал) и профиль.
+    """
+    script = _script_of(state)
+    head, step = _lead_from_progress(state, progress=progress, profile=profile)
+    profile_city = str(profile.get("city") or "").strip()
+    turn = int(state.get("turn") or 0)
+    patch: dict[str, Any] = {}
+    journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
+    turn_calls: list[dict[str, Any]] = []
+    facts: dict[str, Any] = {}
+
+    def _asked(field: str) -> bool:
+        """Шаг, заполняющий поле, уже задавался или взят в шапку этого хода."""
+        if _field_step_attempts(script, progress, field) > 0:
+            return True
+        if field == "city":
+            return any(_step_fills_city(s) for s in head)
+        if field == "branch":
+            return any(_step_fills_branch(s) for s in head)
+        return False
+
+    city_asked = _asked("city")
+    branch_asked = _asked("branch")
+    needs_lookup = _step_needs_lookup(
+        head, state, city_asked=city_asked, branch_asked=branch_asked
+    ) or bool(city_asked and profile_city and not (state.get("city_slug") or ctx.city_slug))
+
+    needs: list[str] = []
+    for head_step in head:
+        for need in needs_of(head_step):
+            if need not in needs:
+                needs.append(need)
+
+    fills_city = _step_fills_city(step)
+    if city_asked and fills_city and reply:
+        search_text: str | None = reply
+    elif city_asked and profile_city:
+        search_text = profile_city
+    else:
+        search_text = None
+    existing_slug = state.get("city_slug") or ctx.city_slug
+    need_city = bool(not existing_slug and search_text)
+
+    city_slug_known = existing_slug
+    fills_branch = any(_step_fills_branch(s) for s in head)
+    need_branch = bool(
+        branch_asked
+        and city_slug_known
+        and not (state.get("branch_slug") or ctx.branch_slug)
+        and fills_branch
+        and reply
+    )
+
+    pending: list[str] = []
+    if need_city:
+        pending.append("city")
+    if need_branch:
+        pending.append("branch")
+    # Факты/цена тоже требуют похода — статус «в поиске», даже без города/филиала.
+    will_search = needs_lookup and (
+        need_city or need_branch or bool(needs) or bool(city_asked and profile_city)
+    )
+
+    if will_search or need_city or need_branch:
+        ctx = ctx.model_copy(
+            update={
+                "dynamic_status": DYN_SEARCHING,
+                "dynamic_turn": turn,
+                "pending_fields": list(pending),
+            }
+        )
+        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+
+    if not needs_lookup:
+        stage("lookup", "нечего искать, пропуск", "done")
+        if pending:
+            ctx = ctx.model_copy(update={"pending_fields": [], "dynamic_status": DYN_READY})
+            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+        return ctx, patch, profile
+
+    def _note(entry: dict[str, Any]) -> None:
+        journal.append(entry)
+        turn_calls.append(entry)
+
+    try:
+        if not existing_slug and search_text:
+            cities = await vector_kb.list_cities()
+            _note({"call": "list_cities", "found": len(cities)})
+            resolution = await resolve_city(search_text, cities, resolver=_city_resolver)
+            _note(
+                {
+                    "call": "resolve_city",
+                    "slug": resolution.slug,
+                    "is_district": resolution.is_district,
+                }
+            )
+            if resolution.is_district:
+                facts["city_note"] = (
+                    "Клиент назвал район внутри города, а не город сети. "
+                    "Уточни город обучения, район городом не записывай."
+                )
+                stage("city", "слаг —, имя —, район=True", "done")
+            elif resolution.slug and resolution.name:
+                patch["city_slug"] = resolution.slug
+                patch["city_name"] = resolution.name
+                profile["city"] = resolution.name
+                city_meta = await vector_kb.get_city(resolution.slug)
+                _note({"call": "get_city", "slug": resolution.slug, "ok": city_meta is not None})
+                price_phrase = None
+                if city_meta and city_meta.get("price") is not None:
+                    price_phrase = _price_phrase_for(script, city_meta.get("price"))
+                if city_meta:
+                    ctx = merge_static(
+                        ctx,
+                        city_slug=resolution.slug,
+                        city_name=resolution.name,
+                        city_meta=city_meta,
+                        price_line=price_phrase,
+                    )
+                    if price_phrase:
+                        facts["price_line"] = price_phrase
+                stage(
+                    "city",
+                    f"слаг {resolution.slug}, имя {resolution.name}, район=False",
+                    "done",
+                )
+            else:
+                stage("city", "не распознан", "miss")
+        elif existing_slug and search_text and fills_city:
+            log.warning(
+                "Резолвер города: слаг уже есть (%s), вызов пропущен — такого быть не должно",
+                existing_slug,
+            )
+
+        city_slug = patch.get("city_slug") or state.get("city_slug") or ctx.city_slug
+
+        fills_branch = any(_step_fills_branch(s) for s in head)
+        if (
+            branch_asked
+            and city_slug
+            and not (state.get("branch_slug") or ctx.branch_slug)
+            and fills_branch
+            and reply
+        ):
+            branches = await vector_kb.list_branches(city_slug)
+            _note({"call": "list_branches", "slug": city_slug, "found": len(branches)})
+            resolution = await resolve_branch(reply, branches, resolver=_branch_resolver)
+            _note(
+                {
+                    "call": "resolve_branch",
+                    "slugs": resolution.slugs,
+                    "selected": resolution.selected,
+                }
+            )
+            by_slug = {str(b.get("slug")): b for b in branches if b.get("slug")}
+            candidates = [by_slug[s] for s in resolution.slugs if s in by_slug]
+            if candidates:
+                facts["branch_options"] = [
+                    {
+                        "slug": c.get("slug"),
+                        "address": c.get("address"),
+                        **({"landmark": c["landmark"]} if c.get("landmark") else {}),
+                    }
+                    for c in candidates
+                ]
+                patch["branch_candidates"] = [str(c.get("slug")) for c in candidates]
+            if resolution.selected and resolution.selected in by_slug:
+                branch_meta = await vector_kb.get_branch(resolution.selected)
+                _note(
+                    {
+                        "call": "get_branch",
+                        "slug": resolution.selected,
+                        "ok": branch_meta is not None,
+                    }
+                )
+                if branch_meta:
+                    patch["branch_slug"] = resolution.selected
+                    profile["branch"] = resolution.selected
+                    ctx = merge_static(
+                        ctx,
+                        branch_slug=resolution.selected,
+                        branch_meta=branch_meta,
+                    )
+
+        extra_needs = [n for n in needs if n != "branches" or "branch_options" not in facts]
+
+        if city_slug and extra_needs:
+            more, more_journal = await collect_facts(
+                vector_kb,
+                script=script,
+                needs=extra_needs,
+                city_slug=city_slug,
+                branch_slug=patch.get("branch_slug") or state.get("branch_slug"),
+                want_city_choices=False,
+            )
+            facts.update(more)
+            journal.extend(more_journal)
+            turn_calls.extend(more_journal)
+            if city_slug and not ctx.city_slug and more.get("city"):
+                city_name = state.get("city_name") or profile.get("city") or city_slug
+                raw_meta = await vector_kb.get_city(city_slug)
+                if raw_meta:
+                    ctx = merge_static(
+                        ctx,
+                        city_slug=city_slug,
+                        city_name=str(city_name),
+                        city_meta=raw_meta,
+                        price_line=more.get("price_line"),
+                    )
+
+        facts_text = _facts_to_dynamic(facts)
+        if facts_text:
+            dynamic = (ctx.dynamic_text + "\n" + facts_text).strip()
+            ctx = ctx.model_copy(
+                update={
+                    "dynamic_text": dynamic,
+                    "dynamic_status": DYN_READY,
+                    "pending_fields": [],
+                    "dynamic_turn": turn,
+                }
+            )
+        elif turn_calls:
+            # Ходили в справочник, но полезных фактов нет.
+            ctx = ctx.model_copy(
+                update={
+                    "dynamic_status": DYN_MISSING if (need_city or need_branch) else DYN_READY,
+                    "pending_fields": [],
+                    "dynamic_turn": turn,
+                }
+            )
+        else:
+            ctx = ctx.model_copy(
+                update={
+                    "dynamic_status": DYN_READY,
+                    "pending_fields": [],
+                    "dynamic_turn": turn,
+                }
+            )
+
+        # Если искали город/филиал и ничего не зафиксировали — «не нашлось».
+        if need_city and not (patch.get("city_slug") or ctx.city_slug):
+            ctx = ctx.model_copy(update={"dynamic_status": DYN_MISSING, "pending_fields": []})
+        if need_branch and not (patch.get("branch_slug") or ctx.branch_slug):
+            if "branch_options" not in facts:
+                ctx = ctx.model_copy(update={"dynamic_status": DYN_MISSING, "pending_fields": []})
+
+        await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
+        stage("lookup", format_lookup_done(turn_calls), "done", calls=turn_calls)
+        patch.update({"tool_log": journal, "profile": profile})
+        return ctx, patch, profile
+
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Лайв-канал: разбор справочника не удался: %s", exc)
+        ctx = ctx.model_copy(
+            update={
+                "dynamic_status": DYN_MISSING,
+                "pending_fields": [],
+                "dynamic_turn": turn,
+            }
+        )
+        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+        stage("lookup", f"ошибка, пропуск: {exc}", "done")
+        return ctx, patch, profile
 
 
 async def _warmup_next_step(
@@ -115,7 +437,7 @@ async def _warmup_next_step(
 
     Ошибки только в лог — ход лайв-канала не роняют.
     """
-    script = _script_of(state)
+    script = _script_of_state(state)
     current_id = state.get("current_step")
     current = script.steps.get(current_id) if current_id else None
     try:
@@ -150,15 +472,12 @@ async def _warmup_next_step(
     try:
         if "city_choices" in needs:
             await vector_kb.list_cities()
-        # Город из профиля ещё без слага — мета не греется, это ок.
         if not city_slug:
             return ctx
 
         want_city = ("city_meta" in needs or "price" in needs) and not ctx.city_slug
         want_price = "price" in needs
         want_branches = "branches" in needs
-        # Статику города подшиваем один раз: повторный merge при уже
-        # зафиксированном city_slug не нужен (merge_static и так no-op).
         if (
             want_city
             or (want_price and not ctx.city_slug)
@@ -194,7 +513,7 @@ async def _warmup_next_step(
 
 
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Один служебный проход чекера и контекстера по ``partial_reply``.
+    """Один служебный проход чекера, разбора справочника и контекстера.
 
     Точка отсчёта сбрасывается при смене ``partial_utterance_id`` от бота —
     не по знаку прироста длины. Порог ``checker_min_growth_chars``
@@ -202,8 +521,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     относительно ``last_checked_partial``. Финальная реплика
     (``partial_is_final``) разбирается всегда, в том числе при нулевом
     приросте. Первый проход новой реплики порогом не режется.
-    Иначе дозаполняет профиль, зовёт ``check_pass``, ``run_contexter``
-    и прогрев под предстоящий шаг.
     """
     started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
@@ -231,7 +548,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             f"звонок {call_id}",
             "start",
         )
-    # Порог только для промежуточных; финал — всегда разбирать.
     if not is_final and growth_below_threshold(reply, previous, min_growth=min_growth):
         stage(
             "live-check",
@@ -252,12 +568,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         "state",
     )
 
-    # Фон: базовые поля из уже сказанного — до check_pass, чтобы fills закрылись.
-    filled = fill_basic_profile(reply, profile)
-    if filled:
-        profile = {**profile, **filled}
-        progress.profile = {**progress.profile, **filled}
-
     state_for_check: dict[str, Any] = {**state, "profile": profile}
     progress, closures, asks_inform = await check_pass(
         state_for_check,
@@ -272,9 +582,20 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     patch["client_asks_inform"] = asks_inform
     patch["profile"] = profile
 
-    # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
-    script = _script_of(state)
+    # Разбор города/филиала/фактов — раньше был на пути основного хода.
     ctx = await _load_context(state)
+    ctx, lookup_patch, profile = await _lookup_in_live(
+        state,
+        reply=reply,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+    )
+    patch.update(lookup_patch)
+    patch["profile"] = profile
+
+    # Контекстер печёт справку/статус по реплике.
+    script = _script_of_state(state)
     branches: list[Any] = []
     if ctx.city_slug and not ctx.branch_slug:
         try:
@@ -282,6 +603,11 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         except Exception as exc:  # noqa: BLE001
             log.warning("Лайв-канал: филиалы города не загрузились: %s", exc)
             branches = []
+    # Статус разбора справочника не должен затираться решением «справка не нужна».
+    lookup_status = ctx.dynamic_status
+    lookup_pending = list(ctx.pending_fields or [])
+    lookup_turn = int(ctx.dynamic_turn or 0)
+    lookup_text = ctx.dynamic_text
     ctx = await run_contexter(
         ctx,
         reply=reply,
@@ -289,10 +615,19 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         objections=script.objections,
         branches=branches,
     )
+    if lookup_status in {DYN_READY, DYN_MISSING, DYN_SEARCHING} and ctx.dynamic_status == DYN_NONE:
+        keep_status = lookup_status if lookup_status != DYN_SEARCHING else DYN_READY
+        ctx = ctx.model_copy(
+            update={
+                "dynamic_status": keep_status,
+                "pending_fields": [] if keep_status != DYN_SEARCHING else lookup_pending,
+                "dynamic_turn": lookup_turn or ctx.dynamic_turn,
+                "dynamic_text": ctx.dynamic_text or lookup_text,
+            }
+        )
     ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
     patch.update(ctx_patch)
 
-    # Прогрев под предстоящий шаг — не на пути хода, ошибки только в лог.
     ctx = await _warmup_next_step(
         state,
         progress=progress,

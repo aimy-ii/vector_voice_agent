@@ -1,4 +1,4 @@
-"""Тесты прогрева, фонового профиля и порядка закрытия чекера."""
+"""Тесты прогрева и порядка закрытия чекера."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from graph.checker import CheckerVerdict, check_pass, run_checker
 from graph.checker_graph import live_check_node
 from graph.context_agent import ContextDecision
 from graph.context_store import MemoryContextStore
-from graph.profile_fill import fill_basic_profile
 from script.store import ScriptProgress, progress_to_state
 
 
@@ -27,22 +26,6 @@ def _offline_context(monkeypatch):
         return ContextDecision(need=False)
 
     monkeypatch.setattr("graph.contexter.decide_context", _no_need)
-
-
-def test_fill_basic_profile_город_из_сказанного_без_исхода():
-    found = fill_basic_profile("Я из Перми, меня зовут Андрей")
-    assert found.get("city") in {"Перми", "Пермь"}
-    assert found.get("caller_name") == "Андрей"
-    assert "outcome" not in found
-
-    again = fill_basic_profile(
-        "Исход разговора — отказ, outcome=refused, тариф под ключ завтра в 15:00",
-        profile={"city": "Пермь"},
-    )
-    assert "outcome" not in again
-    assert "package" not in again
-    assert "meeting_time" not in again
-    assert "tariff" not in again
 
 
 async def test_шаг_на_пороге_закрывается_диалогом_не_счётчиком(script):
@@ -190,44 +173,3 @@ async def test_live_check_прогрев_вызывается_и_ошибка_г
     assert warmup_calls
     assert patch_out.get("last_checked_partial") == text
     assert "conversation_context" in patch_out
-
-
-async def test_live_check_дозаполняет_город_не_исход(script):
-    from tests.test_live_checker import FakeChecker, _name_progress, _state
-
-    text = "Я из Перми, давайте продолжим разговор длинный текст"
-    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
-    progress = _name_progress()
-    state = _state(script, partial=text, progress=progress, last_checked="")
-
-    async def fake_load(_state):
-        return progress
-
-    saved: list[ScriptProgress] = []
-
-    async def fake_save(prog, *, persist_state=True, fields=None):
-        saved.append(prog)
-        return progress_to_state(prog)
-
-    with (
-        patch("graph.checker_graph._checker_client", client),
-        patch("graph.checker_graph._load_progress", side_effect=fake_load),
-        patch("graph.checker_graph._save_progress", side_effect=fake_save),
-        patch("graph.checker_graph._warmup_next_step", side_effect=_async_ctx),
-        patch("graph.checker_graph.settings") as mock_settings,
-    ):
-        mock_settings.checker_min_growth_chars = 10
-        mock_settings.script_id = script.id
-        mock_settings.script_version = script.version
-        mock_settings.pending_steps_soft_cap = 4
-        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
-
-    profile = patch_out.get("profile") or {}
-    assert profile.get("city") in {"Перми", "Пермь"}
-    assert "outcome" not in profile
-    if saved:
-        assert "outcome" not in saved[-1].profile
-
-
-async def _async_ctx(*a, **k):
-    return k["ctx"]

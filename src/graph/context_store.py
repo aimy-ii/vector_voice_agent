@@ -21,13 +21,22 @@ log = logging.getLogger(__name__)
 #: Префикс ключей, чтобы не пересечься с серверными ключами LangGraph.
 KEY_PREFIX = "vector:context:"
 
-#: Поля статики: пишет lookup основного хода и прогрев лайв-канала.
+#: Поля статики: пишет прогрев и разбор города/филиала в лайв-канале.
 CONTEXT_FIELDS_STATIC: frozenset[str] = frozenset(
     {"static_text", "city_slug", "city_name", "branch_slug", "city_faq", "frozen"}
 )
-#: Поля динамики: пишет контекстер обоих каналов.
+#: Поля динамики: пишет контекстер и лайв-канал.
 CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(
-    {"dynamic_text", "dynamic_status", "situation_slug", "filler_spoken", "dynamic_reply"}
+    {
+        "dynamic_text",
+        "dynamic_status",
+        "situation_slug",
+        "filler_spoken",
+        "dynamic_reply",
+        "dynamic_turn",
+        "last_reply_hash",
+        "pending_fields",
+    }
 )
 #: Поля хода: пишет только основной ход после генерации.
 CONTEXT_FIELDS_TURN: frozenset[str] = frozenset({"last_agent_reply"})

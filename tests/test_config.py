@@ -110,8 +110,19 @@ def test_filler_threshold_ms_отсутствует():
     assert "filler_threshold_ms" not in Settings.model_fields
 
 
-def test_lookup_fillers_включены_по_умолчанию():
-    assert Settings.model_fields["lookup_fillers_enabled"].default is True
+def test_searching_stale_и_waiting_history_дефолты():
+    """Порог зависшего поиска и лимит хвоста для реплики ожидания."""
+    assert Settings.model_fields["searching_stale_turns"].default == 2
+    assert Settings.model_fields["waiting_history_limit"].default == 4
+
+
+def test_lookup_fillers_удалены():
+    assert "lookup_fillers_enabled" not in Settings.model_fields
+    assert "agent_fillers" not in Settings.model_fields
+    assert "agent_city_fillers" not in Settings.model_fields
+    assert "agent_branch_fillers" not in Settings.model_fields
+    assert "agent_bridge_fillers" not in Settings.model_fields
+    assert "bridge_first_delay" not in Settings.model_fields
 
 
 def test_llm_max_tokens_short_есть():
@@ -121,42 +132,3 @@ def test_llm_max_tokens_short_есть():
 def test_pending_steps_soft_cap_дефолт_и_алиас():
     assert Settings.model_fields["pending_steps_soft_cap"].default == 4
     assert Settings(pending_steps_soft_cap=3).pending_steps_soft_cap == 3
-
-
-def test_шаблоны_заглушек_без_предлога_и_многоточия():
-    """Дефолты city/branch/общих/связок — именительный без «по» и без «…»."""
-    import re
-
-    prep = re.compile(r"\bпо\s*\{place\}|\bпо\s*\{city\}")
-    subject_pools = (
-        Settings.model_fields["agent_fillers"].default_factory(),
-        Settings.model_fields["agent_city_fillers"].default_factory(),
-        Settings.model_fields["agent_branch_fillers"].default_factory(),
-    )
-    for pool in subject_pools:
-        tak_count = sum(1 for tpl in pool if tpl.lstrip().startswith("Так"))
-        assert tak_count <= 1, pool
-        for tpl in pool:
-            assert prep.search(tpl) is None, tpl
-            assert not tpl.rstrip().endswith(("…", "...")), tpl
-            assert "…" not in tpl and "..." not in tpl, tpl
-            assert tpl.rstrip().endswith((".", "!", "?")), tpl
-    bridges = Settings.model_fields["agent_bridge_fillers"].default_factory()
-    for tpl in bridges:
-        assert "{place}" not in tpl and "{city}" not in tpl, tpl
-        assert not tpl.rstrip().endswith(("…", "...")), tpl
-        assert "…" not in tpl and "..." not in tpl, tpl
-        assert tpl.rstrip().endswith((".", "!", "?")), tpl
-
-
-def test_bridge_filler_настройки_есть():
-    assert Settings.model_fields["bridge_first_delay"].default == 1.5
-    assert Settings.model_fields["bridge_next_delay"].default == 2.0
-    assert Settings.model_fields["bridge_filler_limit"].default == 2
-    bridges = Settings.model_fields["agent_bridge_fillers"].default_factory()
-    assert bridges
-    assert all("{place}" not in t and "{city}" not in t for t in bridges)
-    for tpl in bridges:
-        body = tpl.rstrip(".!?,:;")
-        assert " " in body, tpl
-        assert tpl.rstrip().endswith((".", "!", "?"))
