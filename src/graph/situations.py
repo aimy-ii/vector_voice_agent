@@ -52,6 +52,27 @@ def _ensure_terminal_punct(text: str) -> str:
     return text
 
 
+def pick_ack(*, spoken: Sequence[str] = ()) -> str:
+    """Короткий отклик в начало хода: «так…», «угу…», «секундочку».
+
+    Без предмета и без вызовов модели. Мимо уже звучавших в этом звонке.
+
+    Args:
+        spoken: фразы, уже звучавшие в звонке.
+
+    Returns:
+        Непустая короткая фраза из набора ``default``.
+    """
+    catalog = load_situations()
+    pool = [_ensure_terminal_punct(p) for p in catalog[DEFAULT_SLUG]]
+    used = set(spoken or [])
+    fresh = [p for p in pool if p not in used]
+    choice = random.choice(fresh or pool)
+    if not choice:
+        return _ensure_terminal_punct(catalog[DEFAULT_SLUG][0])
+    return choice
+
+
 def pick_filler(subject: str | None, *, spoken: Sequence[str] = ()) -> str:
     """Готовая фраза-заглушка по предмету вопроса.
 

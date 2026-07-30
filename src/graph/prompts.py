@@ -170,6 +170,16 @@ def naturalness_block(*, ask_for_move: bool, pending_only: bool = False) -> str:
             "дословно. Плохо (канцелярская пластинка): «Как вам в целом такой "
             "подход к обучению?». Хорошо (живо, по-разному): «Такой график "
             "удобен?» / «Звучит нормально?» / «Как вам?» / «Подходит так?».",
+            "- Если в реплике есть что рассказать, а не только короткий вопрос — "
+            "начать с короткой подводки, которая называет тему одной фразой, "
+            "и лишь потом содержание. Подводка каждый раз своими словами и "
+            "разная: одну формулировку в звонке не повторять. Если реплика — "
+            "только вопрос или короткое уточнение, подводка не нужна: она "
+            "превратит короткий ход в тягомотину. Плохо: «Теорию можно "
+            "проходить очно в классе, дистанционно в приложении или "
+            "комбинированно — цена не меняется.». Хорошо: «Расскажу про "
+            "теорию. Проходить можно очно, дистанционно или комбинированно — "
+            "цена одна.».",
         ]
     )
     return "\n".join(lines)
@@ -519,11 +529,17 @@ def facts_block(facts: Mapping[str, Any]) -> str:
     )
 
 
-def filler_spoken_block(spoken_filler: str | None) -> str:
+def filler_spoken_block(
+    spoken_filler: str | None,
+    *,
+    filler_subject: str | None = None,
+) -> str:
     """Сообщает генератору, какая заглушка уже прозвучала.
 
     Args:
         spoken_filler: фраза, ушедшая в эфир перед генерацией.
+        filler_subject: предмет заглушки («город», «филиал», «стоимость»)
+            или ``None``, если прозвучал короткий отклик без предмета.
 
     Returns:
         Текстовый блок или пустая строка.
@@ -531,7 +547,16 @@ def filler_spoken_block(spoken_filler: str | None) -> str:
     text = (spoken_filler or "").strip()
     if not text:
         return ""
-    return f"В эфир уже ушла фраза: «{text}». Не начинать со второго вступления и не повторять её."
+    if filler_subject:
+        return (
+            f"В эфир уже ушла фраза: «{text}». Тема «{filler_subject}» уже названа "
+            "вслух: продолжать с места, не повторять предмет, подводку к теме "
+            "не делать, второго вступления не начинать."
+        )
+    return (
+        f"В эфир уже ушла фраза: «{text}». Продолжать с места, без «добрый день» "
+        "и без повторного «так»; подводка к теме при этом уместна."
+    )
 
 
 def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
@@ -605,6 +630,7 @@ def build_turn_messages(
     next_step: AnyStep | None = None,
     context_text: str = "",
     spoken_filler: str | None = None,
+    filler_subject: str | None = None,
     attempts: Mapping[str, int] | None = None,
     dynamic_status: str = "",
     searching_retry: bool = False,
@@ -627,6 +653,7 @@ def build_turn_messages(
         next_step: следующий шаг (совместимость).
         context_text: документ контекста.
         spoken_filler: фраза-заглушка, уже ушедшая в эфир.
+        filler_subject: предмет заглушки или ``None`` при коротком отклике.
         attempts: счётчики попыток.
         dynamic_status: статус динамики контекста.
         searching_retry: повторный «в поиске» после заглушки.
@@ -681,7 +708,7 @@ def build_turn_messages(
     )
     if not script.is_sales:
         blocks.append(aside_block(script, asides_done))
-    filler = filler_spoken_block(spoken_filler)
+    filler = filler_spoken_block(spoken_filler, filler_subject=filler_subject)
     if filler:
         blocks.append(filler)
     blocks.append(

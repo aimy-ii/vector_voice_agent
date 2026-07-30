@@ -12,6 +12,7 @@ from graph.situations import (
     TEMPLATES_KEY,
     _ensure_terminal_punct,
     load_situations,
+    pick_ack,
     pick_filler,
 )
 
@@ -20,7 +21,7 @@ def test_словарь_имеет_templates_и_default():
     catalog = load_situations()
     assert DEFAULT_SLUG in catalog
     assert TEMPLATES_KEY in catalog
-    assert len(catalog[DEFAULT_SLUG]) >= 5
+    assert len(catalog[DEFAULT_SLUG]) >= 8
     assert len(catalog[TEMPLATES_KEY]) >= 5
     assert all("{subject}" in t for t in catalog[TEMPLATES_KEY])
     assert all("по {subject}" not in t for t in catalog[TEMPLATES_KEY])
@@ -72,6 +73,31 @@ def test_pick_filler_мимо_уже_звучавших():
 def test_pick_filler_никогда_не_пустая():
     for subject in (None, "", "филиалы", "пересдача", "медкомиссия"):
         assert pick_filler(subject).strip()
+
+
+def test_pick_ack_мимо_уже_звучавших():
+    catalog = load_situations()
+    pool = [_ensure_terminal_punct(p) for p in catalog[DEFAULT_SLUG]]
+    spoken = pool[:-1]
+    phrase = pick_ack(spoken=spoken)
+    assert phrase == pool[-1]
+
+
+def test_pick_ack_непустая_при_исчерпанном_наборе():
+    catalog = load_situations()
+    pool = [_ensure_terminal_punct(p) for p in catalog[DEFAULT_SLUG]]
+    phrase = pick_ack(spoken=pool)
+    assert phrase.strip()
+    assert phrase in pool
+
+
+def test_pick_ack_без_предмета_в_default():
+    catalog = load_situations()
+    assert all("{subject}" not in p and "{place}" not in p for p in catalog[DEFAULT_SLUG])
+    phrase = pick_ack()
+    assert "{subject}" not in phrase
+    assert "{place}" not in phrase
+    assert phrase[-1] in ".!?…,:;"
 
 
 def test_отсутствие_обязательного_ключа_ошибка_загрузки(tmp_path: Path, monkeypatch):

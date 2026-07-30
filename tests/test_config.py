@@ -110,8 +110,8 @@ def test_filler_threshold_ms_отсутствует():
     assert "filler_threshold_ms" not in Settings.model_fields
 
 
-def test_lookup_fillers_выключены_по_умолчанию():
-    assert Settings.model_fields["lookup_fillers_enabled"].default is False
+def test_lookup_fillers_включены_по_умолчанию():
+    assert Settings.model_fields["lookup_fillers_enabled"].default is True
 
 
 def test_llm_max_tokens_short_есть():

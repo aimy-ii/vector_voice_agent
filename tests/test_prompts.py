@@ -724,3 +724,64 @@ def test_build_turn_messages_без_new_step_id_обратная_совмест�
     assert isinstance(messages[0], SystemMessage)
     assert messages[0].content
     assert messages[-1].content == "здравствуйте"
+
+
+def test_naturalness_правило_подводки_к_теме(script):
+    block = naturalness_block(ask_for_move=True)
+    lowered = block.lower()
+    assert "подводк" in lowered
+    assert "тему" in lowered
+    assert "теорию можно проходить" in lowered
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "подводк" in messages[0].content.lower()
+
+
+def test_filler_subject_запрещает_подводку(script):
+    with_subject = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        spoken_filler="так, филиал… секунду, гляну адреса",
+        filler_subject="филиал",
+    )
+    content = with_subject[0].content.lower()
+    assert "подводку" in content
+    assert "не делать" in content
+
+    without_subject = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        spoken_filler="так… секунду.",
+        filler_subject=None,
+    )
+    content_ack = without_subject[0].content.lower()
+    assert "подводку к теме не делать" not in content_ack
+    assert "подводка к теме при этом уместна" in content_ack
+
+
+def test_build_turn_messages_без_filler_subject_обратная_совместимость(script):
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[HumanMessage(content="привет")],
+        asides_done=[],
+        spoken_filler="Секунду, гляну.",
+    )
+    assert "уже ушла фраза" in messages[0].content
+    assert "подводку к теме не делать" not in messages[0].content.lower()

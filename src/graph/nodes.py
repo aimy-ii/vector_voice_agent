@@ -37,7 +37,14 @@ from graph.context_store import (
     merge_context_fields,
 )
 from graph.facts import collect_facts, needs_of
-from graph.fillers import branch_filler, city_filler, cost_filler
+from graph.fillers import (
+    SUBJECT_BRANCH,
+    SUBJECT_CITY,
+    SUBJECT_COST,
+    branch_filler,
+    city_filler,
+    cost_filler,
+)
 from graph.history import (
     last_agent_text,
     last_user_text,
@@ -55,7 +62,7 @@ from graph.prompts import build_turn_messages
 from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import BranchResolver, CityResolver, resolve_branch, resolve_city
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
-from graph.situations import pick_filler
+from graph.situations import pick_ack, pick_filler
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from kb.client import vector_kb
@@ -403,6 +410,7 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch["facts"] = {}
     patch["spoken"] = []
     patch["spoken_filler"] = None
+    patch["filler_subject"] = None
     patch["turn_result"] = {}
     patch["last_error"] = None
     patch["branch_candidates"] = []
@@ -581,10 +589,6 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
     needs_lookup = _step_needs_lookup(
         head, state, city_asked=city_asked, branch_asked=branch_asked
     ) or bool(city_asked and profile_city and not (state.get("city_slug") or ctx.city_slug))
-    if not needs_lookup:
-        # Нечего искать — не ждём справочник и не зовём контекстер.
-        stage("lookup", "нечего искать, пропуск", "done")
-        return {}
 
     needs: list[str] = []
     for head_step in head:
@@ -597,20 +601,89 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
     patch: dict[str, Any] = {}
     fillers_used = list(state.get("fillers_used") or [])
     spoken_filler: str | None = None
+    filler_subject: str | None = None
     turn = int(state.get("turn") or 0)
     last_filler_turn = int(state.get("last_filler_turn") or 0)
-    # Заглушка не звучит два хода подряд (нулевой ход — «ещё не было»).
-    allow_filler = settings.lookup_fillers_enabled and not (
+    # Предметная заглушка не звучит два хода подряд (нулевой ход — «ещё не было»).
+    allow_subject_filler = settings.lookup_fillers_enabled and not (
         last_filler_turn > 0 and last_filler_turn == turn - 1
     )
 
-    def _speak_filler(phrase: str | None) -> None:
-        nonlocal spoken_filler
+    def _speak_filler(phrase: str | None, *, subject: str | None = None) -> None:
+        """Отправляет одну фразу-отклик в эфир и фиксирует её в состоянии хода."""
+        nonlocal spoken_filler, filler_subject
         if not phrase or spoken_filler:
             return
         spoken_filler = phrase
+        filler_subject = subject
         say(phrase + " ")
         fillers_used.append(phrase)
+
+    def _filler_patch() -> dict[str, Any]:
+        """Патч полей отклика, если фраза уже ушла в эфир."""
+        if not spoken_filler:
+            return {}
+        out: dict[str, Any] = {
+            "spoken_filler": spoken_filler,
+            "filler_subject": filler_subject,
+            "fillers_used": fillers_used,
+            "spoken": list(state.get("spoken") or []) + [spoken_filler],
+            "last_filler_turn": turn if filler_subject is not None else last_filler_turn,
+        }
+        return out
+
+    # Один отклик на ход — до сетевых вызовов и до раннего выхода.
+    if settings.lookup_fillers_enabled:
+        fills_city = _step_fills_city(step)
+        if city_asked and fills_city and user_text:
+            search_text: str | None = user_text
+        elif city_asked and profile_city:
+            search_text = profile_city
+        else:
+            search_text = None
+        existing_slug = state.get("city_slug") or ctx.city_slug
+        need_city = bool(not existing_slug and search_text)
+
+        city_slug_known = existing_slug
+        fills_branch = any(_step_fills_branch(s) for s in head)
+        need_branch = bool(
+            branch_asked
+            and city_slug_known
+            and not (state.get("branch_slug") or ctx.branch_slug)
+            and fills_branch
+            and user_text
+        )
+
+        extra_needs_preview = [n for n in needs if n != "branches"]
+        need_price = bool(
+            "price" in extra_needs_preview
+            and city_slug_known
+            and not (ctx.static_text and "Стоимость" in ctx.static_text)
+        )
+
+        if need_city and allow_subject_filler:
+            _speak_filler(
+                city_filler(script.params.city_fillers, used=fillers_used),
+                subject=SUBJECT_CITY,
+            )
+        elif need_branch and allow_subject_filler:
+            _speak_filler(
+                branch_filler(script.params.branch_fillers, used=fillers_used),
+                subject=SUBJECT_BRANCH,
+            )
+        elif need_price and allow_subject_filler:
+            _speak_filler(
+                cost_filler(script.params.fillers, used=fillers_used),
+                subject=SUBJECT_COST,
+            )
+        elif turn > 1 and not spoken_filler:
+            # Короткий отклик каждый ход, кроме первого (реплики клиента ещё не было).
+            _speak_filler(pick_ack(spoken=fillers_used), subject=None)
+
+    if not needs_lookup:
+        # Нечего искать — не ждём справочник и не зовём контекстер.
+        stage("lookup", "нечего искать, пропуск", "done")
+        return _filler_patch()
 
     def _note(entry: dict[str, Any]) -> None:
         journal.append(entry)
@@ -620,7 +693,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
     # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
     fills_city = _step_fills_city(step)
     if city_asked and fills_city and user_text:
-        search_text: str | None = user_text
+        search_text = user_text
     elif city_asked and profile_city:
         search_text = profile_city
     else:
@@ -628,9 +701,6 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     existing_slug = state.get("city_slug") or ctx.city_slug
     if not existing_slug and search_text:
-        if allow_filler:
-            _speak_filler(city_filler(script.params.city_fillers, used=fillers_used))
-
         cities = await vector_kb.list_cities()
         _note({"call": "list_cities", "found": len(cities)})
         resolution = await resolve_city(search_text, cities, resolver=_city_resolver)
@@ -691,9 +761,6 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
         and fills_branch
         and user_text
     ):
-        if allow_filler and not spoken_filler:
-            _speak_filler(branch_filler(script.params.branch_fillers, used=fillers_used))
-
         branches = await vector_kb.list_branches(city_slug)
         _note({"call": "list_branches", "slug": city_slug, "found": len(branches)})
         resolution = await resolve_branch(user_text, branches, resolver=_branch_resolver)
@@ -732,14 +799,6 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     # Прочие needs шапки — без city_choices в промпт.
     extra_needs = [n for n in needs if n != "branches" or "branch_options" not in facts]
-    need_price_lookup = (
-        "price" in extra_needs
-        and city_slug
-        and not (ctx.static_text and "Стоимость" in ctx.static_text)
-        and "price_line" not in facts
-    )
-    if need_price_lookup and allow_filler and not spoken_filler:
-        _speak_filler(cost_filler(script.params.fillers, used=fillers_used))
 
     if city_slug and extra_needs:
         more, more_journal = await collect_facts(
@@ -778,13 +837,9 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
             "tool_log": journal,
             "profile": profile,
             **ctx_patch,
-            "spoken_filler": spoken_filler,
-            "fillers_used": fillers_used,
-            "spoken": list(state.get("spoken") or []) + ([spoken_filler] if spoken_filler else []),
+            **_filler_patch(),
         }
     )
-    if spoken_filler:
-        patch["last_filler_turn"] = turn
     return patch
 
 
@@ -830,6 +885,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         asides_done=list(state.get("asides_done") or []),
         context_text=context_text,
         spoken_filler=spoken_filler,
+        filler_subject=state.get("filler_subject"),
         attempts=state.get("step_attempts") or {},
         dynamic_status=dynamic_status,
         searching_retry=searching_retry,

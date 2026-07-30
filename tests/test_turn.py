@@ -672,17 +672,191 @@ async def test_заглушка_города_без_модели_и_видна_�
             "step_status": {"name": "closed"},
             "step_attempts": {"name": 1, "city": 1},
             "profile": {"caller_name": "Мария"},
+            "turn": 1,
         }
     )
     assert state.get("spoken_filler")
     filler = state["spoken_filler"] or ""
     assert "город" in filler
+    assert state.get("filler_subject") == "город"
     assert "Пермь" not in filler
     assert "перм" not in filler.lower()
     # Резолвер LLM не звался для точного совпадения.
     assert resolvers[0].calls == 0
     prompt = model["messages"][0].content
     assert "уже ушла фраза" in prompt or filler in prompt
+    assert "подводку к теме не делать" in prompt.lower()
+
+
+async def test_короткий_отклик_на_ходу_без_поиска_и_ранний_выход(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Без справочника — короткий отклик, filler_subject=None, патч на раннем выходе."""
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "Как вас зовут?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Здравствуйте")],
+            "turn": 1,
+        }
+    )
+    assert state.get("spoken_filler")
+    assert state.get("filler_subject") is None
+    filler = state["spoken_filler"] or ""
+    assert "город" not in filler
+    assert "филиал" not in filler
+    assert filler in (state.get("spoken") or [])
+    assert filler in (state.get("fillers_used") or [])
+    assert any(filler in chunk for chunk in spoken)
+
+
+async def test_на_первом_ходу_отклика_нет(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "Здравствуйте! Как вас зовут?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Алло")],
+        }
+    )
+    assert not state.get("spoken_filler")
+    assert state.get("filler_subject") is None
+
+
+async def test_заглушка_филиала_ровно_одна(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "Какой адрес удобнее?"}
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="рядом с центром")],
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+                "included": "closed",
+                "practice": "closed",
+                "price": "closed",
+            },
+            "step_attempts": {
+                "name": 1,
+                "city": 1,
+                "who_studies": 1,
+                "experience": 1,
+                "transmission": 1,
+                "terms": 1,
+                "theory_format": 1,
+                "included": 1,
+                "practice": 1,
+                "price": 1,
+                "branch": 1,
+            },
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "caller_name": "Мария",
+                "city": "Пермь",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь\nСтоимость — от 43900.",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+            "turn": 1,
+        }
+    )
+    assert state.get("spoken_filler")
+    assert state.get("filler_subject") == "филиал"
+    filler = state["spoken_filler"] or ""
+    assert "филиал" in filler
+    assert sum(1 for c in spoken if "филиал" in c) == 1
+
+
+async def test_два_хода_поиска_предмет_не_дважды_но_ack_на_втором(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
+    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
+    first = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="Пермь")],
+            "step_status": {"name": "closed"},
+            "step_attempts": {"name": 1, "city": 1},
+            "profile": {"caller_name": "Мария"},
+            "turn": 1,
+        }
+    )
+    assert first.get("filler_subject") == "город"
+    assert first.get("last_filler_turn") == 2
+
+    spoken.clear()
+    model["result"] = {"understood": [], "reply": "Какой адрес удобнее?"}
+    second = await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="Пермь"),
+                AIMessage(content="Учиться будете сами?"),
+                HumanMessage(content="рядом с центром"),
+            ],
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+                "included": "closed",
+                "practice": "closed",
+                "price": "closed",
+            },
+            "step_attempts": {
+                "name": 1,
+                "city": 1,
+                "who_studies": 1,
+                "experience": 1,
+                "transmission": 1,
+                "terms": 1,
+                "theory_format": 1,
+                "included": 1,
+                "practice": 1,
+                "price": 1,
+                "branch": 1,
+            },
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "caller_name": "Мария",
+                "city": "Пермь",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь\nСтоимость — от 43900.",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+            "turn": 2,
+            "last_filler_turn": 2,
+            "fillers_used": list(first.get("fillers_used") or []),
+        }
+    )
+    assert second.get("spoken_filler")
+    assert second.get("filler_subject") is None
+    assert "филиал" not in (second.get("spoken_filler") or "")
+    assert "город" not in (second.get("spoken_filler") or "")
 
 
 async def test_заглушка_не_берёт_текст_клиента(
@@ -699,8 +873,9 @@ async def test_заглушка_не_берёт_текст_клиента(
             "profile": {"caller_name": "Мария", "city": "Пермь"},
         }
     )
-    # Ход без похода в справочник за городом/филиалом — заглушки нет.
-    assert not state.get("spoken_filler")
+    # Первый ход звонка — отклика нет (реплики клиента ещё не было в смысле turn==1).
+    assert not state.get("spoken_filler") or "Для себя" not in (state.get("spoken_filler") or "")
+    assert "Для себя" not in "".join(spoken)
 
 
 async def test_заглушка_не_два_хода_подряд(
@@ -718,8 +893,10 @@ async def test_заглушка_не_два_хода_подряд(
             "last_filler_turn": 1,
         }
     )
-    # turn станет 2, last_filler_turn=1 → подряд, молчим.
-    assert not state.get("spoken_filler")
+    # turn станет 2, last_filler_turn=1 → предметная заглушка молчит, короткий отклик звучит.
+    assert state.get("spoken_filler")
+    assert state.get("filler_subject") is None
+    assert "город" not in (state.get("spoken_filler") or "")
 
 
 async def test_образец_в_промпте_склейки_мимо_модели_нет(

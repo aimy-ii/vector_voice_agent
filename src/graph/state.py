@@ -81,6 +81,10 @@ class CallState(TypedDict, total=False):
             висящие. Считать по счётчикам в промпте нельзя: к моменту
             генерации они уже увеличены.
         spoken_filler: заглушка, ушедшая в эфир до генератора.
+        filler_subject: предмет прозвучавшей заглушки («город», «филиал»,
+            «стоимость») или ``None``, если прозвучал короткий отклик без
+            предмета. Нужен генератору: после заглушки с предметом тема уже
+            названа, подводку делать нельзя.
         last_filler_turn: номер хода, на котором звучала заглушка.
         branch_candidates: отобранные резолвером слаги филиалов.
         partial_reply: накопленный распознанный текст текущей реплики
@@ -134,6 +138,7 @@ class CallState(TypedDict, total=False):
     route: str | None
     spoken: list[str]
     spoken_filler: str | None
+    filler_subject: str | None
     fillers_used: list[str]
     last_filler_turn: int
     branch_candidates: list[str]
@@ -178,6 +183,7 @@ def new_state_defaults() -> dict[str, Any]:
         "route": None,
         "spoken": [],
         "spoken_filler": None,
+        "filler_subject": None,
         "fillers_used": [],
         "last_filler_turn": 0,
         "branch_candidates": [],
