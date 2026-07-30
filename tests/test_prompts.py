@@ -742,14 +742,43 @@ def test_naturalness_правило_подводки_к_теме(script):
     assert "подводк" in messages[0].content.lower()
 
 
-def test_naturalness_живая_связка_с_ответом_клиента():
-    """Реплика начинается с услышанного и связывается со следующим шагом."""
-    from graph.prompts import naturalness_block
-
+def test_naturalness_не_пересказывать_ответ_клиента(script):
+    """Запрет пересказа сказанного и разнообразие коротких отметок."""
     text = naturalness_block(ask_for_move=True).lower()
-    assert "только что сказал" in text or "человек только что" in text
-    assert "понятно, андрей" in text
-    assert "значит, учиться будете сами" in text
+    assert "не повторять" in text
+    assert "подтверждения выбора" in text or "подтверждения" in text
+    assert "отметка" in text
+    assert "каждый раз разная" in text
+    assert "вы выбрали механику" in text
+    assert "сразу по делу" in text
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "не повторять" in content
+    assert "отметка" in content
+
+
+def test_naturalness_редкое_обращение_по_имени(script):
+    """По имени — редко, не подряд в двух репликах."""
+    text = naturalness_block(ask_for_move=True).lower()
+    assert "по имени обращаться редко" in text
+    assert "подряд две реплики" in text
+    assert "колл-центра" in text or "колл-центр" in text
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "по имени обращаться редко" in messages[0].content.lower()
 
 
 def test_unknown_запрет_выдумывать_филиал(script):
