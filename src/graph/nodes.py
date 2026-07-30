@@ -13,6 +13,7 @@ Redis-кеша и не ждёт лайв. Генератор плюсует сч
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -234,19 +235,19 @@ def _price_phrase_for(script: CompiledScript, price: Any) -> str | None:
 
 
 def _step_needs_lookup(
-    step: AnyStep | None,
+    steps: Sequence[AnyStep],
     state: CallState,
     *,
     city_asked: bool = True,
     branch_asked: bool = True,
 ) -> bool:
-    """Нужен ли справочник на этом ведущем шаге.
+    """Нужен ли справочник хотя бы одному шагу шапки.
 
     Город и филиал ищем только если шаг, который их заполняет, уже
-    задавался (счётчик попыток > 0).
+    задавался или взят в шапку этого хода.
 
     Args:
-        step: ведущий шаг или None.
+        steps: шапка хода (может быть пустой).
         state: состояние хода (слаги города/филиала).
         city_asked: шаг city уже был в шапке.
         branch_asked: шаг branch уже был в шапке.
@@ -254,19 +255,18 @@ def _step_needs_lookup(
     Returns:
         True — резолвер/факты имеют смысл; иначе узел может выйти сразу.
     """
-    if step is None:
-        return False
-    if needs_of(step):
-        return True
-    if city_asked and _step_fills_city(step) and not state.get("city_slug"):
-        return True
-    if (
-        branch_asked
-        and _step_fills_branch(step)
-        and state.get("city_slug")
-        and not state.get("branch_slug")
-    ):
-        return True
+    for step in steps:
+        if needs_of(step):
+            return True
+        if city_asked and _step_fills_city(step) and not state.get("city_slug"):
+            return True
+        if (
+            branch_asked
+            and _step_fills_branch(step)
+            and state.get("city_slug")
+            and not state.get("branch_slug")
+        ):
+            return True
     return False
 
 
@@ -482,7 +482,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
 
-    if _step_needs_lookup(step, state):
+    if _step_needs_lookup(head, state):
         route = ROUTE_LOOKUP
     else:
         route = ROUTE_RESPOND
@@ -529,8 +529,9 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Резолверы города/филиала и факты справочника; заглушки без модели.
 
-    Идёт параллельно с чекером: ведущий шаг считает сам по прогрессу.
-    Если искать нечего — сразу пустой патч. Ошибка не роняет ход.
+    Идёт параллельно с чекером: шапку считает сам по прогрессу и собирает
+    потребности по всем её шагам. Если искать нечего — сразу пустой патч.
+    Ошибка не роняет ход.
     """
     try:
         return await _lookup_body(state, runtime)
@@ -552,22 +553,37 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
     if filled:
         profile = {**profile, **filled}
 
-    _head, step = _lead_from_progress(state, progress=progress, profile=profile)
+    head, step = _lead_from_progress(state, progress=progress, profile=profile)
     ctx = await _load_context(state)
     profile_city = str(profile.get("city") or "").strip()
-    city_asked = _field_step_attempts(script, progress, "city") > 0
-    branch_asked = _field_step_attempts(script, progress, "branch") > 0
-    # Резолвер нужен по шагу либо когда в профиле уже есть город без слага
-    # и шаг city уже задавался (иначе вхолостую не ищем).
+
+    def _asked(field: str) -> bool:
+        """Шаг, заполняющий поле профиля, уже задавался или взят в шапку этого хода."""
+        if _field_step_attempts(script, progress, field) > 0:
+            return True
+        if field == "city":
+            return any(_step_fills_city(s) for s in head)
+        if field == "branch":
+            return any(_step_fills_branch(s) for s in head)
+        return False
+
+    city_asked = _asked("city")
+    branch_asked = _asked("branch")
+    # Резолвер нужен по шапке либо когда в профиле уже есть город без слага
+    # и шаг city уже задавался/в шапке (иначе вхолостую не ищем).
     needs_lookup = _step_needs_lookup(
-        step, state, city_asked=city_asked, branch_asked=branch_asked
+        head, state, city_asked=city_asked, branch_asked=branch_asked
     ) or bool(city_asked and profile_city and not (state.get("city_slug") or ctx.city_slug))
     if not needs_lookup:
         # Нечего искать — не ждём справочник и не зовём контекстер.
         stage("lookup", "нечего искать, пропуск", "done")
         return {}
 
-    needs = needs_of(step)
+    needs: list[str] = []
+    for head_step in head:
+        for need in needs_of(head_step):
+            if need not in needs:
+                needs.append(need)
     facts: dict[str, Any] = {}
     journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
     turn_calls: list[dict[str, Any]] = []
@@ -593,7 +609,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
         journal.append(entry)
         turn_calls.append(entry)
 
-    # Город: только если шаг city уже задавался и слага ещё нет —
+    # Город: только если шаг city уже задавался/в шапке и слага ещё нет —
     # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
     fills_city = _step_fills_city(step)
     if city_asked and fills_city and user_text:
@@ -659,13 +675,13 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
 
     city_slug = patch.get("city_slug") or state.get("city_slug") or ctx.city_slug
 
-    # Филиал: только если шаг branch уже задавался; отбор до трёх.
+    # Филиал: если любой шаг шапки заполняет branch; отбор до трёх.
+    fills_branch = any(_step_fills_branch(s) for s in head)
     if (
         branch_asked
         and city_slug
         and not (state.get("branch_slug") or ctx.branch_slug)
-        and step
-        and _step_fills_branch(step)
+        and fills_branch
         and user_text
     ):
         if allow_filler and not spoken_filler:
@@ -707,7 +723,7 @@ async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[
                     branch_meta=branch_meta,
                 )
 
-    # Прочие needs шага — без city_choices в промпт.
+    # Прочие needs шапки — без city_choices в промпт.
     extra_needs = [n for n in needs if n != "branches" or "branch_options" not in facts]
     need_price_lookup = (
         "price" in extra_needs

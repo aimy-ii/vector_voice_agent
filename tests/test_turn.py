@@ -501,10 +501,10 @@ async def test_ведущий_шаг_city_ищет_в_реплике(
     assert resolvers[0].calls == 0
 
 
-async def test_заполнитель_города_не_зовётся_при_нулевых_попытках(
+async def test_заполнитель_города_не_зовётся_если_шага_нет_в_шапке(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
 ):
-    """Шаг city ещё не задавался — resolve_city не вызывается."""
+    """Шаг city не в шапке — resolve_city не вызывается."""
     resolve_calls: list[str] = []
     real = nodes_module.resolve_city
 
@@ -517,16 +517,9 @@ async def test_заполнитель_города_не_зовётся_при_н
         "understood": [],
         "aside_id": None,
         "resume_step": True,
-        "reply": "Из какого города?",
+        "reply": "Как я могу к вам обращаться?",
     }
-    await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Да, хорошо")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
+    await graph.ainvoke({"messages": [HumanMessage(content="Пермь")]})
     assert resolve_calls == []
     assert resolvers[0].calls == 0
 
@@ -1395,3 +1388,241 @@ async def test_respond_не_зовёт_контекстер_если_dynamic_rep
     assert model["calls"] == 1
     prompt = model["messages"][0].content
     assert fact in prompt
+
+
+def _closed_through(script_ids: list[str], *, until: str) -> dict[str, str]:
+    """Статусы closed для всех шагов до ``until`` включительно."""
+    out: dict[str, str] = {}
+    for sid in script_ids:
+        out[sid] = "closed"
+        if sid == until:
+            break
+    return out
+
+
+async def test_lookup_филиал_не_ведущий_но_в_шапке(
+    spoken, store, checker, kb, resolvers, monkeypatch, use_v2, script
+):
+    """Шаг branch не первый в шапке — list_branches и facts.branches на этом ходу."""
+    from graph.facts import branch_choices
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", lambda *a, **k: None)
+    # name и city висят; practice закрыт → branch доступен и идёт свежим (не ведущий).
+    closed = _closed_through(list(script.steps), until="practice")
+    for sid in ("name", "city"):
+        closed.pop(sid, None)
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="а какие филиалы есть?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "step_status": {**closed, "name": "pending", "city": "pending"},
+        "step_attempts": {
+            **{sid: 1 for sid in closed},
+            "name": 2,
+            "city": 2,
+        },
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": {
+            "city": "Пермь",
+            "caller_name": "Мария",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "city_name": "Пермь",
+        },
+    }
+    head, lead = nodes_module._lead_from_progress(
+        state,  # type: ignore[arg-type]
+        progress=ScriptProgress.from_mapping(
+            {
+                "status": state["step_status"],
+                "attempts": state["step_attempts"],
+            }
+        ),
+        profile=dict(state["profile"]),
+    )
+    assert [s.id for s in head] == ["name", "city", "branch"]
+    assert lead is not None and lead.id == "name"
+
+    out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
+    expected = branch_choices(kb._branches)
+    assert out["facts"]["branches"] == expected
+    assert out["facts"]["branches_total"] == len(kb._branches)
+    assert any(e.get("call") == "list_branches" for e in out["tool_log"])
+    assert "list_branches" in kb.calls
+
+
+async def test_lookup_объединяет_needs_шапки_без_дублей(
+    spoken, store, checker, kb, resolvers, monkeypatch, use_v2, script
+):
+    """Два шага шапки с city-потребностями — get_city один раз."""
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", lambda *a, **k: None)
+    closed = _closed_through(list(script.steps), until="practice")
+    closed["branch"] = "closed"
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="понятно")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "step_status": {**closed, "included": "pending"},
+        "step_attempts": {
+            **{sid: 1 for sid in closed},
+            "included": 1,
+            "branch": 1,
+        },
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "branch_slug": "perm_chernyshevskogo",
+        "profile": {
+            "city": "Пермь",
+            "branch": "perm_chernyshevskogo",
+            "caller_name": "Мария",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "frozen": True,
+        },
+    }
+    head, lead = nodes_module._lead_from_progress(
+        state,  # type: ignore[arg-type]
+        progress=ScriptProgress.from_mapping(
+            {
+                "status": state["step_status"],
+                "attempts": state["step_attempts"],
+            }
+        ),
+        profile=dict(state["profile"]),
+    )
+    assert [s.id for s in head] == ["included", "price"]
+    assert lead is not None and lead.id == "included"
+
+    out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
+    assert kb.calls.count("get_city") == 1
+    assert "city" in out["facts"]
+    assert "price" in out["facts"]
+    assert "43900" in out["facts"]["price"]["line"]
+    assert out["facts"]["price_line"] == out["facts"]["price"]["line"]
+
+
+async def test_lookup_филиал_в_шапке_с_первого_хода(
+    spoken, store, checker, kb, resolvers, monkeypatch, use_v2, script
+):
+    """Шаг branch впервые в шапке (attempts=0) — резолвер филиала не откладывается."""
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", lambda *a, **k: None)
+    monkeypatch.setattr(
+        nodes_module,
+        "_branch_resolver",
+        SelectBranch(
+            BranchResolution(slugs=["perm_chernyshevskogo"], selected="perm_chernyshevskogo")
+        ),
+    )
+    closed = _closed_through(list(script.steps), until="practice")
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="Чернышевского")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "step_status": closed,
+        "step_attempts": {sid: 1 for sid in closed},
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": {
+            "city": "Пермь",
+            "caller_name": "Мария",
+            "student_is_caller": "да",
+            "experience": "впервые",
+            "transmission": "механика",
+            "theory_format": "очно",
+        },
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "city_name": "Пермь",
+        },
+    }
+    head, lead = nodes_module._lead_from_progress(
+        state,  # type: ignore[arg-type]
+        progress=ScriptProgress.from_mapping(
+            {
+                "status": state["step_status"],
+                "attempts": state["step_attempts"],
+            }
+        ),
+        profile=dict(state["profile"]),
+    )
+    assert [s.id for s in head] == ["branch"]
+    assert lead is not None and lead.id == "branch"
+    assert int(state["step_attempts"].get("branch", 0)) == 0
+
+    out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
+    assert out["branch_slug"] == "perm_chernyshevskogo"
+    assert any(e.get("call") == "resolve_branch" for e in out["tool_log"])
+    assert any(e.get("call") == "list_branches" for e in out["tool_log"])
+
+
+async def test_пустая_шапка_lookup_пустой_патч(
+    spoken, store, checker, kb, resolvers, monkeypatch, use_v2, script
+):
+    """Пустая шапка — lookup отдаёт {} и в справочник не ходит."""
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", lambda *a, **k: None)
+    all_ids = list(script.steps)
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="всё ясно")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "step_status": {sid: "closed" for sid in all_ids},
+        "step_attempts": {sid: 1 for sid in all_ids},
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "branch_slug": "perm_chernyshevskogo",
+        "profile": {
+            "city": "Пермь",
+            "branch": "perm_chernyshevskogo",
+            "caller_name": "Мария",
+            "outcome": "оформлю дистанционно",
+        },
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "frozen": True,
+        },
+    }
+    head, _lead = nodes_module._lead_from_progress(
+        state,  # type: ignore[arg-type]
+        progress=ScriptProgress.from_mapping(
+            {
+                "status": state["step_status"],
+                "attempts": state["step_attempts"],
+            }
+        ),
+        profile=dict(state["profile"]),
+    )
+    assert head == []
+
+    out = await nodes_module.lookup_node(state, None)  # type: ignore[arg-type]
+    assert out == {}
+    assert kb.calls == []
