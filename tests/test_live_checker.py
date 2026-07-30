@@ -897,6 +897,236 @@ async def test_live_lookup_ставит_searching_и_чистит_pending(script
     assert "branch_options" in dyn or out.get("branch_candidates") or "Ленина" in dyn
 
 
+async def test_live_searching_в_кеше_до_чекера(script, monkeypatch, _offline_context):
+    """DYN_SEARCHING и pending_fields в кеше уже к моменту вызова чекера."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from tests.conftest import FakeKB
+
+    text = "Просвещения, какой филиал ближе?"
+    progress = ScriptProgress(
+        status={
+            "name": "closed",
+            "city": "closed",
+            "who_studies": "closed",
+            "experience": "closed",
+            "transmission": "closed",
+            "terms": "closed",
+            "theory_format": "closed",
+            "included": "closed",
+            "practice": "closed",
+            "branch": "pending",
+        },
+        attempts={"branch": 1},
+        taken_turn={"branch": 2},
+        profile={"city": "Пермь", "caller_name": "Мария"},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"city": "Пермь", "caller_name": "Мария"},
+        turn=3,
+    )
+    state["city_slug"] = "perm"
+    state["city_name"] = "Пермь"
+    state["current_step"] = "branch"
+    state["head_steps"] = ["branch"]
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(static_text="Город: Пермь", city_slug="perm", city_name="Пермь"),
+    )
+
+    seen_at_judge: dict[str, Any] = {}
+
+    class _ObservingChecker:
+        async def judge(self, **kwargs):
+            loaded = await _offline_context.load("local")
+            assert loaded is not None
+            seen_at_judge["dynamic_status"] = loaded.dynamic_status
+            seen_at_judge["pending_fields"] = list(loaded.pending_fields or [])
+            seen_at_judge["dynamic_turn"] = int(loaded.dynamic_turn or 0)
+            return CheckerVerdict(reply_usable=True, step_closed=False)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    monkeypatch.setattr(
+        "graph.checker_graph.vector_kb",
+        FakeKB(cities=[], city=None, branches=[], branch=None),
+    )
+
+    with (
+        patch("graph.checker_graph._checker_client", _ObservingChecker()),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert seen_at_judge["dynamic_status"] == DYN_SEARCHING
+    assert seen_at_judge["pending_fields"] == ["branch"]
+    assert seen_at_judge["dynamic_turn"] == 3
+
+
+async def test_live_без_разбора_статус_не_трогает(script, monkeypatch, _offline_context):
+    """Ход без предстоящего разбора — пометку не ставим, статус не меняем."""
+    from graph.context import DYN_READY, ConversationContext
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    seeded = ConversationContext(
+        static_text="статика",
+        dynamic_status=DYN_READY,
+        dynamic_text="уже было",
+        dynamic_turn=1,
+        pending_fields=[],
+    )
+    await _offline_context.save("local", seeded)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    saves_before_check: list[str] = []
+    original_save = _offline_context.save
+    check_started = {"flag": False}
+
+    class _GateChecker:
+        async def judge(self, **kwargs):
+            check_started["flag"] = True
+            return CheckerVerdict(reply_usable=True, step_closed=False)
+
+    async def save_wrap(call_id, context):
+        if not check_started["flag"]:
+            saves_before_check.append(context.dynamic_status)
+        return await original_save(call_id, context)
+
+    monkeypatch.setattr(_offline_context, "save", save_wrap)
+
+    with (
+        patch("graph.checker_graph._checker_client", _GateChecker()),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert saves_before_check == []
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_text == "уже было"
+    final = out.get("conversation_context") or {}
+    assert final.get("dynamic_status") == DYN_READY
+
+
+async def test_live_searching_не_затирается_контекстером(script, monkeypatch, _offline_context):
+    """Разбор выставил DYN_SEARCHING — контекстер «не нужна» его не подменяет."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+
+    text = "Просвещения, какой филиал ближе?"
+    progress = ScriptProgress(
+        status={
+            "name": "closed",
+            "city": "closed",
+            "who_studies": "closed",
+            "experience": "closed",
+            "transmission": "closed",
+            "terms": "closed",
+            "theory_format": "closed",
+            "included": "closed",
+            "practice": "closed",
+            "branch": "pending",
+        },
+        attempts={"branch": 1},
+        taken_turn={"branch": 2},
+        profile={"city": "Пермь", "caller_name": "Мария"},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"city": "Пермь", "caller_name": "Мария"},
+        turn=3,
+    )
+    state["city_slug"] = "perm"
+    state["city_name"] = "Пермь"
+    state["current_step"] = "branch"
+    state["head_steps"] = ["branch"]
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(static_text="Город: Пермь", city_slug="perm", city_name="Пермь"),
+    )
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    async def leave_searching(state, *, reply, progress, profile, ctx):
+        """Разбор ещё не завершён — статус «в поиске» остаётся."""
+        assert ctx.dynamic_status == DYN_SEARCHING
+        assert list(ctx.pending_fields or []) == ["branch"]
+        return ctx, {}, profile
+
+    async def _decide(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._lookup_in_live", side_effect=leave_searching),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    final = out.get("conversation_context") or {}
+    assert final.get("dynamic_status") == DYN_SEARCHING
+    assert final.get("pending_fields") == ["branch"]
+    assert final.get("dynamic_turn") == 3
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_SEARCHING
+    assert list(loaded.pending_fields or []) == ["branch"]
+
+
 async def test_live_lookup_ошибка_даёт_missing(script, monkeypatch, _offline_context):
     from graph.context import DYN_MISSING
     from tests.conftest import FakeKB

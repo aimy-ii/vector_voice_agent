@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from langgraph.graph import StateGraph
@@ -65,7 +66,7 @@ from kb.client import vector_kb
 from script.planner import peek_next_step, pick_step
 from script.price import price_line, price_line_from_kb
 from script.source import registry
-from script.store import PROGRESS_FIELDS_CHECKER
+from script.store import PROGRESS_FIELDS_CHECKER, ScriptProgress
 
 log = logging.getLogger(__name__)
 
@@ -139,18 +140,36 @@ def _facts_to_dynamic(facts: dict[str, Any]) -> str:
     return "Факты справочника:\n" + json.dumps(payload, ensure_ascii=False, indent=1)
 
 
-async def _lookup_in_live(
+@dataclass(frozen=True)
+class _LiveLookupIntent:
+    """План разбора справочника на проходе лайв-канала."""
+
+    will_search: bool
+    pending: tuple[str, ...]
+    needs_lookup: bool
+    need_city: bool
+    need_branch: bool
+    needs: tuple[str, ...]
+    search_text: str | None
+    existing_slug: str | None
+    fills_city: bool
+    fills_branch: bool
+    city_asked: bool
+    branch_asked: bool
+
+
+def _plan_live_lookup(
     state: CallState,
     *,
     reply: str,
-    progress,
+    progress: ScriptProgress,
     profile: dict[str, str],
     ctx: ConversationContext,
-) -> tuple[ConversationContext, dict[str, Any], dict[str, str]]:
-    """Разбор города, филиала и фактов — бывший ``_lookup_body`` основного хода.
+) -> _LiveLookupIntent:
+    """Решает, предстоит ли разбор города, филиала или фактов.
 
-    Перед походом выставляет ``DYN_SEARCHING`` и ``pending_fields``; по итогу
-    — ``DYN_READY`` или ``DYN_MISSING``. Ошибки справочника не роняют узел.
+    Те же условия, что использует ``_lookup_in_live``: ранняя пометка
+    ``DYN_SEARCHING`` и сам разбор не должны разъехаться.
 
     Args:
         state: состояние звонка.
@@ -160,16 +179,11 @@ async def _lookup_in_live(
         ctx: текущий контекст.
 
     Returns:
-        Обновлённый контекст, патч состояния (слаги, кандидаты, журнал) и профиль.
+        План: флаг похода, pending-поля и промежуточные признаки.
     """
     script = _script_of(state)
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
     profile_city = str(profile.get("city") or "").strip()
-    turn = int(state.get("turn") or 0)
-    patch: dict[str, Any] = {}
-    journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
-    turn_calls: list[dict[str, Any]] = []
-    facts: dict[str, Any] = {}
 
     def _asked(field: str) -> bool:
         """Шаг, заполняющий поле, уже задавался или взят в шапку этого хода."""
@@ -203,11 +217,10 @@ async def _lookup_in_live(
     existing_slug = state.get("city_slug") or ctx.city_slug
     need_city = bool(not existing_slug and search_text)
 
-    city_slug_known = existing_slug
     fills_branch = any(_step_fills_branch(s) for s in head)
     need_branch = bool(
         branch_asked
-        and city_slug_known
+        and existing_slug
         and not (state.get("branch_slug") or ctx.branch_slug)
         and fills_branch
         and reply
@@ -222,16 +235,64 @@ async def _lookup_in_live(
     will_search = needs_lookup and (
         need_city or need_branch or bool(needs) or bool(city_asked and profile_city)
     )
+    return _LiveLookupIntent(
+        will_search=bool(will_search or need_city or need_branch),
+        pending=tuple(pending),
+        needs_lookup=needs_lookup,
+        need_city=need_city,
+        need_branch=need_branch,
+        needs=tuple(needs),
+        search_text=search_text,
+        existing_slug=existing_slug,
+        fills_city=fills_city,
+        fills_branch=fills_branch,
+        city_asked=city_asked,
+        branch_asked=branch_asked,
+    )
 
-    if will_search or need_city or need_branch:
-        ctx = ctx.model_copy(
-            update={
-                "dynamic_status": DYN_SEARCHING,
-                "dynamic_turn": turn,
-                "pending_fields": list(pending),
-            }
-        )
-        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+
+async def _lookup_in_live(
+    state: CallState,
+    *,
+    reply: str,
+    progress,
+    profile: dict[str, str],
+    ctx: ConversationContext,
+) -> tuple[ConversationContext, dict[str, Any], dict[str, str]]:
+    """Разбор города, филиала и фактов — бывший ``_lookup_body`` основного хода.
+
+    Пометку ``DYN_SEARCHING`` ставит ``live_check_node`` до вызова модели;
+    здесь по итогу — ``DYN_READY`` или ``DYN_MISSING``. Ошибки справочника
+    не роняют узел.
+
+    Args:
+        state: состояние звонка.
+        reply: накопленная реплика клиента.
+        progress: прогресс из кеша.
+        profile: слитый профиль.
+        ctx: текущий контекст.
+
+    Returns:
+        Обновлённый контекст, патч состояния (слаги, кандидаты, журнал) и профиль.
+    """
+    script = _script_of(state)
+    turn = int(state.get("turn") or 0)
+    patch: dict[str, Any] = {}
+    journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
+    turn_calls: list[dict[str, Any]] = []
+    facts: dict[str, Any] = {}
+
+    intent = _plan_live_lookup(state, reply=reply, progress=progress, profile=profile, ctx=ctx)
+    needs_lookup = intent.needs_lookup
+    need_city = intent.need_city
+    need_branch = intent.need_branch
+    needs = list(intent.needs)
+    search_text = intent.search_text
+    existing_slug = intent.existing_slug
+    fills_city = intent.fills_city
+    fills_branch = intent.fills_branch
+    pending = list(intent.pending)
+    branch_asked = intent.branch_asked
 
     if not needs_lookup:
         stage("lookup", "нечего искать, пропуск", "done")
@@ -296,7 +357,6 @@ async def _lookup_in_live(
 
         city_slug = patch.get("city_slug") or state.get("city_slug") or ctx.city_slug
 
-        fills_branch = any(_step_fills_branch(s) for s in head)
         if (
             branch_asked
             and city_slug
@@ -568,6 +628,20 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         "state",
     )
 
+    # Пометка «в поиске» — до check_pass, иначе основной ход не успеет её увидеть.
+    ctx = await _load_context(state)
+    intent = _plan_live_lookup(state, reply=reply, progress=progress, profile=profile, ctx=ctx)
+    if intent.will_search:
+        turn = int(state.get("turn") or 0)
+        ctx = ctx.model_copy(
+            update={
+                "dynamic_status": DYN_SEARCHING,
+                "dynamic_turn": turn,
+                "pending_fields": list(intent.pending),
+            }
+        )
+        await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+
     state_for_check: dict[str, Any] = {**state, "profile": profile}
     progress, closures, asks_inform = await check_pass(
         state_for_check,
@@ -583,7 +657,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     patch["profile"] = profile
 
     # Разбор города/филиала/фактов — раньше был на пути основного хода.
-    ctx = await _load_context(state)
     ctx, lookup_patch, profile = await _lookup_in_live(
         state,
         reply=reply,
@@ -616,11 +689,11 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         branches=branches,
     )
     if lookup_status in {DYN_READY, DYN_MISSING, DYN_SEARCHING} and ctx.dynamic_status == DYN_NONE:
-        keep_status = lookup_status if lookup_status != DYN_SEARCHING else DYN_READY
+        # DYN_SEARCHING не подменяем на «готово»: данные ещё не принесены.
         ctx = ctx.model_copy(
             update={
-                "dynamic_status": keep_status,
-                "pending_fields": [] if keep_status != DYN_SEARCHING else lookup_pending,
+                "dynamic_status": lookup_status,
+                "pending_fields": lookup_pending if lookup_status == DYN_SEARCHING else [],
                 "dynamic_turn": lookup_turn or ctx.dynamic_turn,
                 "dynamic_text": ctx.dynamic_text or lookup_text,
             }
