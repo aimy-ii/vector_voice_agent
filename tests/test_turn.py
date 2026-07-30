@@ -528,7 +528,35 @@ async def test_счётчик_растёт_у_всех_шагов_шапки(
     # Свежий who_studies тоже в шапке — счётчик с нуля.
     assert attempts.get("who_studies") == 1
     assert state["head_steps"] == ["name", "city", "who_studies"]
-    assert state.get("head_new_step") == "who_studies"
+    # Ведущий уже висящий — new_step не указывает на шаг дальше по шапке.
+    assert state.get("head_new_step") is None
+
+
+async def test_head_new_step_ведущий_если_взят_впервые(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """При шапке из нескольких шагов new_step — ведущий, не шаг дальше."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    # Ведущий name ещё не брали — он и есть новый шаг хода.
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="здравствуйте")],
+            "step_status": {},
+            "step_attempts": {},
+            "step_taken_turn": {},
+            "turn": 1,
+        }
+    )
+    head = state.get("head_steps") or []
+    assert head
+    assert state.get("head_new_step") == head[0]
+    if len(head) > 1:
+        assert state.get("head_new_step") != head[-1] or head[0] == head[-1]
 
 
 async def test_head_new_step_none_когда_все_висящие(

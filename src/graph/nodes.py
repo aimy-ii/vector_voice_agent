@@ -489,11 +489,11 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Новый шаг — со счётчиком 0 до инкремента; после плюса считать нельзя.
-    new_step_id = next(
-        (s.id for s in head if int(progress.attempts.get(s.id, 0)) == 0),
-        None,
-    )
+    # Новый шаг хода — только ведущий, если взят впервые (счётчик 0 до
+    # инкремента). Шаг дальше по шапке пометку не получает.
+    new_step_id: str | None = None
+    if head and int(progress.attempts.get(head[0].id, 0)) == 0:
+        new_step_id = head[0].id
 
     # На продолжении шаги не закрываем и попытки не увеличиваем.
     if not is_continuation:
