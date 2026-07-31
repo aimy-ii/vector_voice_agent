@@ -60,6 +60,8 @@ class FakeChecker:
         step,
         step_text,
         attempts: int = 0,
+        age: int = 0,
+        in_work: bool = False,
     ):
         self.calls.append(
             {
@@ -68,6 +70,8 @@ class FakeChecker:
                 "step_id": step.id,
                 "step_text": step_text,
                 "attempts": attempts,
+                "age": age,
+                "in_work": in_work,
             }
         )
         if not self.verdicts:
@@ -852,6 +856,68 @@ async def test_live_contexter_до_check_pass(script, monkeypatch, _offline_cont
         await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert order == ["contexter", "check", "warmup"]
+
+
+async def test_live_check_контекстер_не_пишет_город_и_филиал_в_профиль(
+    script, monkeypatch, _offline_context
+):
+    """Слаги города и филиала уходят в контекст/состояние, не в форму профиля."""
+    from graph.context import ConversationContext
+    from graph.profile_agent import ProfileGuess
+
+    text = "я из Перми, филиал на Ленина и ещё символов"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="", profile={})
+    await _offline_context.save("local", ConversationContext())
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_contexter(ctx, **kwargs):
+        # Форму контекстер видит аргументом — но сам её не заполняет.
+        assert "profile" in kwargs
+        return ctx.model_copy(
+            update={
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "branch_slug": "perm_lenina",
+            }
+        )
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    async def fake_guess(*_a, **_k):
+        return ProfileGuess()
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", fake_contexter)
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert out.get("city_slug") == "perm"
+    assert out.get("city_name") == "Пермь"
+    assert out.get("branch_slug") == "perm_lenina"
+    profile = out.get("profile") or {}
+    assert not str(profile.get("city") or "").strip()
+    assert not str(profile.get("branch") or "").strip()
+    ctx = out.get("conversation_context") or {}
+    assert ctx.get("city_slug") == "perm"
+    assert ctx.get("branch_slug") == "perm_lenina"
 
 
 async def test_live_без_разбора_статус_не_трогает(script, monkeypatch, _offline_context):

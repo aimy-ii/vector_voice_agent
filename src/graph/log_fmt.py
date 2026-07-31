@@ -38,7 +38,7 @@ def format_check_done(closures: Sequence[tuple[str, str]]) -> str:
 
     Args:
         closures: пары ``(step_id, основание)``; основание —
-            ``диалог`` / ``счётчик`` / ``доставка``.
+            ``диалог`` / ``бессмысленно`` / ``доставка``.
 
     Returns:
         Строка для ``[check|done]``.

@@ -30,7 +30,7 @@ from graph.context import merge_static
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import run_contexter
 from graph.facts import needs_of
-from graph.log_fmt import format_live_check_state
+from graph.log_fmt import format_check_done, format_live_check_state
 from graph.nodes import (
     _call_id,
     _checker_client,
@@ -304,17 +304,13 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     if utterance_id:
         patch["last_checked_utterance_id"] = utterance_id
 
-    # Слаги из статики контекстера — в патч состояния.
+    # Слаги из статики контекстера — в патч состояния (не в форму профиля).
     if ctx.city_slug and not state.get("city_slug"):
         patch["city_slug"] = ctx.city_slug
         if ctx.city_name:
             patch["city_name"] = ctx.city_name
-            if not str(profile.get("city") or "").strip():
-                profile["city"] = ctx.city_name
     if ctx.branch_slug and not state.get("branch_slug"):
         patch["branch_slug"] = ctx.branch_slug
-        if not str(profile.get("branch") or "").strip():
-            profile["branch"] = ctx.branch_slug
 
     fields = profile_fields_of(script)
     history = list(state.get("messages") or [])
@@ -345,7 +341,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     patch.update(ctx_patch)
 
     if closures:
-        checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)
+        checker_text = format_check_done(closures)
     else:
         checker_text = "ничего"
     elapsed_ms = int((time.perf_counter() - started) * 1000)

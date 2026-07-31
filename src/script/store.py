@@ -22,11 +22,13 @@ KEY_PREFIX = "vector:script:"
 
 
 #: Поля прогресса, которые пишет канал генератора.
-PROGRESS_FIELDS_GENERATOR: frozenset[str] = frozenset({"attempts", "taken_turn"})
+PROGRESS_FIELDS_GENERATOR: frozenset[str] = frozenset({"attempts", "taken_turn", "in_work"})
 #: Поля прогресса, которые пишет канал чекера.
 PROGRESS_FIELDS_CHECKER: frozenset[str] = frozenset({"status", "profile"})
 #: Все поля прогресса (полная запись без слияния).
-PROGRESS_FIELDS_ALL: frozenset[str] = frozenset({"status", "attempts", "taken_turn", "profile"})
+PROGRESS_FIELDS_ALL: frozenset[str] = frozenset(
+    {"status", "attempts", "taken_turn", "in_work", "profile"}
+)
 
 
 @dataclass
@@ -35,15 +37,26 @@ class ScriptProgress:
 
     Attributes:
         status: статус шага ``pending`` / ``closed``.
-        attempts: счётчик попыток задать шаг (раз в шапке генерации).
+        attempts: счётчик попаданий в шапку (для совместимости формата;
+            решения по нему не принимаются).
         taken_turn: номер хода, когда шаг впервые ушёл в генерацию.
+        in_work: идентификаторы шагов, отданных генератору.
         profile: базовые поля профиля, накопленные чекером в кеше.
     """
 
     status: dict[str, str] = field(default_factory=dict)
     attempts: dict[str, int] = field(default_factory=dict)
     taken_turn: dict[str, int] = field(default_factory=dict)
+    in_work: list[str] = field(default_factory=list)
     profile: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Если пометки нет, а счётчик есть — считаем шаг взятым в работу."""
+        if self.in_work:
+            return
+        derived = [key for key, count in self.attempts.items() if int(count) > 0]
+        if derived:
+            self.in_work = derived
 
     def to_dict(self) -> dict[str, Any]:
         """Сериализует прогресс в словарь."""
@@ -70,13 +83,28 @@ class ScriptProgress:
             else:
                 normalized[key] = "pending"
         profile_raw = data.get("profile") or {}
+        attempts = {
+            str(k): int(v)
+            for k, v in dict(data.get("attempts") or data.get("step_attempts") or {}).items()
+        }
+        # Старый формат без ``in_work``: ненулевой счётчик ≈ взят в работу.
+        if "in_work" in data or "step_in_work" in data:
+            raw_work = data.get("in_work") if "in_work" in data else data.get("step_in_work")
+            in_work = [str(item) for item in list(raw_work or [])]
+        else:
+            in_work = [key for key, count in attempts.items() if int(count) > 0]
+        # Уникальность с сохранением порядка.
+        seen: set[str] = set()
+        unique_work: list[str] = []
+        for step_id in in_work:
+            if step_id not in seen:
+                seen.add(step_id)
+                unique_work.append(step_id)
         return cls(
             status=normalized,
-            attempts={
-                str(k): int(v)
-                for k, v in dict(data.get("attempts") or data.get("step_attempts") or {}).items()
-            },
+            attempts=attempts,
             taken_turn={str(k): int(v) for k, v in dict(data.get("taken_turn") or {}).items()},
+            in_work=unique_work,
             profile={
                 str(k): str(v)
                 for k, v in dict(profile_raw).items()
@@ -107,6 +135,12 @@ def merge_progress_fields(
         merged.attempts = {**merged.attempts, **overlay.attempts}
     if "taken_turn" in fields:
         merged.taken_turn = {**merged.taken_turn, **overlay.taken_turn}
+    if "in_work" in fields:
+        seen = set(merged.in_work)
+        for step_id in overlay.in_work:
+            if step_id not in seen:
+                merged.in_work.append(step_id)
+                seen.add(step_id)
     if "profile" in fields:
         for key, value in overlay.profile.items():
             text = str(value).strip()
@@ -225,14 +259,15 @@ def progress_from_state(state: Mapping[str, Any]) -> ScriptProgress:
     snapshot = state.get("script_progress")
     if isinstance(snapshot, Mapping) and snapshot:
         return ScriptProgress.from_mapping(snapshot)
-    return ScriptProgress.from_mapping(
-        {
-            "status": state.get("step_status") or {},
-            "attempts": state.get("step_attempts") or {},
-            "taken_turn": state.get("step_taken_turn") or {},
-            "profile": state.get("profile") or {},
-        }
-    )
+    raw: dict[str, Any] = {
+        "status": state.get("step_status") or {},
+        "attempts": state.get("step_attempts") or {},
+        "taken_turn": state.get("step_taken_turn") or {},
+        "profile": state.get("profile") or {},
+    }
+    if "step_in_work" in state:
+        raw["in_work"] = state.get("step_in_work") or []
+    return ScriptProgress.from_mapping(raw)
 
 
 def progress_to_state(progress: ScriptProgress) -> dict[str, Any]:
@@ -250,6 +285,7 @@ def progress_to_state(progress: ScriptProgress) -> dict[str, Any]:
         "step_status": dict(progress.status),
         "step_attempts": dict(progress.attempts),
         "step_taken_turn": dict(progress.taken_turn),
+        "step_in_work": list(progress.in_work),
         "script_progress": payload,
     }
 

@@ -29,6 +29,8 @@ class FakeChecker:
         step,
         step_text,
         attempts: int = 0,
+        age: int = 0,
+        in_work: bool = False,
     ):
         self.calls.append(
             {
@@ -37,6 +39,8 @@ class FakeChecker:
                 "step_id": step.id,
                 "step_text": step_text,
                 "attempts": attempts,
+                "age": age,
+                "in_work": in_work,
             }
         )
         if not self.verdicts:
@@ -86,9 +90,9 @@ async def test_срез_от_взятия_самого_старого(script):
     assert sliced[-1].type != "human" or sliced[-1].content != "Пермь"
 
 
-async def test_для_счётчика_ноль_история_с_начала(script):
+async def test_для_шага_не_в_работе_история_с_начала(script):
     steps = [script.step("city")]
-    progress = ScriptProgress(attempts={"city": 0})
+    progress = ScriptProgress(attempts={"city": 0}, in_work=[])
     messages = [
         HumanMessage(content="я из Перми"),
         AIMessage(content="как зовут?"),
@@ -258,8 +262,8 @@ async def test_модель_не_ответила_шаги_не_тронуты(s
     assert updated.status.get("name") == "pending"
 
 
-async def test_порог_исчерпан_после_модели_закрывает_счётчиком(script):
-    """На пороге модель смотрит первой; не закрыла — закрываем счётчиком."""
+async def test_порог_попыток_сам_по_себе_не_закрывает(script):
+    """Большой счётчик без вердикта судьи шаг не закрывает."""
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
     updated, closures = await run_checker(
@@ -271,14 +275,14 @@ async def test_порог_исчерпан_после_модели_закрыв�
         client=client,
         attempt_limit=2,
     )
-    assert updated.status["name"] == "closed"
-    assert ("name", "счётчик") in closures
+    assert updated.status.get("name") != "closed"
+    assert ("name", "счётчик") not in closures
     assert len(client.calls) == 1
     assert client.calls[0]["step_id"] == "name"
 
 
-async def test_закрытие_по_счётчику_по_попыткам(script):
-    """Чекер закрывает по attempts при достижении порога, turn сам по себе не важен."""
+async def test_закрытие_по_счётчику_больше_не_срабатывает(script):
+    """Порог attempts не закрывает шаг; без вердикта остаётся открытым."""
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
     updated, closures = await run_checker(
@@ -290,11 +294,10 @@ async def test_закрытие_по_счётчику_по_попыткам(scri
         client=client,
         attempt_limit=2,
     )
-    assert updated.status["name"] == "closed"
-    assert ("name", "счётчик") in closures
+    assert updated.status.get("name") != "closed"
+    assert ("name", "счётчик") not in closures
     assert len(client.calls) == 1
 
-    # При том же turn=5, но попыток меньше порога — не закрываем по счётчику.
     progress2 = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})
     updated2, closures2 = await run_checker(
         script=script,
@@ -305,12 +308,13 @@ async def test_закрытие_по_счётчику_по_попыткам(scri
         client=client,
         attempt_limit=2,
     )
+    assert updated2.status.get("name") != "closed"
     assert ("name", "счётчик") not in closures2
 
 
-async def test_счётчик_ноль_модель_не_вызывается(script):
+async def test_не_в_работе_модель_не_вызывается(script):
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=True)])
-    progress = ScriptProgress(status={}, attempts={})
+    progress = ScriptProgress(status={}, attempts={}, in_work=[])
     updated, _ = await run_checker(
         script=script,
         progress=progress,
@@ -511,33 +515,40 @@ def test_close_delivered_inform_только_inform(script):
     assert after_check.status.get("practice") != "closed"
 
 
-def test_checker_system_prompt_ветка_asked():
-    """Ветки asked дают разный текст с нужными смысловыми правилами."""
-    asked = checker_system_prompt(asked=True)
-    not_asked = checker_system_prompt(asked=False)
+def test_checker_system_prompt_ветка_in_work():
+    """Промпт для шага в работе содержит возраст и отличается от остального."""
+    in_work = checker_system_prompt(in_work=True)
+    idle = checker_system_prompt(in_work=False)
 
-    assert asked != not_asked
-    assert "повторить" in asked
-    assert "после" in asked and "вопрос" in asked
-    assert "где угодно" in not_asked
-    assert "срезе" in not_asked
+    assert in_work != idle
+    assert "возраст" in in_work.lower()
+    assert "бессмысленно" in in_work
+    assert "где угодно" in idle
+    assert "срезе" in idle
 
 
-async def test_фейковый_судья_получает_attempts(script):
-    """В судью уходит счётчик попыток шага из прогресса."""
+async def test_фейковый_судья_получает_возраст(script):
+    """В судью уходит возраст шага и пометка in_work."""
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
-    progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 2})
+    progress = ScriptProgress(
+        status={"name": "pending"},
+        attempts={"name": 2},
+        taken_turn={"name": 1},
+        in_work=["name"],
+    )
     await run_checker(
         script=script,
         progress=progress,
         messages=[HumanMessage(content="Андрей")],
         profile={},
-        turn=2,
+        turn=4,
         client=client,
         attempt_limit=3,
     )
     assert client.calls
     assert client.calls[0]["attempts"] == 2
+    assert client.calls[0]["age"] == 3
+    assert client.calls[0]["in_work"] is True
 
 
 async def test_просьба_повторить_не_закрывает_и_цикл_рвётся(script):
@@ -564,3 +575,58 @@ async def test_просьба_повторить_не_закрывает_и_ци
     assert updated.status.get("city") != "closed"
     assert len(client.calls) == 1
     assert client.calls[0]["step_id"] == "name"
+
+
+async def test_на_проверку_только_взятые_в_работу(script, caplog):
+    """Судье идут только in_work и незакрытые; остальные — «не в работе»."""
+    import logging
+
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(
+        status={"name": "pending", "city": "pending"},
+        attempts={"name": 1},
+        taken_turn={"name": 1},
+        in_work=["name"],
+    )
+    with caplog.at_level(logging.INFO, logger="graph.checker"):
+        await run_checker(
+            script=script,
+            progress=progress,
+            messages=[HumanMessage(content="Андрей")],
+            profile={},
+            turn=2,
+            client=client,
+        )
+    assert len(client.calls) == 1
+    assert client.calls[0]["step_id"] == "name"
+    pending_logs = [r.message for r in caplog.records if "[check|pending]" in r.message]
+    assert pending_logs
+    assert "на проверку: [name(1)]" in pending_logs[0]
+    assert "city — не в работе" in pending_logs[0]
+
+
+async def test_asking_pointless_закрывает_с_основанием_бессмысленно(script):
+    """Вердикт «спрашивать бессмысленно» закрывает шаг с отдельным основанием."""
+    from graph.log_fmt import format_check_done
+
+    client = FakeChecker(
+        [CheckerVerdict(reply_usable=True, step_closed=False, asking_pointless=True)]
+    )
+    progress = ScriptProgress(
+        status={"name": "pending"},
+        attempts={"name": 2},
+        taken_turn={"name": 1},
+        in_work=["name"],
+    )
+    updated, closures = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="не хочу отвечать, хватит")],
+        profile={},
+        turn=5,
+        client=client,
+    )
+    assert updated.status["name"] == "closed"
+    assert ("name", "бессмысленно") in closures
+    assert ("name", "диалог") not in closures
+    assert "бессмысленно" in format_check_done(closures)

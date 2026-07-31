@@ -69,8 +69,9 @@ class CallState(TypedDict, total=False):
         messages: история звонка на этот ход (редьюсер на замену).
         script_id / script_version: закреплённый скрипт звонка.
         step_status: pending / closed по шагам (зеркало Redis).
-        step_attempts: счётчик попыток задать шаг (сколько раз был в шапке).
+        step_attempts: счётчик попаданий в шапку (зеркало; решения не принимает).
         step_taken_turn: ход первого взятия шага.
+        step_in_work: идентификаторы шагов, отданных генератору.
         script_progress: слепок прогресса (на конец звонка — на постоянку).
         profile: собранный профиль.
         city_slug / city_name / branch_slug: фиксации справочника.
@@ -78,7 +79,7 @@ class CallState(TypedDict, total=False):
         head_steps: шапка шагов этого хода.
         head_new_step: идентификатор шага, взятого в шапку впервые на этом
             ходу; ``None`` — новых шагов нет, добор отсечён или все шаги
-            висящие. Считать по счётчикам в промпте нельзя: к моменту
+            уже в работе. Считать по счётчикам в промпте нельзя: к моменту
             генерации они уже увеличены.
         expect_continuation: после реплики бот сам запустит следующий ход
             без реплики клиента (контекст ещё готовится).
@@ -106,6 +107,7 @@ class CallState(TypedDict, total=False):
     step_status: dict[str, str]
     step_attempts: dict[str, int]
     step_taken_turn: dict[str, int]
+    step_in_work: list[str]
     script_progress: dict[str, Any]
 
     profile: Annotated[dict[str, str], merge_dicts]
@@ -153,6 +155,7 @@ def new_state_defaults() -> dict[str, Any]:
         "step_status": {},
         "step_attempts": {},
         "step_taken_turn": {},
+        "step_in_work": [],
         "script_progress": {},
         "profile": {},
         "client_asks_inform": False,

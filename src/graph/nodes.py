@@ -468,15 +468,16 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
 
 async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Берёт шапку из кеша, плюсует счётчик всем её шагам.
+    """Берёт шапку из кеша и помечает её шаги взятыми в работу.
 
     Закрытия шагов делает только лайв-канал; здесь читаем уже записанный
     прогресс и закрываем ``inform`` по факту доставки прошлой реплики.
     Ждать лайв-канал нельзя: что не успел — увидим следующим ходом.
 
-    Счётчик растёт у каждого шага шапки: генератор мог отработать любой
-    из них, и для чекера шаг считается заданным. На ходе без реплики
-    клиента (``continuation`` / ``silence``) счётчики не растут.
+    Шаги шапки помечаются ``in_work``; счётчик ``attempts`` растёт для
+    совместимости формата, но решения по нему не принимаются. На ходе без
+    реплики клиента (``continuation`` / ``silence``) пометки и счётчики
+    не трогаем.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -510,19 +511,20 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Новый шаг хода — только ведущий, если взят впервые (счётчик 0 до
-    # инкремента). Шаг дальше по шапке пометку не получает.
+    # Новый шаг хода — только ведущий, если взят впервые.
     new_step_id: str | None = None
-    if head and int(progress.attempts.get(head[0].id, 0)) == 0:
+    if head and head[0].id not in progress.in_work:
         new_step_id = head[0].id
 
-    # Без реплики клиента шаги не закрываем и попытки не увеличиваем.
+    # Без реплики клиента шаги не закрываем и в работу не берём.
     if not no_client_reply:
         for head_step in head:
             prev = int(progress.attempts.get(head_step.id, 0))
             progress.attempts[head_step.id] = prev + 1
             if head_step.id not in progress.taken_turn:
                 progress.taken_turn[head_step.id] = turn
+            if head_step.id not in progress.in_work:
+                progress.in_work.append(head_step.id)
             progress.status.setdefault(head_step.id, "pending")
 
     progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)

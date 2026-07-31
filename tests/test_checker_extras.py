@@ -29,7 +29,7 @@ def _offline_context(monkeypatch):
 
 
 async def test_шаг_на_пороге_закрывается_диалогом_не_счётчиком(script):
-    """Модель/fills смотрят раньше счётчика — основание «диалог»."""
+    """Модель/fills смотрят раньше — основание «диалог», счётчик не участвует."""
 
     class _Judge:
         async def judge(
@@ -40,6 +40,8 @@ async def test_шаг_на_пороге_закрывается_диалогом_
             step,
             step_text,
             attempts: int = 0,
+            age: int = 0,
+            in_work: bool = False,
         ):
             return CheckerVerdict(
                 reply_usable=True,
@@ -62,8 +64,8 @@ async def test_шаг_на_пороге_закрывается_диалогом_
     assert ("name", "счётчик") not in closures
 
 
-async def test_шаг_на_пороге_без_закрытия_моделью_потом_счётчик(script):
-    """Модель не закрыла — после неё срабатывает счётчик."""
+async def test_шаг_на_пороге_без_закрытия_моделью_остаётся_открытым(script):
+    """Модель не закрыла — счётчик больше не добивает шаг."""
 
     class _Judge:
         async def judge(
@@ -74,6 +76,8 @@ async def test_шаг_на_пороге_без_закрытия_моделью_�
             step,
             step_text,
             attempts: int = 0,
+            age: int = 0,
+            in_work: bool = False,
         ):
             return CheckerVerdict(
                 reply_usable=True,
@@ -95,8 +99,8 @@ async def test_шаг_на_пороге_без_закрытия_моделью_�
         progress=progress,
         attempt_limit=2,
     )
-    assert updated.status["name"] == "closed"
-    assert ("name", "счётчик") in closures
+    assert updated.status.get("name") != "closed"
+    assert ("name", "счётчик") not in closures
     assert asks is True
 
 
@@ -110,6 +114,8 @@ async def test_признак_asks_inform_из_чекера(script):
             step,
             step_text,
             attempts: int = 0,
+            age: int = 0,
+            in_work: bool = False,
         ):
             return CheckerVerdict(
                 reply_usable=True,

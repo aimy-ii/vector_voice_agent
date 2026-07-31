@@ -69,22 +69,26 @@ def test_format_live_check_state_только_ключи_профиля():
     assert "Андрей" not in text
 
 
+def test_format_check_done_бессмысленно():
+    assert format_check_done([("name", "бессмысленно")]) == "закрыт name (бессмысленно)"
+
+
 def test_format_check_pending_с_висящими():
     text = format_check_pending(
         pending=[("city", 1)],
-        rejected=[("greeting", "исчерпан"), ("branch", "счётчик ноль")],
+        rejected=[("greeting", "исчерпан"), ("branch", "не в работе")],
     )
-    assert text == ("на проверку: [city(1)]; отсеяно: greeting — исчерпан, branch — счётчик ноль")
+    assert text == ("на проверку: [city(1)]; отсеяно: greeting — исчерпан, branch — не в работе")
 
 
 def test_format_check_pending_пусто_с_доступными():
     text = format_check_pending(
         pending=[],
-        rejected=[("city", "счётчик ноль")],
+        rejected=[("city", "не в работе")],
         available=[("city", 0), ("branch", 0)],
     )
     assert "на проверку: пусто" in text
-    assert "отсеяно: city — счётчик ноль" in text
+    assert "отсеяно: city — не в работе" in text
     assert "доступны: [city(0), branch(0)]" in text
 
 

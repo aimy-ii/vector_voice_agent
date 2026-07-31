@@ -1516,7 +1516,38 @@ async def test_continuation_не_растит_счётчики(
     # Попытки не выросли относительно входа (plan не плюсует на continuation).
     for sid, count in before_attempts.items():
         assert int(state["step_attempts"].get(sid, 0)) == count
+    # Новые шаги в работу не берутся.
+    in_work = set(state.get("step_in_work") or [])
+    assert "who_studies" not in in_work
     assert state["step_status"].get("city") != "closed"
+
+
+async def test_шапка_помечает_шаги_взятыми_в_работу(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Шаги, отданные в шапку, попадают в ``in_work``."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="здравствуйте")],
+            "step_status": {},
+            "step_attempts": {},
+            "step_taken_turn": {},
+            "step_in_work": [],
+            "turn": 1,
+        }
+    )
+    head = state.get("head_steps") or []
+    assert head
+    in_work = set(state.get("step_in_work") or [])
+    for step_id in head:
+        assert step_id in in_work
+        assert int(state["step_attempts"].get(step_id, 0)) >= 1
 
 
 async def test_silence_выбирает_сборку_и_не_растит_счётчики(
@@ -1565,6 +1596,10 @@ async def test_silence_выбирает_сборку_и_не_растит_счё
     assert state.get("expect_continuation") is False
     for sid, count in before_attempts.items():
         assert int(state["step_attempts"].get(sid, 0)) == count
+    # На silence новые шаги в работу не берём.
+    assert set(state.get("step_in_work") or []) == {
+        sid for sid, count in before_attempts.items() if count > 0
+    }
     assert state["step_status"].get("theory_format") != "closed"
     system = model["messages"][0].content.lower()
     assert "шапка скрипта" not in system
