@@ -7,6 +7,7 @@ from graph.context import (
     DYN_NONE,
     DYN_READY,
     DYN_SEARCHING,
+    DYN_WORKING,
     ConversationContext,
     format_city_static,
     merge_static,
@@ -18,6 +19,7 @@ from graph.summary import build_summary
 def test_статусы_динамики_константы_и_дефолт():
     assert DYN_NONE == "не требуется"
     assert DYN_READY == "готово"
+    assert DYN_WORKING == "в работе"
     assert DYN_SEARCHING == "в поиске"
     assert DYN_MISSING == "не нашлось"
     ctx = ConversationContext()

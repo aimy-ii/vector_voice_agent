@@ -1223,3 +1223,97 @@ async def test_warmup_ошибка_lead_from_progress_не_роняет(script, 
         asks_inform=False,
     )
     assert out is ctx
+
+
+async def test_live_ставит_в_работе_первым_действием(script, monkeypatch, _offline_context):
+    """«в работе» пишется в кеш до контекстера; на выходе — конечный статус."""
+    from graph.context import DYN_READY, DYN_WORKING, ConversationContext
+    from graph.contexter import reply_hash
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    await _offline_context.save("local", ConversationContext(static_text="статика"))
+
+    seen_before_contexter: list[str] = []
+
+    async def spy_contexter(ctx, **kwargs):
+        loaded = await _offline_context.load("local")
+        assert loaded is not None
+        seen_before_contexter.append(loaded.dynamic_status)
+        assert loaded.dynamic_reply_hash == reply_hash(text)
+        return ctx.model_copy(update={"dynamic_status": DYN_READY})
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", spy_contexter)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert seen_before_contexter == [DYN_WORKING]
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_status != DYN_WORKING
+    assert (out.get("conversation_context") or {}).get("dynamic_status") == DYN_READY
+
+
+async def test_live_исключение_снимает_в_работе(script, monkeypatch, _offline_context):
+    """При исключении после «в работе» статус сменяется на конечный."""
+    from graph.context import DYN_READY, DYN_WORKING, ConversationContext
+    from graph.contexter import reply_hash
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    await _offline_context.save(
+        "local",
+        ConversationContext(static_text="статика", dynamic_status=DYN_READY),
+    )
+
+    async def boom_contexter(ctx, **kwargs):
+        loaded = await _offline_context.load("local")
+        assert loaded is not None
+        assert loaded.dynamic_status == DYN_WORKING
+        assert loaded.dynamic_reply_hash == reply_hash(text)
+        raise RuntimeError("contexter failed")
+
+    async def fake_load(_state):
+        return progress
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", boom_contexter)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        with pytest.raises(RuntimeError, match="contexter failed"):
+            await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_status != DYN_WORKING

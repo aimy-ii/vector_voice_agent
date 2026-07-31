@@ -50,14 +50,25 @@ def model(monkeypatch):
         yield None
 
     monkeypatch.setattr(nodes_module, "get_llm", _fake_llm)
-    holder: dict[str, Any] = {"result": {"reply": "Хорошо."}, "calls": 0, "messages": None}
+    holder: dict[str, Any] = {
+        "result": {"reply": "Хорошо."},
+        "calls": 0,
+        "messages": None,
+        "all_messages": [],
+    }
 
     async def _fake_stream(
         llm, messages, *, schema, text_field=None, on_delta=None, budget=None, purpose=None
     ):
         holder["calls"] += 1
         holder["messages"] = messages
+        holder["all_messages"].append(messages)
         result = holder["result"]
+        if isinstance(result, list):
+            result = result[holder["calls"] - 1]
+        on_call = holder.get("on_call")
+        if on_call is not None:
+            await on_call(holder["calls"], messages)
         if text_field and on_delta is not None and result.get(text_field):
             on_delta(result[text_field])
         return result
@@ -129,7 +140,18 @@ def test_waiting_с_контекстом_короче_полного(script):
 async def test_генератор_без_ready_hash_берёт_waiting(
     spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
-    model["result"] = {"reply": "Секунду, уточняю филиалы."}
+    """Недостающие данные и «в поиске» — лестница со waiting, затем full."""
+    kinds: list[str] = []
+
+    def _stage(name: str, _msg: str, _status: str = "done", **kwargs: Any) -> None:
+        if name == "prompt" and kwargs.get("prompt"):
+            kinds.append(str(kwargs["prompt"]))
+
+    monkeypatch.setattr(nodes_module, "stage", _stage)
+    model["result"] = [
+        {"reply": "Секунду, уточняю филиалы."},
+        {"reply": "Ближайший на Ленина."},
+    ]
 
     async def _spy(*args: Any, **kwargs: Any):
         raise AssertionError("контекстер не должен вызываться из respond")
@@ -139,6 +161,8 @@ async def test_генератор_без_ready_hash_берёт_waiting(
 
     reply = "а какие филиалы рядом?"
     ctx = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
         static_text="Город: Пермь",
         dynamic_status=DYN_SEARCHING,
         dynamic_turn=1,
@@ -147,6 +171,20 @@ async def test_генератор_без_ready_hash_берёт_waiting(
         dynamic_reply_hash=reply_hash(reply),
     )
     await ctx_store.save("local", ctx)
+
+    async def _ready(n: int, _messages: Any) -> None:
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "dynamic_text": "Филиалы: Ленина",
+                    }
+                ),
+            )
+
+    model["on_call"] = _ready
     state: dict[str, Any] = {
         **new_state_defaults(),
         "messages": [HumanMessage(content=reply)],
@@ -154,15 +192,17 @@ async def test_генератор_без_ready_hash_берёт_waiting(
         "script_version": "2",
         "current_step": "branch",
         "head_steps": ["branch"],
+        "profile": {"city": "Пермь"},
         "turn": 2,
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is True
-    prompt = model["messages"][0].content
+    assert out.get("expect_continuation") is False
+    assert kinds == ["waiting", "full"]
+    prompt = model["all_messages"][0][0].content
     assert "Шапка скрипта" not in prompt
     assert "предмет" in prompt.lower() or "готовиш" in prompt.lower()
-    assert model["calls"] == 1
+    assert model["calls"] == 2
 
 
 async def test_respond_читает_динамику_из_кеша_без_контекстера(

@@ -131,14 +131,25 @@ def model(monkeypatch):
 
     monkeypatch.setattr(nodes_module, "get_llm", _fake_llm)
 
-    holder: dict[str, Any] = {"result": {"reply": "Хорошо."}, "calls": 0, "messages": None}
+    holder: dict[str, Any] = {
+        "result": {"reply": "Хорошо."},
+        "calls": 0,
+        "messages": None,
+        "all_messages": [],
+    }
 
     async def _fake_stream(
         llm, messages, *, schema, text_field=None, on_delta=None, budget=None, purpose=None
     ):
         holder["calls"] += 1
         holder["messages"] = messages
+        holder["all_messages"].append(messages)
         result = holder["result"]
+        if isinstance(result, list):
+            result = result[holder["calls"] - 1]
+        on_call = holder.get("on_call")
+        if on_call is not None:
+            await on_call(holder["calls"], messages)
         if isinstance(result, Exception):
             raise result
         if text_field and on_delta is not None and result.get(text_field):
@@ -1254,28 +1265,57 @@ async def test_ход_не_ходит_в_справочник(
 
 
 async def test_ready_hash_полная_и_короткая_сборка(
-    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
 ):
-    """Ветвление: waiting / filler / full по статусу и недостающим данным."""
-    from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING, ConversationContext
+    """Лестница по недостающим данным; чужой хеш и готовые данные — full."""
+    from graph.context import (
+        DYN_MISSING,
+        DYN_READY,
+        DYN_SEARCHING,
+        DYN_WORKING,
+        ConversationContext,
+    )
     from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     reply = "какие филиалы у Просвещения?"
-    model["result"] = {"reply": "Сейчас уточню филиалы."}
     digest = reply_hash(reply)
+    kinds: list[str] = []
 
-    # Статус в поиске по этой реплике — сборка ожидания.
+    def _stage(name: str, _msg: str, _status: str = "done", **kwargs):
+        if name == "prompt" and kwargs.get("prompt"):
+            kinds.append(str(kwargs["prompt"]))
+
+    monkeypatch.setattr(nodes_module, "stage", _stage)
+
     ctx = ConversationContext(
         city_slug="perm",
         city_name="Пермь",
         static_text="Статика разговора:\nГород: Пермь (слаг perm).",
-        dynamic_status=DYN_SEARCHING,
+        dynamic_status=DYN_WORKING,
         pending_fields=["branch"],
         dynamic_reply_hash=digest,
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
+
+    async def _ready_after_filler(n: int, _messages):
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "dynamic_text": "Филиалы под запрос: ул. Ленина, 1.",
+                    }
+                ),
+            )
+
+    model["on_call"] = _ready_after_filler
+    model["result"] = [
+        {"reply": "Секунду…"},
+        {"reply": "Ближайшие на Ленина."},
+    ]
     state = {
         **new_state_defaults(),
         "messages": [HumanMessage(content=reply)],
@@ -1288,11 +1328,13 @@ async def test_ready_hash_полная_и_короткая_сборка(
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is True
-    assert "В истории — весь разговор" not in model["messages"][0].content
-    assert "предмет" in model["messages"][0].content.lower()
+    assert out.get("expect_continuation") is False
+    assert kinds == ["filler", "full"]
 
-    # Чужой хеш при всём на месте — полная сборка, статус не влияет.
+    kinds.clear()
+    model["on_call"] = None
+    model["all_messages"] = []
+    model["calls"] = 0
     ctx = ConversationContext(
         city_slug="perm",
         city_name="Пермь",
@@ -1308,10 +1350,12 @@ async def test_ready_hash_полная_и_короткая_сборка(
     model["result"] = {"reply": "Ближайшие на Ленина."}
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
+    assert kinds == ["full"]
     assert "В истории — весь разговор" in model["messages"][0].content
 
-    # DYN_READY и DYN_MISSING — полная сборка.
     for status in (DYN_READY, DYN_MISSING):
+        kinds.clear()
+        model["calls"] = 0
         ctx = ConversationContext(
             city_slug="perm",
             static_text="Статика разговора:\nГород: Пермь (слаг perm).",
@@ -1324,54 +1368,19 @@ async def test_ready_hash_полная_и_короткая_сборка(
         state["conversation_context"] = ctx.model_dump()
         model["result"] = {"reply": "Ок."}
         out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is False
+        assert out.get("expect_continuation") is False
+        assert kinds == ["full"]
     assert "В истории — весь разговор" in model["messages"][0].content
 
 
 async def test_commit_протаскивает_expect_continuation(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
 ):
-    """Флаг из respond доезжает в патч commit: waiting → True, полная → False."""
-    from graph.context import DYN_SEARCHING, ConversationContext
-    from graph.contexter import reply_hash
+    """Commit не затирает флаг; лестница сама флаг не ставит."""
+    from graph.context import ConversationContext
     from graph.state import new_state_defaults
 
     reply = "какие филиалы у Просвещения?"
-    digest = reply_hash(reply)
-    ctx = ConversationContext(
-        city_slug="perm",
-        city_name="Пермь",
-        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
-        dynamic_status=DYN_SEARCHING,
-        pending_fields=["branch"],
-        dynamic_reply_hash=digest,
-        dynamic_reply=reply,
-    )
-    await ctx_store.save("local", ctx)
-    state = {
-        **new_state_defaults(),
-        "messages": [HumanMessage(content=reply)],
-        "script_id": "vector_ru",
-        "script_version": "2",
-        "current_step": "branch",
-        "head_steps": ["branch"],
-        "profile": {"city": "Пермь"},
-        "turn": 2,
-        "conversation_context": ctx.model_dump(),
-    }
-    model["result"] = {"reply": "Сейчас подберу филиалы."}
-    respond_out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert respond_out.get("expect_continuation") is True
-
-    commit_state = {
-        **state,
-        **respond_out,
-        "spoken": respond_out.get("spoken") or ["Сейчас подберу филиалы."],
-    }
-    commit_out = await nodes_module.commit_node(commit_state, None)  # type: ignore[arg-type]
-    assert commit_out.get("expect_continuation") is True
-
-    # Полная сборка — флаг False и в respond, и в commit.
     ctx_full = ConversationContext(
         city_slug="perm",
         city_name="Пермь",
@@ -1401,6 +1410,12 @@ async def test_commit_протаскивает_expect_continuation(
     commit_full = await nodes_module.commit_node(commit_full_state, None)  # type: ignore[arg-type]
     assert commit_full.get("expect_continuation") is False
 
+    commit_true = await nodes_module.commit_node(
+        {**commit_full_state, "expect_continuation": True},
+        None,  # type: ignore[arg-type]
+    )
+    assert commit_true.get("expect_continuation") is True
+
 
 async def test_respond_без_знаний_полная_сборка(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
@@ -1427,17 +1442,44 @@ async def test_respond_без_знаний_полная_сборка(
 
 
 async def test_respond_недостающие_факты_живая_реакция(
-    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
 ):
-    """Ведущий шаг с недостающими фактами — filler и expect_continuation."""
-    from graph.context import ConversationContext
+    """Ведущий шаг с недостающими фактами и статусом «в работе» — filler в лестнице."""
+    from graph.context import DYN_READY, DYN_WORKING, ConversationContext
+    from graph.contexter import reply_hash
     from graph.state import new_state_defaults
 
     reply = "расскажите про сроки"
-    # terms на v2 требует city_meta; город известен, статики нет.
-    ctx = ConversationContext(city_name="Пермь")
+    kinds: list[str] = []
+
+    def _stage(name: str, _msg: str, _status: str = "done", **kwargs):
+        if name == "prompt" and kwargs.get("prompt"):
+            kinds.append(str(kwargs["prompt"]))
+
+    monkeypatch.setattr(nodes_module, "stage", _stage)
+    digest = reply_hash(reply)
+    ctx = ConversationContext(
+        city_name="Пермь",
+        city_slug="perm",
+        dynamic_status=DYN_WORKING,
+        dynamic_reply_hash=digest,
+    )
     await ctx_store.save("local", ctx)
-    model["result"] = {"reply": "Секунду…"}
+
+    async def _ready(n: int, _messages):
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "static_text": "Статика разговора:\nГород: Пермь (слаг perm).",
+                    }
+                ),
+            )
+
+    model["on_call"] = _ready
+    model["result"] = [{"reply": "Секунду…"}, {"reply": "Сроки такие."}]
     state = {
         **new_state_defaults(),
         "messages": [HumanMessage(content=reply)],
@@ -1449,8 +1491,9 @@ async def test_respond_недостающие_факты_живая_реакци
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is True
-    prompt = model["messages"][0].content
+    assert out.get("expect_continuation") is False
+    assert kinds[0] == "filler"
+    prompt = model["all_messages"][0][0].content
     assert "В истории — весь разговор" not in prompt
     assert "думает вслух" in prompt.lower() or "паузу" in prompt.lower()
 
@@ -1458,7 +1501,7 @@ async def test_respond_недостающие_факты_живая_реакци
 async def test_respond_searching_даже_если_данные_на_месте(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
 ):
-    """DYN_SEARCHING с хешем текущей реплики — waiting, даже если у шага всё есть."""
+    """Данные на месте — лестницы нет, даже при DYN_SEARCHING."""
     from graph.context import DYN_SEARCHING, ConversationContext
     from graph.contexter import reply_hash
     from graph.state import new_state_defaults
@@ -1477,7 +1520,7 @@ async def test_respond_searching_даже_если_данные_на_месте(
         dynamic_reply=reply,
     )
     await ctx_store.save("local", ctx)
-    model["result"] = {"reply": "Сейчас подберу стоимость."}
+    model["result"] = {"reply": "Стоимость от десяти тысяч."}
     state = {
         **new_state_defaults(),
         "messages": [HumanMessage(content=reply)],
@@ -1489,9 +1532,9 @@ async def test_respond_searching_даже_если_данные_на_месте(
         "conversation_context": ctx.model_dump(),
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
-    assert out.get("expect_continuation") is True
-    assert "В истории — весь разговор" not in model["messages"][0].content
-    assert "предмет" in model["messages"][0].content.lower()
+    assert out.get("expect_continuation") is False
+    assert model["calls"] == 1
+    assert "В истории — весь разговор" in model["messages"][0].content
 
 
 async def test_continuation_всегда_полная_сборка(

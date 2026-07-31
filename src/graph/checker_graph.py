@@ -26,9 +26,9 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
-from graph.context import merge_static
+from graph.context import DYN_NONE, DYN_SEARCHING, DYN_WORKING, merge_static
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
-from graph.contexter import run_contexter
+from graph.contexter import reply_hash, run_contexter
 from graph.facts import needs_of
 from graph.log_fmt import format_check_done, format_live_check_state
 from graph.nodes import (
@@ -224,9 +224,14 @@ async def _warmup_next_step(
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Один служебный проход: контекстер → чекер → профиль → прогрев.
 
-    Контекстер вызывается до ``check_pass``: статус «в поиске» нужен ходу
-    как можно раньше. Точка отсчёта сбрасывается при смене
-    ``partial_utterance_id``; порог прироста — только внутри одной реплики.
+    Первым делом ставит статус «в работе» с хешем реплики — ход видит,
+    что фон уже взял реплику, ещё до профиля и контекстера. Контекстер
+    дальше сменит статус на «в поиске» / итог. Любой выход, в том числе
+    по исключению, не оставляет «в работе»: иначе ход тянет заглушки
+    до конца звонка.
+
+    Точка отсчёта сбрасывается при смене ``partial_utterance_id``;
+    порог прироста — только внутри одной реплики.
     """
     started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
@@ -262,98 +267,121 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         )
         return {}
 
-    progress = await _load_progress(state)
-    profile = _merge_profile(state, progress)
-    stage(
-        "live-check",
-        format_live_check_state(
-            attempts=progress.attempts,
-            status=progress.status,
-            profile=profile,
-        ),
-        "state",
-    )
-
-    ctx = await _load_context(state)
-    script = _script_of_state(state)
-    needs = _head_needs(state, progress=progress, profile=profile)
     turn = int(state.get("turn") or 0)
-    ctx = ctx.model_copy(update={"dynamic_turn": turn})
-
-    # Контекстер до check_pass: сам выставит статус и сходит за данными.
-    ctx = await run_contexter(
-        ctx,
-        reply=reply,
-        tools=build_context_tools(script),
-        needs=needs,
-        profile=profile,
-        objections=script.objections,
+    digest = reply_hash(reply) if reply else ""
+    ctx = await _load_context(state)
+    prior_status = ctx.dynamic_status or DYN_NONE
+    if prior_status in (DYN_WORKING, DYN_SEARCHING):
+        prior_status = DYN_NONE
+    ctx = ctx.model_copy(
+        update={
+            "dynamic_status": DYN_WORKING,
+            "dynamic_reply_hash": digest,
+            "dynamic_turn": turn,
+            "situation_slug": None,
+            "filler_spoken": False,
+        }
     )
+    await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
 
-    state_for_check: dict[str, Any] = {**state, "profile": profile}
-    progress, closures, asks_inform = await check_pass(
-        state_for_check,
-        reply=reply,
-        judge=_checker_client,
-        progress=progress,
-    )
-    patch: dict[str, Any] = {
-        "last_checked_partial": reply,
-        "client_asks_inform": asks_inform,
-    }
-    if utterance_id:
-        patch["last_checked_utterance_id"] = utterance_id
+    patch: dict[str, Any] = {}
+    try:
+        progress = await _load_progress(state)
+        profile = _merge_profile(state, progress)
+        stage(
+            "live-check",
+            format_live_check_state(
+                attempts=progress.attempts,
+                status=progress.status,
+                profile=profile,
+            ),
+            "state",
+        )
 
-    # Слаги из статики контекстера — в патч состояния (не в форму профиля).
-    if ctx.city_slug and not state.get("city_slug"):
-        patch["city_slug"] = ctx.city_slug
-        if ctx.city_name:
-            patch["city_name"] = ctx.city_name
-    if ctx.branch_slug and not state.get("branch_slug"):
-        patch["branch_slug"] = ctx.branch_slug
+        script = _script_of_state(state)
+        needs = _head_needs(state, progress=progress, profile=profile)
 
-    fields = profile_fields_of(script)
-    history = list(state.get("messages") or [])
-    guess = await guess_profile(
-        reply,
-        history=history,
-        known=profile,
-        fields=fields,
-    )
-    for item in guess.values:
-        key = item.key
-        value = item.value
-        if value and not str(profile.get(key) or "").strip():
-            profile[key] = value
-    progress.profile = dict(profile)
-    progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
-    patch.update(progress_patch)
-    patch["profile"] = profile
+        # Контекстер до check_pass: сам выставит статус и сходит за данными.
+        ctx = await run_contexter(
+            ctx,
+            reply=reply,
+            tools=build_context_tools(script),
+            needs=needs,
+            profile=profile,
+            objections=script.objections,
+        )
 
-    ctx = await _warmup_next_step(
-        state,
-        progress=progress,
-        profile=profile,
-        ctx=ctx,
-        asks_inform=asks_inform,
-    )
-    ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
-    patch.update(ctx_patch)
+        state_for_check: dict[str, Any] = {**state, "profile": profile}
+        progress, closures, asks_inform = await check_pass(
+            state_for_check,
+            reply=reply,
+            judge=_checker_client,
+            progress=progress,
+        )
+        patch = {
+            "last_checked_partial": reply,
+            "client_asks_inform": asks_inform,
+        }
+        if utterance_id:
+            patch["last_checked_utterance_id"] = utterance_id
 
-    if closures:
-        checker_text = format_check_done(closures)
-    else:
-        checker_text = "ничего"
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    subject = (ctx.situation_slug or "").strip()
-    subject_part = f", предмет «{subject}»" if subject else ""
-    stage(
-        "live-check",
-        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
-        f"{subject_part}; {elapsed_ms} мс",
-        "done",
-    )
-    return patch
+        # Слаги из статики контекстера — в патч состояния (не в форму профиля).
+        if ctx.city_slug and not state.get("city_slug"):
+            patch["city_slug"] = ctx.city_slug
+            if ctx.city_name:
+                patch["city_name"] = ctx.city_name
+        if ctx.branch_slug and not state.get("branch_slug"):
+            patch["branch_slug"] = ctx.branch_slug
+
+        fields = profile_fields_of(script)
+        history = list(state.get("messages") or [])
+        guess = await guess_profile(
+            reply,
+            history=history,
+            known=profile,
+            fields=fields,
+        )
+        for item in guess.values:
+            key = item.key
+            value = item.value
+            if value and not str(profile.get(key) or "").strip():
+                profile[key] = value
+        progress.profile = dict(profile)
+        progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
+        patch.update(progress_patch)
+        patch["profile"] = profile
+
+        ctx = await _warmup_next_step(
+            state,
+            progress=progress,
+            profile=profile,
+            ctx=ctx,
+            asks_inform=asks_inform,
+        )
+        ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
+        patch.update(ctx_patch)
+
+        if closures:
+            checker_text = format_check_done(closures)
+        else:
+            checker_text = "ничего"
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        subject = (ctx.situation_slug or "").strip()
+        subject_part = f", предмет «{subject}»" if subject else ""
+        stage(
+            "live-check",
+            f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
+            f"{subject_part}; {elapsed_ms} мс",
+            "done",
+        )
+        return patch
+    finally:
+        final_ctx = await _load_context(state)
+        if final_ctx.dynamic_status == DYN_WORKING:
+            terminal = prior_status if prior_status != DYN_WORKING else DYN_NONE
+            final_ctx = final_ctx.model_copy(update={"dynamic_status": terminal})
+            fixed = await _save_context(final_ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+            patch.update(fixed)
 
 
 def build_checker_graph() -> StateGraph:

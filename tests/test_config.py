@@ -115,6 +115,7 @@ def test_waiting_history_дефолт():
     assert Settings.model_fields["waiting_history_limit"].default == 4
     assert Settings.model_fields["filler_history_limit"].default == 2
     assert Settings.model_fields["silence_history_limit"].default == 12
+    assert Settings.model_fields["ladder_deadline_seconds"].default == 5.0
     assert "searching_stale_turns" not in Settings.model_fields
     assert "status_wait_timeout" not in Settings.model_fields
     assert "status_poll_interval" not in Settings.model_fields

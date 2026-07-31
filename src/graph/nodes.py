@@ -16,6 +16,7 @@ Plan читает закрытия из Redis-кеша и не ждёт лайв
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -28,6 +29,7 @@ from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
     DYN_NONE,
     DYN_SEARCHING,
+    DYN_WORKING,
     ConversationContext,
     context_from_state,
     missing_needs,
@@ -567,18 +569,103 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     }
 
 
-async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Единственный вызов генератора за ход.
+def _build_respond_messages(
+    *,
+    prompt_kind: str,
+    script: CompiledScript,
+    state: CallState,
+    history: Sequence[Any],
+    profile: dict[str, str],
+    facts: dict[str, Any],
+    lead: AnyStep | None,
+    head: Sequence[AnyStep],
+    context_text: str,
+    dynamic_status: str,
+    pending_fields: list[str],
+    turn_kind: str,
+) -> list[Any]:
+    """Собирает сообщения генератора для одной ступени."""
+    if prompt_kind == "silence":
+        return build_silence_messages(
+            script,
+            messages=history,
+            profile=profile,
+            step=lead,
+            attempt=_silence_attempt(),
+            history_limit=settings.silence_history_limit,
+        )
+    if prompt_kind == "waiting":
+        return build_waiting_messages(
+            script,
+            messages=history,
+            profile=profile,
+            pending_fields=pending_fields,
+            step=lead,
+            history_limit=settings.waiting_history_limit,
+            turn_kind=turn_kind,
+            context_text=context_text,
+        )
+    if prompt_kind == "filler":
+        return build_filler_messages(
+            script,
+            messages=history,
+            history_limit=settings.filler_history_limit,
+        )
+    closed_steps = [
+        script.steps[step_id]
+        for step_id, status in (state.get("step_status") or {}).items()
+        if status == "closed" and step_id in script.steps
+    ]
+    next_step_id = state.get("next_step")
+    next_step = (
+        script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
+    )
+    return build_turn_messages(
+        script=script,
+        steps=list(head),
+        profile=profile,
+        facts=facts,
+        history=history,
+        asides_done=list(state.get("asides_done") or []),
+        next_step=next_step,
+        context_text=context_text,
+        dynamic_status=dynamic_status,
+        pending_fields=pending_fields,
+        turn_kind=turn_kind,
+        closed_steps=closed_steps,
+    )
 
-    Читает кеш контекста, выбирает полную, ожидающую, живую или
-    silence-сборку промпта и генерирует реплику. В справочник не ходит.
+
+def _ladder_prompt_kind(
+    *,
+    status: str,
+    same_reply: bool,
+    stubs_spoken: int,
+    force_full: bool,
+) -> str:
+    """Выбирает сборку ступени лестницы по статусу и лимиту заглушек."""
+    if force_full or stubs_spoken >= 2:
+        return "full"
+    if same_reply and status == DYN_WORKING:
+        return "filler"
+    if same_reply and status == DYN_SEARCHING:
+        return "waiting"
+    return "full"
+
+
+async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
+    """Генератор хода: штатная реплика или лестница ожидания данных.
+
+    Лестница включается только когда ведущему шагу нужны данные, которых
+    ещё нет в контексте. Ступени — отдельные генерации (filler → waiting →
+    full) с перечитыванием статуса из кеша; произнесённое дописывается в
+    локальную историю узла. Флаг продолжения на лестнице не ставится.
     """
     script = _script_of(state)
     head = _head_steps(state)
     facts = dict(state.get("facts") or {})
     facts.pop("city_choices", None)
     spoken: list[str] = []
-    streamed: list[str] = []
     ctx = await _load_context(state)
     user_text = last_user_text(state.get("messages") or [])
     turn_kind = str(state.get("turn_kind") or "client")
@@ -589,16 +676,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     digest = reply_hash(user_text) if user_text else ""
     lead = head[0] if head else None
     lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
-    searching = (
-        not is_continuation
-        and not is_silence
-        and bool(user_text)
-        and ctx.dynamic_status == DYN_SEARCHING
-        and ctx.dynamic_reply_hash == digest
-    )
-    context_text = ctx.render()
-    dynamic_status = ctx.dynamic_status or DYN_NONE
-    pending_fields = list(ctx.pending_fields or [])
+    use_ladder = bool(lead_missing) and not is_continuation and not is_silence
 
     if is_silence:
         prompt_kind = "silence"
@@ -608,124 +686,147 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         prompt_kind = "full"
         prompt_reason = "продолжение"
         expect_continuation = False
-    elif searching:
-        prompt_kind = "waiting"
-        prompt_reason = "статус поиска"
-        expect_continuation = True
-    elif lead_missing:
-        prompt_kind = "filler"
+    elif use_ladder:
+        prompt_kind = "ladder"
         prompt_reason = f"недостающие данные ведущего шага: {', '.join(lead_missing)}"
-        expect_continuation = True
+        expect_continuation = False
     else:
         prompt_kind = "full"
         prompt_reason = "данных достаточно"
         expect_continuation = False
 
-    if prompt_kind == "silence":
-        messages = build_silence_messages(
-            script,
-            messages=state.get("messages") or [],
-            profile=profile,
-            step=lead,
-            attempt=_silence_attempt(),
-            history_limit=settings.silence_history_limit,
-        )
-    elif prompt_kind == "waiting":
-        messages = build_waiting_messages(
-            script,
-            messages=state.get("messages") or [],
-            profile=profile,
-            pending_fields=pending_fields,
-            step=lead,
-            history_limit=settings.waiting_history_limit,
-            turn_kind=turn_kind,
-            context_text=context_text,
-        )
-    elif prompt_kind == "filler":
-        messages = build_filler_messages(
-            script,
-            messages=state.get("messages") or [],
-            history_limit=settings.filler_history_limit,
-        )
-    else:
-        closed_steps = [
-            script.steps[step_id]
-            for step_id, status in (state.get("step_status") or {}).items()
-            if status == "closed" and step_id in script.steps
-        ]
-        next_step_id = state.get("next_step")
-        next_step = (
-            script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
-        )
-        messages = build_turn_messages(
+    schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
+    local_history: list[Any] = list(state.get("messages") or [])
+    last_result: TurnResult = TurnResult(reply="")
+    last_ctx = ctx
+    last_error: str | None = None
+
+    async def _generate(kind: str, reason: str) -> str:
+        """Одна генерация; дописывает в ``spoken`` и возвращает текст реплики."""
+        nonlocal last_result, last_ctx, last_error
+        context_text = last_ctx.render()
+        dynamic_status = last_ctx.dynamic_status or DYN_NONE
+        pending_fields = list(last_ctx.pending_fields or [])
+        messages = _build_respond_messages(
+            prompt_kind=kind,
             script=script,
-            steps=head,
+            state=state,
+            history=local_history,
             profile=profile,
             facts=facts,
-            history=state.get("messages") or [],
-            asides_done=list(state.get("asides_done") or []),
-            next_step=next_step,
+            lead=lead,
+            head=head,
             context_text=context_text,
             dynamic_status=dynamic_status,
             pending_fields=pending_fields,
             turn_kind=turn_kind,
-            closed_steps=closed_steps,
         )
+        system_len = len(messages[0].content) if messages else 0
+        stage(
+            "prompt",
+            f"сборка {kind}, {reason}, системное сообщение {system_len} символов",
+            "done",
+            chars=system_len,
+            prompt=kind,
+            reason=reason,
+        )
+        if messages:
+            log.debug("[prompt|done] %s", messages[0].content)
 
-    system_len = len(messages[0].content) if messages else 0
-    stage(
-        "prompt",
-        f"сборка {prompt_kind}, {prompt_reason}, системное сообщение {system_len} символов",
-        "done",
-        chars=system_len,
-        prompt=prompt_kind,
-        reason=prompt_reason,
-    )
-    if messages:
-        log.debug("[prompt|done] %s", messages[0].content)
-    schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
+        streamed: list[str] = []
 
-    def _on_delta(delta: str) -> None:
-        streamed.append(delta)
-        spoken.append(delta)
-        say(delta)
+        def _on_delta(delta: str) -> None:
+            streamed.append(delta)
+            spoken.append(delta)
+            say(delta)
 
-    try:
-        async with get_llm() as llm:
-            raw = await astream_structured(
-                llm,
-                messages,
-                schema=schema,
-                text_field="reply",
-                on_delta=_on_delta,
-                purpose="генератор",
-            )
-    except LLMTurnFailed as exc:
-        reason = str(exc) or "неизвестная причина"
-        log.warning("Подстановка фолбэка: %s", reason)
-        if not streamed:
-            say(script.params.fallback)
-            spoken.append(script.params.fallback)
-        stage("respond", "модель не ответила, отдана аварийная реплика", "done")
-        return {
-            "turn_result": {},
+        try:
+            async with get_llm() as llm:
+                raw = await astream_structured(
+                    llm,
+                    messages,
+                    schema=schema,
+                    text_field="reply",
+                    on_delta=_on_delta,
+                    purpose="генератор",
+                )
+        except LLMTurnFailed as exc:
+            reason_fail = str(exc) or "неизвестная причина"
+            log.warning("Подстановка фолбэка: %s", reason_fail)
+            last_error = str(exc)
+            if not streamed:
+                say(script.params.fallback)
+                spoken.append(script.params.fallback)
+                streamed.append(script.params.fallback)
+            stage("respond", "модель не ответила, отдана аварийная реплика", "done")
+            last_result = TurnResult(reply="".join(streamed))
+            return "".join(streamed)
+
+        last_result = _safe_result(raw)
+        streamed_text = "".join(streamed)
+        integrity = format_reply_integrity(streamed=streamed_text, final=last_result.reply)
+        if integrity:
+            stage("respond", integrity, "done")
+            log.warning("%s", integrity)
+        return streamed_text or (last_result.reply or "")
+
+    if prompt_kind != "ladder":
+        await _generate(prompt_kind, prompt_reason)
+        out: dict[str, Any] = {
+            "turn_result": {} if last_error else last_result.model_dump(),
             "spoken": list(state.get("spoken") or []) + spoken,
-            "last_error": str(exc),
-            "conversation_context": ctx.model_dump(),
+            "conversation_context": last_ctx.model_dump(),
             "expect_continuation": expect_continuation,
         }
+        if last_error:
+            out["last_error"] = last_error
+        return out
 
-    result = _safe_result(raw)
-    streamed_text = "".join(streamed)
-    integrity = format_reply_integrity(streamed=streamed_text, final=result.reply)
-    if integrity:
-        stage("respond", integrity, "done")
-        log.warning("%s", integrity)
+    # Лестница: filler / waiting / full, не больше двух заглушек за ход.
+    deadline = time.monotonic() + float(settings.ladder_deadline_seconds)
+    stubs_spoken = 0
+    step_index = 0
+    while True:
+        last_ctx = await _load_context(state)
+        if step_index > 0 and digest and last_ctx.dynamic_reply_hash != digest:
+            stage("respond", "хеш реплики сменился, лестница прервана", "done")
+            break
+
+        force_full = time.monotonic() >= deadline
+        status = last_ctx.dynamic_status or DYN_NONE
+        same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
+        if force_full:
+            kind = "full"
+            reason = "дедлайн лестницы"
+        else:
+            kind = _ladder_prompt_kind(
+                status=status,
+                same_reply=same_reply,
+                stubs_spoken=stubs_spoken,
+                force_full=False,
+            )
+            if stubs_spoken >= 2:
+                reason = "лимит заглушек"
+            elif kind == "filler":
+                reason = "статус в работе"
+            elif kind == "waiting":
+                reason = "статус поиска"
+            else:
+                reason = f"статус {status}"
+
+        text = await _generate(kind, reason)
+        if text:
+            local_history = list(local_history) + [AIMessage(content=text)]
+        step_index += 1
+        if kind == "full":
+            break
+        stubs_spoken += 1
+
     return {
-        "turn_result": result.model_dump(),
+        "turn_result": last_result.model_dump(),
         "spoken": list(state.get("spoken") or []) + spoken,
-        "conversation_context": ctx.model_dump(),
-        "expect_continuation": expect_continuation,
+        "conversation_context": last_ctx.model_dump(),
+        "expect_continuation": False,
     }
 
 
