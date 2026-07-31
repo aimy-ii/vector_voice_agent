@@ -480,6 +480,10 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     совместимости формата, но решения по нему не принимаются. На ходе без
     реплики клиента (``continuation`` / ``silence``) пометки и счётчики
     не трогаем.
+
+    Если на ходе с репликой клиента ведущий снова совпал с шагом прошлого
+    хода — берём следующий открытый из шапки (шапка сама не меняется).
+    Так не ведём повторно шаг, который судья ещё не успел закрыть.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -513,7 +517,20 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Новый шаг хода — только ведущий, если взят впервые.
+    # Повтор ведущего прошлого хода на реплике клиента — сдвиг по шапке.
+    prev_step_id = state.get("current_step")
+    shifted_from: str | None = None
+    if (
+        not no_client_reply
+        and step is not None
+        and prev_step_id
+        and step.id == prev_step_id
+        and len(head) > 1
+    ):
+        shifted_from = step.id
+        step = head[1]
+
+    # Новый шаг хода — только ведущий шапки, если взят впервые.
     new_step_id: str | None = None
     if head and head[0].id not in progress.in_work:
         new_step_id = head[0].id
@@ -555,6 +572,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
             branch_slug=state.get("branch_slug")
             or context_from_state(state.get("conversation_context")).branch_slug,
             call_id=_call_id(),
+            shifted_from=shifted_from,
         ),
         "done",
         step=step.id if step else None,

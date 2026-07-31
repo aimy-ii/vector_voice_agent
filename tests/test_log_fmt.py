@@ -51,6 +51,29 @@ def test_format_plan_done_без_call_id():
     assert "шапка []" in text
 
 
+def test_format_plan_done_со_сдвигом():
+    """При сдвиге ведущего в логе — пометка и прежний шаг."""
+    text = format_plan_done(
+        step_id="city",
+        route="respond",
+        head=[("name", 2), ("city", 1)],
+        city_slug=None,
+        branch_slug=None,
+        call_id="call-1",
+        shifted_from="name",
+    )
+    assert "шаг city, сдвиг с name," in text
+    assert "сдвиг с name" in text
+    plain = format_plan_done(
+        step_id="name",
+        route="respond",
+        head=[("name", 1)],
+        city_slug=None,
+        branch_slug=None,
+    )
+    assert "сдвиг" not in plain
+
+
 def test_format_live_check_state_пустой_прогресс():
     text = format_live_check_state(attempts={}, status={}, profile={})
     assert text == "счётчики {}, статусы {}, профиль: —"

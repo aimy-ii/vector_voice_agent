@@ -57,6 +57,7 @@ def format_plan_done(
     city_slug: str | None,
     branch_slug: str | None,
     call_id: str | None = None,
+    shifted_from: str | None = None,
 ) -> str:
     """Итог plan: шаг, маршрут, счётчики шапки, звонок, фиксации.
 
@@ -67,6 +68,7 @@ def format_plan_done(
         city_slug: зафиксированный город.
         branch_slug: зафиксированный филиал.
         call_id: идентификатор звонка для ключа прогресса.
+        shifted_from: шаг, с которого сдвинули ведущего (повтор прошлого хода).
 
     Returns:
         Строка для ``[plan|done]``.
@@ -79,8 +81,9 @@ def format_plan_done(
     city = city_slug or "—"
     branch = branch_slug or "—"
     call = call_id or "—"
+    shift_text = f", сдвиг с {shifted_from}" if shifted_from else ""
     return (
-        f"шаг {step_id or '—'}, маршрут {route}, шапка {head_text}, "
+        f"шаг {step_id or '—'}{shift_text}, маршрут {route}, шапка {head_text}, "
         f"звонок {call}, город={city}, филиал={branch}"
     )
 
