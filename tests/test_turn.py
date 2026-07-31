@@ -1109,7 +1109,7 @@ async def test_respond_при_чужом_searching_hash_полная_сборк�
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
     prompt = model["messages"][0].content
-    assert "Шапка скрипта" in prompt
+    assert "В истории — весь разговор" in prompt
     assert fact in prompt
     assert "Город: Пермь" in prompt
     assert model["calls"] == 1
@@ -1158,10 +1158,10 @@ async def test_commit_кладёт_last_agent_reply_в_кеш(
     assert loaded.static_text == "Город: Пермь"
 
 
-async def test_commit_логирует_полный_текст_реплики_на_debug(
+async def test_commit_логирует_полный_текст_реплики_на_info(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
 ):
-    """INFO — превью; DEBUG — полный текст произнесённого."""
+    """INFO — превью ``[commit|done]`` и полный текст произнесённого."""
     import logging
 
     from graph.context import ConversationContext
@@ -1190,26 +1190,26 @@ async def test_commit_логирует_полный_текст_реплики_н
         "turn_result": {"understood": [], "aside_id": None, "reply": spoken_text},
         "conversation_context": {"static_text": "Город: Пермь", "city_slug": "perm"},
     }
-    with caplog.at_level(logging.DEBUG):
+    with caplog.at_level(logging.INFO):
         await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
 
-    info_msgs = [
+    preview_msgs = [
         r.message
         for r in caplog.records
         if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
     ]
-    debug_msgs = [
+    full_msgs = [
         r.message
         for r in caplog.records
         if r.name == "graph.nodes"
-        and r.levelno == logging.DEBUG
+        and r.levelno == logging.INFO
         and "полный текст реплики" in r.message
     ]
-    assert info_msgs
-    assert preview in info_msgs[0]
-    assert spoken_text not in info_msgs[0]
-    assert debug_msgs
-    assert spoken_text in debug_msgs[0]
+    assert preview_msgs
+    assert preview in preview_msgs[0]
+    assert spoken_text not in preview_msgs[0]
+    assert full_msgs
+    assert spoken_text in full_msgs[0]
 
 
 def _closed_through(script_ids: list[str], *, until: str) -> dict[str, str]:
@@ -1289,7 +1289,7 @@ async def test_ready_hash_полная_и_короткая_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is True
-    assert "Шапка скрипта" not in model["messages"][0].content
+    assert "В истории — весь разговор" not in model["messages"][0].content
     assert "предмет" in model["messages"][0].content.lower()
 
     # Чужой хеш при всём на месте — полная сборка, статус не влияет.
@@ -1308,7 +1308,7 @@ async def test_ready_hash_полная_и_короткая_сборка(
     model["result"] = {"reply": "Ближайшие на Ленина."}
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert "Шапка скрипта" in model["messages"][0].content
+    assert "В истории — весь разговор" in model["messages"][0].content
 
     # DYN_READY и DYN_MISSING — полная сборка.
     for status in (DYN_READY, DYN_MISSING):
@@ -1325,7 +1325,7 @@ async def test_ready_hash_полная_и_короткая_сборка(
         model["result"] = {"reply": "Ок."}
         out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert "Шапка скрипта" in model["messages"][0].content
+    assert "В истории — весь разговор" in model["messages"][0].content
 
 
 async def test_commit_протаскивает_expect_continuation(
@@ -1423,7 +1423,7 @@ async def test_respond_без_знаний_полная_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert "Шапка скрипта" in model["messages"][0].content
+    assert "В истории — весь разговор" in model["messages"][0].content
 
 
 async def test_respond_недостающие_факты_живая_реакция(
@@ -1451,7 +1451,7 @@ async def test_respond_недостающие_факты_живая_реакци
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is True
     prompt = model["messages"][0].content
-    assert "Шапка скрипта" not in prompt
+    assert "В истории — весь разговор" not in prompt
     assert "думает вслух" in prompt.lower() or "паузу" in prompt.lower()
 
 
@@ -1490,7 +1490,7 @@ async def test_respond_searching_даже_если_данные_на_месте(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is True
-    assert "Шапка скрипта" not in model["messages"][0].content
+    assert "В истории — весь разговор" not in model["messages"][0].content
     assert "предмет" in model["messages"][0].content.lower()
 
 
@@ -1532,7 +1532,7 @@ async def test_continuation_всегда_полная_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert "Шапка скрипта" in model["messages"][0].content
+    assert "В истории — весь разговор" in model["messages"][0].content
 
 
 async def test_continuation_не_растит_счётчики(
@@ -1743,10 +1743,10 @@ async def test_next_step_в_промпте_первый_незакрытый_п�
     assert state["current_step"] == "included"
     assert state["next_step"] == "practice"
     prompt = model["messages"][0].content
-    assert "Ведущий шаг: included" in prompt
-    assert "Следующий шаг: practice" in prompt
-    assert "Висящий шаг: practice" not in prompt
-    assert "только завершающий вопрос" in prompt.lower()
+    assert "В перечне: included" in prompt
+    assert "Дальше: practice" in prompt
+    assert "Также в перечне: practice" not in prompt
+    assert "ориентир, куда двигаться" in prompt.lower()
 
 
 async def test_без_следующего_шага_вопрос_ведущего(
@@ -1805,8 +1805,8 @@ async def test_без_следующего_шага_вопрос_ведущег�
     assert state["current_step"] == "messenger"
     assert state.get("next_step") in (None, "")
     prompt = model["messages"][0].content
-    assert "Ведущий шаг: messenger" in prompt
+    assert "В перечне: messenger" in prompt
+    assert "Дальше:" not in prompt
     assert "Следующий шаг:" not in prompt
-    assert "только завершающий вопрос" not in prompt.lower()
     # Вопрос ведущего шага на месте — правило перехода не подменяет его.
     assert "messenger" in prompt.lower() or "мессенджер" in prompt.lower()
