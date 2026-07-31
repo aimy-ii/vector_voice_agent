@@ -1525,3 +1525,91 @@ def test_waiting_содержит_запрет_фактов_вне_данных(
         history_limit=2,
     )
     assert _HARD_FACT_BAN in waiting[0].content
+
+
+#: Маркеры указания при «не нашлось» — только в dynamic_status_block.
+_MISSING_STATUS_MARKERS: tuple[str, ...] = (
+    "не объявлять о пробеле",
+    "вслух об этом не сообщать",
+)
+
+
+def test_правила_речи_и_короткие_сборки_без_указания_о_пробеле(script):
+    """В SPEECH_RULES и коротких сборках указания «не объявлять о пробеле» нет."""
+    from graph.prompts import (
+        build_filler_messages,
+        build_silence_messages,
+        build_waiting_messages,
+    )
+
+    for rule in SPEECH_RULES:
+        lowered = rule.lower()
+        for marker in _MISSING_STATUS_MARKERS:
+            assert marker not in lowered, marker
+
+    silence = build_silence_messages(
+        script,
+        messages=[AIMessage(content="Стоимость пока уточняю.")],
+        profile={},
+        step=script.step("price"),
+        attempt=1,
+        history_limit=4,
+    )[0].content.lower()
+    filler = build_filler_messages(
+        script,
+        messages=[HumanMessage(content="сколько стоит?")],
+        history_limit=2,
+    )[0].content.lower()
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="сколько стоит?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("price"),
+        history_limit=2,
+    )[0].content.lower()
+    for content in (silence, filler, waiting):
+        for marker in _MISSING_STATUS_MARKERS:
+            assert marker not in content, marker
+
+
+def test_жёсткий_запрет_фактов_во_всех_сборках(script):
+    """Жёсткий запрет на факты вне данных — в основной и коротких сборках."""
+    from graph.prompts import (
+        _HARD_FACT_BAN,
+        build_filler_messages,
+        build_silence_messages,
+        build_waiting_messages,
+    )
+
+    full = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )[0].content
+    silence = build_silence_messages(
+        script,
+        messages=[AIMessage(content="?")],
+        profile={},
+        step=script.step("price"),
+        attempt=1,
+        history_limit=2,
+    )[0].content
+    filler = build_filler_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        history_limit=2,
+    )[0].content
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("price"),
+        history_limit=2,
+    )[0].content
+    for content in (full, silence, filler, waiting):
+        assert _HARD_FACT_BAN in content

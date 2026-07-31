@@ -77,9 +77,23 @@ def model(monkeypatch):
     return holder
 
 
+#: Указание при «не нашлось»: не объявлять пробел, вести разговор дальше.
+_MISSING_SOFT_MARKERS: tuple[str, ...] = (
+    "не объявлять о пробеле",
+    "вести разговор дальше",
+    "вслух об этом не сообщать",
+)
+
+
 def test_промпт_не_нашлось_инструкция(script):
     block = dynamic_status_block(status=DYN_MISSING)
-    assert "ничего нет" in block.lower()
+    lowered = block.lower()
+    assert "ничего нет" in lowered
+    for marker in _MISSING_SOFT_MARKERS:
+        assert marker in lowered, marker
+    assert "тактично сказать" not in lowered
+    # Готовой фразы для произнесения нет — только указание модели.
+    assert "«" not in block and "»" not in block
     messages = build_turn_messages(
         script=script,
         steps=[],
@@ -90,11 +104,19 @@ def test_промпт_не_нашлось_инструкция(script):
         context_text="Город: Пермь",
         dynamic_status=DYN_MISSING,
     )
-    assert "ничего нет" in messages[0].content.lower()
+    content = messages[0].content.lower()
+    assert "ничего нет" in content
+    for marker in _MISSING_SOFT_MARKERS:
+        assert marker in content, marker
 
 
-def test_промпт_готово_и_не_требуется_как_обычно(script):
-    for status in (DYN_NONE, DYN_READY, ""):
+def test_промпт_готово_поиск_не_требуется_без_указания_о_пробеле(script):
+    """При готово / в поиске / не требуется указания «не объявлять пробел» нет."""
+    for status in (DYN_NONE, DYN_READY, DYN_SEARCHING, ""):
+        block = dynamic_status_block(status=status)
+        lowered = block.lower()
+        assert "не объявлять о пробеле" not in lowered
+        assert "вслух об этом не сообщать" not in lowered
         messages = build_turn_messages(
             script=script,
             steps=[],
@@ -105,7 +127,10 @@ def test_промпт_готово_и_не_требуется_как_обычн�
             context_text="Город: Пермь",
             dynamic_status=status,
         )
-        assert "Город: Пермь" in messages[0].content
+        content = messages[0].content.lower()
+        assert "Город: Пермь".lower() in content
+        assert "не объявлять о пробеле" not in content
+        assert "вслух об этом не сообщать" not in content
 
 
 def test_waiting_с_контекстом_короче_полного(script):
