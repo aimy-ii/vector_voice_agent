@@ -1279,6 +1279,8 @@ def test_правило_речи_без_разрешения_продолжат�
     lowered = end_rule.lower()
     assert "разрешения продолжать не спрашивают" in lowered
     assert "рассказать подробнее" in lowered
+    assert "не запрет на вопросы вообще" in lowered
+    assert "говорить ли дальше" in lowered
     assert "обязательным такой конец не является" in lowered
     assert "действительно требуется ответ или выбор" in lowered
     assert "следующему пункту перечня" in lowered
@@ -1295,11 +1297,60 @@ def test_правило_речи_без_разрешения_продолжат�
     content = messages[0].content
     content_lower = content.lower()
     assert "разрешения продолжать не спрашивают" in content_lower
+    assert "не запрет на вопросы вообще" in content_lower
     assert "обязательным такой конец не является" in content_lower
     assert "действительно требуется ответ или выбор" in content_lower
     assert "следующему пункту перечня" in content_lower
     assert "Реплика всегда заканчивается обращением к человеку" not in content
     assert "Заканчивать ничем нельзя" not in content
+
+
+def test_вопрос_в_конце_двигает_разговор_а_не_проверяет_понимание(script):
+    """Хвост реплики — выбор, уточнение или шаг вперёд; проверки понимания слабые."""
+    end_rule = next(
+        rule
+        for rule in SPEECH_RULES
+        if "обращением к человеку" in rule.lower() and "пустые проверки" in rule.lower()
+    )
+    lowered = end_rule.lower()
+    assert "двигает разговор дальше" in lowered
+    assert "выбор из двух вариантов" in lowered
+    assert "уточнение недостающего" in lowered
+    assert "предложение следующего шага" in lowered
+    assert "не проверка понимания" in lowered
+    assert "слабые концовки" in lowered
+    assert "всё ли понятно" in lowered
+    assert "что осталось непонятным" in lowered
+    assert "могу пояснить" in lowered
+    assert "побуждать человека к ответу" in lowered
+    assert "не должна быть правилом" in lowered
+    assert "заканчивать реплику обращением к человеку" in lowered
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "двигает разговор дальше" in content
+    assert "слабые концовки" in content
+    assert "не запрет на вопросы вообще" in content
+    assert "обращением к человеку" in content
+
+
+def test_имя_повторы_и_одна_тема_не_тронуты_усилением_хвоста():
+    """Правила про имя, повторы и одну тему — прежние формулировки."""
+    name_in_natural = naturalness_block(ask_for_move=True).lower()
+    assert "имя звучит один раз" in name_in_natural
+    assert "начинать реплику с имени нельзя" in name_in_natural
+    assert "две реплики подряд с именем" in name_in_natural
+    repeat_rule = next(r for r in SPEECH_RULES if "не повторять дословно" in r.lower())
+    assert "ни свои фразы, ни образцы" in repeat_rule.lower()
+    topic_rule = next(r for r in SPEECH_RULES if "одна тема за реплику" in r.lower())
+    assert "два-три коротких предложения" in topic_rule.lower()
+    assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
 
 
 def test_исключение_ожидания_без_хода_к_собеседнику(script):
