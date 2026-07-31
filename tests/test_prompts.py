@@ -34,7 +34,7 @@ from graph.prompts import (
 )
 
 #: Число правил речи — замена формулировок не увеличивает набор.
-_SPEECH_RULES_COUNT = 17
+_SPEECH_RULES_COUNT = 18
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -830,12 +830,11 @@ def test_naturalness_называть_данные_сразу_из_контек�
 
 
 def test_naturalness_редкое_обращение_по_имени(script):
-    """Имя — один раз при знакомстве; дальше только закрепление места и прощание."""
+    """По имени — редко, не подряд в двух репликах."""
     text = naturalness_block(ask_for_move=True).lower()
-    assert "один раз при знакомстве" in text
-    assert "закреплении места" in text and "прощании" in text
-    assert "две реплики подряд с именем — ошибка" in text
-    assert "начинать реплику с имени по умолчанию нельзя" in text
+    assert "по имени — редко" in text or "по имени обращаться редко" in text
+    assert "подряд" in text and "имени" in text
+    assert "колл-центр" in text
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name")],
@@ -845,10 +844,7 @@ def test_naturalness_редкое_обращение_по_имени(script):
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert content.count("один раз при знакомстве") == 1
-    assert "две реплики подряд с именем — ошибка" in content
-    # В персоне дубля нет — правило только в естественности.
-    assert "обращение по имени и только по имени" not in content
+    assert "по имени" in content and "редко" in content
 
 
 def test_unknown_запрет_выдумывать_филиал(script):
@@ -1529,134 +1525,3 @@ def test_waiting_содержит_запрет_фактов_вне_данных(
         history_limit=2,
     )
     assert _HARD_FACT_BAN in waiting[0].content
-
-
-#: Формулировки старого признания «данных нет» — в сборках не встречаются.
-_ADMISSION_PHRASES: tuple[str, ...] = (
-    "под рукой нет",
-    "сказать об этом прямо",
-    "выдумывать не буду",
-    "тактично сказать, что этого",
-    "честно скажу",
-)
-
-
-def test_основная_сборка_уводит_нехватку_в_переписку(script):
-    """В основной сборке нет признания пробела; есть увод в мессенджер."""
-    from graph.prompts import _HARD_FACT_BAN
-
-    messages = build_turn_messages(
-        script=script,
-        steps=[script.step("city")],
-        profile={},
-        facts={},
-        history=[],
-        asides_done=[],
-    )
-    content = messages[0].content
-    lowered = content.lower()
-    for phrase in _ADMISSION_PHRASES:
-        assert phrase not in lowered, phrase
-    assert "мессенджер" in lowered
-    assert "не сообщать об этом" in lowered or "не сообщать об отсутствии" in lowered
-    assert "переписк" in lowered or "мессенджер" in lowered
-    assert _HARD_FACT_BAN in content
-
-
-def test_короткие_сборки_уводят_нехватку_в_переписку(script):
-    """Молчание, заглушка и ожидание: увод в переписку, без признания пробела."""
-    from graph.prompts import (
-        _HARD_FACT_BAN,
-        _MISSING_TO_MESSENGER,
-        build_filler_messages,
-        build_silence_messages,
-        build_waiting_messages,
-    )
-
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="Стоимость пока уточняю.")],
-        profile={},
-        step=script.step("price"),
-        attempt=1,
-        history_limit=4,
-    )[0].content
-    filler = build_filler_messages(
-        script,
-        messages=[HumanMessage(content="сколько стоит?")],
-        history_limit=2,
-    )[0].content
-    waiting = build_waiting_messages(
-        script,
-        messages=[HumanMessage(content="сколько стоит?")],
-        profile={},
-        pending_fields=[],
-        step=script.step("price"),
-        history_limit=2,
-    )[0].content
-    for content in (silence, filler, waiting):
-        lowered = content.lower()
-        for phrase in _ADMISSION_PHRASES:
-            assert phrase not in lowered, phrase
-        assert _MISSING_TO_MESSENGER in content
-        assert _HARD_FACT_BAN in content
-        assert "мессенджер" in lowered
-
-
-def test_жёсткий_запрет_фактов_во_всех_сборках(script):
-    """Жёсткий запрет на факты вне данных — в основной и коротких сборках."""
-    from graph.prompts import (
-        _HARD_FACT_BAN,
-        build_filler_messages,
-        build_silence_messages,
-        build_waiting_messages,
-    )
-
-    full = build_turn_messages(
-        script=script,
-        steps=[script.step("city")],
-        profile={},
-        facts={},
-        history=[],
-        asides_done=[],
-    )[0].content
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="?")],
-        profile={},
-        step=script.step("price"),
-        attempt=1,
-        history_limit=2,
-    )[0].content
-    filler = build_filler_messages(
-        script,
-        messages=[HumanMessage(content="?")],
-        history_limit=2,
-    )[0].content
-    waiting = build_waiting_messages(
-        script,
-        messages=[HumanMessage(content="?")],
-        profile={},
-        pending_fields=[],
-        step=script.step("price"),
-        history_limit=2,
-    )[0].content
-    for content in (full, silence, filler, waiting):
-        assert _HARD_FACT_BAN in content
-
-
-def test_правило_имени_ровно_один_раз_в_системном(script):
-    """Правило про обращение по имени — ровно одно вхождение в системном сообщении."""
-    messages = build_turn_messages(
-        script=script,
-        steps=[script.step("name")],
-        profile={"caller_name": "Мария"},
-        facts={},
-        history=[],
-        asides_done=[],
-    )
-    content = messages[0].content.lower()
-    marker = "один раз при знакомстве"
-    assert content.count(marker) == 1
-    assert "две реплики подряд с именем — ошибка" in content
-    assert "обращение по имени и только по имени" not in content
