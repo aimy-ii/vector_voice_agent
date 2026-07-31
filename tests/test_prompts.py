@@ -48,6 +48,15 @@ def _strip_guillemets(text: str) -> str:
     return re.sub(r"«[^»]*»", "", text)
 
 
+def _lead_speech_rule() -> str:
+    """Возвращает правило речи про ведение разговора агентом."""
+    return next(
+        rule
+        for rule in SPEECH_RULES
+        if "разговор ведёт агент" in rule.lower() and "пустые проверки" in rule.lower()
+    )
+
+
 def test_подстановка_фактов_в_текст():
     assert (
         fill_facts("Стоимость: {price_line}", {"price_line": "от 43900"}) == "Стоимость: от 43900"
@@ -126,7 +135,7 @@ def test_системное_сообщение_содержит_ключевые
 
 
 def test_системное_сообщение_содержит_правила_реакции_и_хвостов(script):
-    """Запрет пустых проверок, условный ход к человеку, живой вопрос."""
+    """Запрет пустых проверок, ведение разговора агентом, живой вопрос."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -138,8 +147,8 @@ def test_системное_сообщение_содержит_правила_�
     content = messages[0].content
     assert "Пустые проверки" in content or "пустые проверки" in content.lower()
     assert "согласие с содержанием" in content.lower()
-    assert "обязательным такой конец не является" in content.lower()
-    assert "обращением к человеку" in content.lower()
+    assert "разговор ведёт агент" in content.lower()
+    assert "не спрашивает у собеседника, что тому рассказать" in content.lower()
     assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
     assert "реплика ожидания" in content.lower()
     assert "точное число" in content.lower() or "несколько»" in content
@@ -161,22 +170,21 @@ def test_системное_сообщение_содержит_правила_�
     assert "закончить самим фактом" not in content
     assert "закончить фактом, без пустого хвоста" not in content
     assert "Проверок после рассказа не бывает" not in content
+    assert "Побуждать человека к ответу" not in content
+    assert "реплика без вопроса допустима, но не должна быть правилом" not in content
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
 
 
 def test_правила_окончания_и_запрета_проверок_идут_подряд():
-    """Окончание реплики и запрет пустых проверок — в одном правиле речи."""
-    end_rule = next(
-        rule
-        for rule in SPEECH_RULES
-        if "обращением к человеку" in rule.lower() and "пустые проверки" in rule.lower()
-    )
-    assert "вопросом по делу" in end_rule or "вопрос по делу" in end_rule
-    assert "обязательным такой конец не является" in end_rule.lower()
+    """Ведение разговора и запрет пустых проверок — в одном правиле речи."""
+    end_rule = _lead_speech_rule()
+    assert "вопрос по делу" in end_rule.lower()
+    assert "разговор ведёт агент" in end_rule.lower()
     assert "реплика ожидания" in end_rule.lower()
     assert "согласие с содержанием" in end_rule.lower()
     assert "запретом не считается" not in end_rule
     assert "Заканчивать ничем нельзя" not in end_rule
+    assert "Побуждать человека к ответу" not in end_rule
 
 
 def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
@@ -196,8 +204,7 @@ def test_скрипты_v1_v4_собирают_ход_с_правилами_ре
         assert "Пустые проверки" in content or "пустые проверки" in content.lower()
         assert "согласие с содержанием" in content.lower()
         assert "Вопрос звучит так, как спросил бы человек в разговоре" in content
-        assert "обращением к человеку" in content.lower()
-        assert "обязательным такой конец не является" in content.lower()
+        assert "разговор ведёт агент" in content.lower()
         assert "Реплика всегда заканчивается обращением к человеку" not in content
         assert "Заканчивать ничем нельзя" not in content
         assert "Реплика всегда заканчивается передачей хода собеседнику" not in content
@@ -206,6 +213,7 @@ def test_скрипты_v1_v4_собирают_ход_с_правилами_ре
         assert "Проверочный вопрос в конце рассказа спрашивает о том" not in content
         assert "Реплика состоит из двух частей" not in content
         assert "закончить фактом, без пустого хвоста" not in content
+        assert "Побуждать человека к ответу" not in content
 
 
 def test_профиль_разделяет_роли(script):
@@ -378,7 +386,7 @@ def test_промпт_держит_границы_шага_и_незакрыты
 
 
 def test_промпт_требует_заканчивать_ходом_к_собеседнику(script):
-    """При незакрытом вопросе naturalness требует хода; в правилах — условно."""
+    """При незакрытом вопросе naturalness требует хода; в правилах — ведение."""
     block = naturalness_block(ask_for_move=True)
     assert "вопросом" in block.lower() and "предложением" in block.lower()
     messages = build_turn_messages(
@@ -390,8 +398,8 @@ def test_промпт_требует_заканчивать_ходом_к_соб
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "обращением к человеку" in content
-    assert "обязательным такой конец не является" in content
+    assert "разговор ведёт агент" in content
+    assert "не спрашивает у собеседника, что тому рассказать" in content
 
 
 def test_шапка_с_образцом_тоже_требует_хода_к_собеседнику(script):
@@ -775,7 +783,7 @@ def test_naturalness_не_пересказывать_ответ_клиента(s
 
 
 def test_naturalness_запрет_пустых_проверок_в_конце(script):
-    """Пустые проверки в конце запрещены; обращение — когда нужен ответ."""
+    """Пустые проверки в конце запрещены; naturalness — ход при незакрытом вопросе."""
     text = naturalness_block(ask_for_move=True).lower()
     assert "пустая проверка" in text
     assert "продолжу?" in text
@@ -792,8 +800,8 @@ def test_naturalness_запрет_пустых_проверок_в_конце(sc
     )
     content = messages[0].content.lower()
     assert "пустые проверки" in content or "пустая проверка" in content
-    assert "обращением к человеку" in content
-    assert "обязательным такой конец не является" in content
+    assert "разговор ведёт агент" in content
+    assert "не спрашивает у собеседника, что тому рассказать" in content
 
 
 def test_naturalness_добавлять_новое_а_не_пересказывать_вопрос(script):
@@ -1222,15 +1230,11 @@ def test_запрет_раскрывать_содержание_следующе
 
 
 def test_ход_к_собеседнику_и_запрет_пустых_проверок_вместе(script):
-    """Условное обращение к человеку и запрет пустых проверок — в правилах."""
-    end_rule = next(
-        rule
-        for rule in SPEECH_RULES
-        if "обращением к человеку" in rule.lower() and "пустые проверки" in rule.lower()
-    )
-    assert "обязательным такой конец не является" in end_rule.lower()
+    """Ведение разговора агентом и запрет пустых проверок — в правилах."""
+    end_rule = _lead_speech_rule()
+    assert "разговор ведёт агент" in end_rule.lower()
     assert "продолжим" in end_rule.lower()
-    assert "вопросом" in end_rule.lower()
+    assert "вопрос по делу" in end_rule.lower()
     natural = naturalness_block(ask_for_move=True)
     assert "Пустая проверка" in natural
     assert "либо ничем" not in natural.lower()
@@ -1255,14 +1259,10 @@ def test_запрет_повторять_и_разворачивать_уже_с
 
 
 def test_реплика_всегда_ходом_и_запрет_пустых_проверок(script):
-    """Вопрос в конце — когда нужен ответ; пустые проверки и разрешения запрещены."""
-    end_rule = next(
-        rule
-        for rule in SPEECH_RULES
-        if "обращением к человеку" in rule.lower() and "пустые проверки" in rule.lower()
-    )
-    assert "обязательным такой конец не является" in end_rule.lower()
-    assert "действительно требуется ответ или выбор" in end_rule.lower()
+    """Реплика ведёт разговор дальше; пустые проверки и разрешения запрещены."""
+    end_rule = _lead_speech_rule()
+    assert "разговор ведёт агент" in end_rule.lower()
+    assert "не заканчивается в никуда" in end_rule.lower()
     assert "продолжим" in end_rule.lower()
     natural = naturalness_block(ask_for_move=True)
     assert "Пустая проверка" in natural
@@ -1270,22 +1270,18 @@ def test_реплика_всегда_ходом_и_запрет_пустых_п�
 
 
 def test_правило_речи_без_разрешения_продолжать(script):
-    """Обращение не обязательно; запрет разрешений; переход к следующему пункту."""
-    end_rule = next(
-        rule
-        for rule in SPEECH_RULES
-        if "обращением к человеку" in rule.lower() and "пустые проверки" in rule.lower()
-    )
+    """Агент ведёт разговор; запрет разрешений; переход к следующему пункту."""
+    end_rule = _lead_speech_rule()
     lowered = end_rule.lower()
     assert "разрешения продолжать не спрашивают" in lowered
     assert "рассказать подробнее" in lowered
     assert "не запрет на вопросы вообще" in lowered
     assert "говорить ли дальше" in lowered
-    assert "обязательным такой конец не является" in lowered
-    assert "действительно требуется ответ или выбор" in lowered
+    assert "разговор ведёт агент" in lowered
     assert "следующему пункту перечня" in lowered
     assert "Реплика всегда заканчивается обращением к человеку" not in end_rule
     assert "Заканчивать ничем нельзя" not in end_rule
+    assert "Побуждать человека к ответу" not in end_rule
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1298,33 +1294,27 @@ def test_правило_речи_без_разрешения_продолжат�
     content_lower = content.lower()
     assert "разрешения продолжать не спрашивают" in content_lower
     assert "не запрет на вопросы вообще" in content_lower
-    assert "обязательным такой конец не является" in content_lower
-    assert "действительно требуется ответ или выбор" in content_lower
+    assert "разговор ведёт агент" in content_lower
     assert "следующему пункту перечня" in content_lower
     assert "Реплика всегда заканчивается обращением к человеку" not in content
     assert "Заканчивать ничем нельзя" not in content
 
 
 def test_вопрос_в_конце_двигает_разговор_а_не_проверяет_понимание(script):
-    """Хвост реплики — выбор, уточнение или шаг вперёд; проверки понимания слабые."""
-    end_rule = next(
-        rule
-        for rule in SPEECH_RULES
-        if "обращением к человеку" in rule.lower() and "пустые проверки" in rule.lower()
-    )
+    """Вопрос по делу двигает разговор; пустые «что интересует» запрещены."""
+    end_rule = _lead_speech_rule()
     lowered = end_rule.lower()
     assert "двигает разговор дальше" in lowered
     assert "выбор из двух вариантов" in lowered
     assert "уточнение недостающего" in lowered
     assert "предложение следующего шага" in lowered
     assert "не проверка понимания" in lowered
-    assert "слабые концовки" in lowered
-    assert "всё ли понятно" in lowered
     assert "что осталось непонятным" in lowered
-    assert "могу пояснить" in lowered
-    assert "побуждать человека к ответу" in lowered
-    assert "не должна быть правилом" in lowered
-    assert "заканчивать реплику обращением к человеку" in lowered
+    assert "что вас интересует" in lowered
+    assert "что бы вы хотели узнать" in lowered
+    assert "о чём рассказать" in lowered
+    assert "побуждать человека к ответу" not in lowered
+    assert "реплика заканчивается вопросом или конкретным предложением" not in lowered
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1335,9 +1325,8 @@ def test_вопрос_в_конце_двигает_разговор_а_не_пр
     )
     content = messages[0].content.lower()
     assert "двигает разговор дальше" in content
-    assert "слабые концовки" in content
     assert "не запрет на вопросы вообще" in content
-    assert "обращением к человеку" in content
+    assert "разговор ведёт агент" in content
 
 
 def test_имя_повторы_и_одна_тема_не_тронуты_усилением_хвоста():
@@ -1351,6 +1340,43 @@ def test_имя_повторы_и_одна_тема_не_тронуты_усил
     topic_rule = next(r for r in SPEECH_RULES if "одна тема за реплику" in r.lower())
     assert "два-три коротких предложения" in topic_rule.lower()
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
+
+
+def test_правило_речи_ведёт_разговор_а_не_отдаёт_ход(script):
+    """Агент ведёт разговор: три вида продолжения, обещание, без пустых вопросов."""
+    end_rule = _lead_speech_rule()
+    lowered = end_rule.lower()
+    assert "разговор ведёт агент" in lowered
+    assert "не спрашивает у собеседника, что тому рассказать" in lowered
+    assert "вопрос по делу" in lowered
+    assert "переход к следующей теме" in lowered
+    assert "обозначение того, о чём пойдёт речь" in lowered
+    assert "что пообещал рассказать — обязан рассказать" in lowered
+    assert "следующая реплика начинается именно с этого" in lowered
+    assert "что вас интересует" in lowered
+    assert "что осталось непонятным" in lowered
+    assert "молчание собеседника после реплики не проблема" in lowered
+    assert "вымогать ответ вопросом ради вопроса" in lowered
+    assert "разрешения продолжать не спрашивают" in lowered
+    assert "реплика заканчивается вопросом или конкретным предложением" not in lowered
+    assert "побуждать человека к ответу" not in lowered
+    assert "обязательным такой конец не является" not in lowered
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "разговор ведёт агент" in content
+    assert "не спрашивает у собеседника, что тому рассказать" in content
+    assert "что пообещал рассказать — обязан рассказать" in content
+    assert "что вас интересует" in content
+    assert "что осталось непонятным" in content
+    assert "каждая реплика заканчивается вопросом или конкретным предложением" not in content
+    assert "побуждать человека к ответу" not in content
 
 
 def test_исключение_ожидания_без_хода_к_собеседнику(script):
@@ -1391,11 +1417,11 @@ def test_точные_данные_вместо_расплывчатых(script)
 
 
 def test_шапка_не_повторять_сказанное_и_ход_к_человеку(script):
-    """В рамке перечня — реплика из всего разговора и обращение к человеку."""
+    """В рамке перечня — реплика из всего разговора; агент ведёт разговор."""
     block = steps_block([script.step("included")], {}, {}).lower()
     assert "реплика строится из всего этого разом" in block
     assert "уместно сейчас" in block
-    assert "обращением к человеку" in persona_block().lower() or "обращением к человеку" in block
+    assert "разговор ведёт агент" in persona_block().lower()
     messages = build_turn_messages(
         script=script,
         steps=[script.step("included")],
@@ -1407,7 +1433,7 @@ def test_шапка_не_повторять_сказанное_и_ход_к_че
     content = messages[0].content.lower()
     assert "реплика строится из всего этого разом" in content
     assert "одна тема" in content
-    assert "обращением к человеку" in content
+    assert "разговор ведёт агент" in content
 
 
 def test_запрет_служебных_слов_в_эфире(script):
