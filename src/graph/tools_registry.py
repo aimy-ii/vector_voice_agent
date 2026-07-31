@@ -141,19 +141,21 @@ class CityTool:
         context: ConversationContext,
         *,
         slugs: Sequence[str] = (),
+        reply: str = "",
     ) -> str:
         """Резолвит город и кладёт статику; при районе — заметку в динамику.
 
         Args:
-            query: реплика или название города.
+            query: название города от агента; может быть пустым.
             context: текущий контекст; поля города обновляются на месте.
             slugs: не используется; оставлен для единого интерфейса.
+            reply: реплика клиента целиком; подставляется, если ``query`` пуст.
 
         Returns:
             Краткая строка при успехе / заметка про район; пустая — не нашлось.
         """
         _ = slugs
-        text = (query or "").strip()
+        text = (query or "").strip() or (reply or "").strip()
         preview = text[:60]
         if not text or context.city_slug:
             log.info(

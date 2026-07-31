@@ -246,9 +246,17 @@ async def _run_tool(
     context: ConversationContext,
     *,
     slugs: Sequence[str] = (),
+    reply: str = "",
 ) -> str:
-    """Запускает инструмент; ошибка → пустая строка, контекстер не роняем."""
+    """Запускает инструмент; ошибка → пустая строка, контекстер не роняем.
+
+    Реплику клиента прокидываем только в инструмент города: при пустом
+    ``query`` от агента он подставит её сам. Остальные инструменты
+    общего аргумента ``reply`` не принимают.
+    """
     try:
+        if tool.name == "city":
+            return await tool.run(query, context, slugs=slugs, reply=reply)  # type: ignore[call-arg]
         return await tool.run(query, context, slugs=slugs)
     except Exception as exc:  # noqa: BLE001
         log.warning("Инструмент контекстера не ответил: %s", exc)
@@ -284,7 +292,7 @@ async def _fulfill_needs(
         city_tool = _tool_by_name(tools, "city")
         if city_tool is not None:
             invoked = True
-            found = await _run_tool(city_tool, reply, context)
+            found = await _run_tool(city_tool, reply, context, reply=reply)
             got_city = bool((found or "").strip()) or (
                 bool(context.city_slug) and context.city_slug != city_before
             )
@@ -462,6 +470,7 @@ async def run_contexter(
                     decision.query,
                     updated,
                     slugs=slugs,
+                    reply=reply,
                 )
                 if (found or "").strip():
                     _append_dynamic(updated, found)
