@@ -943,12 +943,11 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     patch.update(progress_patch)
 
-    # Разговор закончен: все шаги явно закрыты и модель отметила прощание.
-    steps_closed = all(progress.status.get(step_id) == "closed" for step_id in script.step_order)
+    # Разговор закончен — по решению модели; один раз выставленный признак не снимаем.
     turn_result = state.get("turn_result") or {}
     model_ended = bool(turn_result.get("conversation_ended"))
     conversation_ended = bool(state.get("conversation_ended"))
-    if steps_closed and model_ended:
+    if model_ended:
         conversation_ended = True
         patch["conversation_ended"] = True
 

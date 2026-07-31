@@ -206,6 +206,15 @@ class VectorKBClient:
         for attempt in range(1, REQUEST_RETRIES + 1):
             try:
                 response = await client.request(method, path, params=params, json=json_body)
+                body_size = len(response.content)
+                logger.info(
+                    "%s Запрос %s %s → %s, тело %s байт",
+                    LOG_PREFIX,
+                    method,
+                    path,
+                    response.status_code,
+                    body_size,
+                )
                 if response.status_code == 404:
                     logger.info("%s Не найдено: %s %s", LOG_PREFIX, method, path)
                     return None
@@ -219,9 +228,23 @@ class VectorKBClient:
                     method,
                     path,
                 )
+                logger.info(
+                    "%s Ошибка запроса %s %s: HTTP %s",
+                    LOG_PREFIX,
+                    method,
+                    path,
+                    exc.response.status_code,
+                )
                 return None
             except httpx.HTTPError as exc:
                 last = exc
+                logger.info(
+                    "%s Ошибка запроса %s %s: %s",
+                    LOG_PREFIX,
+                    method,
+                    path,
+                    exc,
+                )
                 if attempt < REQUEST_RETRIES:
                     await asyncio.sleep(RETRY_DELAY * attempt)
 

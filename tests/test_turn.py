@@ -1860,10 +1860,10 @@ def _all_steps_closed(script) -> dict[str, str]:
     return {step_id: "closed" for step_id in script.step_order}
 
 
-async def test_commit_все_шаги_и_прощание_ставит_conversation_ended(
+async def test_commit_признак_модели_ставит_conversation_ended(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, script, ctx_store, caplog
 ):
-    """Все шаги закрыты и модель вернула признак завершения — флаг в состоянии."""
+    """Генератор вернул признак завершения — флаг в состоянии, шаги не важны."""
     import logging
 
     from graph.context import ConversationContext
@@ -1872,9 +1872,11 @@ async def test_commit_все_шаги_и_прощание_ставит_conversat
     from script.store import ScriptProgress
 
     monkeypatch.setattr(nodes_module, "stage", real_stage)
+    status = _all_steps_closed(script)
+    status["messenger"] = "pending"
     await store.save(
         "local",
-        ScriptProgress(status=_all_steps_closed(script), attempts={}, taken_turn={}),
+        ScriptProgress(status=status, attempts={}, taken_turn={}),
     )
     await ctx_store.save("local", ConversationContext())
     spoken_text = "До свидания, хорошего дня."
@@ -1900,10 +1902,10 @@ async def test_commit_все_шаги_и_прощание_ставит_conversat
     assert "разговор закончен=True" in commit_msgs[0]
 
 
-async def test_commit_шаги_закрыты_без_признака_не_ставит_флаг(
+async def test_commit_без_признака_не_ставит_флаг(
     spoken, store, checker, kb, resolvers, model, use_v2, script, ctx_store
 ):
-    """Шаги закрыты, но признака от модели нет — состояние не меняется."""
+    """Генератор признак не вернул — состояние не меняется."""
     from graph.context import ConversationContext
     from graph.state import new_state_defaults
     from script.store import ScriptProgress
@@ -1927,33 +1929,40 @@ async def test_commit_шаги_закрыты_без_признака_не_ст�
     assert "conversation_ended" not in out
 
 
-async def test_commit_признак_при_открытых_шагах_не_ставит_флаг(
-    spoken, store, checker, kb, resolvers, model, use_v2, script, ctx_store
+async def test_commit_признак_сохраняется_на_следующих_ходах(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
 ):
-    """Модель вернула признак, но открытые шаги остались — состояние не меняется."""
-    from graph.context import ConversationContext
-    from graph.state import new_state_defaults
-    from script.store import ScriptProgress
+    """Признак, выставленный раньше, сохраняется и виден в логе."""
+    import logging
 
-    status = _all_steps_closed(script)
-    status["messenger"] = "pending"
-    await store.save(
-        "local",
-        ScriptProgress(status=status, attempts={}, taken_turn={}),
-    )
+    from graph.context import ConversationContext
+    from graph.progress import stage as real_stage
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", real_stage)
     await ctx_store.save("local", ConversationContext())
-    spoken_text = "До свидания."
+    spoken_text = "Если что — звоните."
     state = {
         **new_state_defaults(),
-        "messages": [HumanMessage(content="пока")],
+        "messages": [HumanMessage(content="угу")],
         "script_id": "vector_ru",
         "script_version": "2",
         "spoken": [spoken_text],
-        "turn_result": {"reply": spoken_text, "conversation_ended": True},
+        "turn_result": {"reply": spoken_text},
+        "conversation_ended": True,
         "conversation_context": {},
     }
-    out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
-    assert "conversation_ended" not in out
+    with caplog.at_level(logging.INFO):
+        out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+
+    assert out.get("conversation_ended") is not False
+    commit_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
+    ]
+    assert commit_msgs
+    assert "разговор закончен=True" in commit_msgs[0]
 
 
 async def test_commit_лог_содержит_разговор_закончен_false(
