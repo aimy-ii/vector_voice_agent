@@ -1515,6 +1515,99 @@ async def test_continuation_не_растит_счётчики(
     assert state["step_status"].get("city") != "closed"
 
 
+async def test_silence_выбирает_сборку_и_не_растит_счётчики(
+    spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
+):
+    """На turn_kind=silence — silence-сборка, счётчики стоят, expect_continuation=False."""
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {
+            "configurable": {
+                "turn_kind": "silence",
+                "silence_attempt": 1,
+                "thread_id": "local",
+            }
+        },
+    )
+    model["result"] = {"reply": "Всё понятно по срокам, или есть вопрос?"}
+    before_attempts = {"name": 1, "city": 1, "theory_format": 1}
+    state = await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="Пермь"),
+                AIMessage(content="Обучение под ключ. Теорию удобнее очно?"),
+            ],
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "theory_format": "pending",
+            },
+            "step_attempts": dict(before_attempts),
+            "profile": {"caller_name": "Мария", "city": "Пермь"},
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "turn": 2,
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "dynamic_status": "готово",
+                "dynamic_reply": "Пермь",
+                "dynamic_reply_hash": "",
+            },
+        }
+    )
+    assert state["turn_kind"] == "silence"
+    assert state.get("expect_continuation") is False
+    for sid, count in before_attempts.items():
+        assert int(state["step_attempts"].get(sid, 0)) == count
+    assert state["step_status"].get("theory_format") != "closed"
+    system = model["messages"][0].content.lower()
+    assert "шапка скрипта" not in system
+    assert "молчи" in system
+    assert "новыми фактами" in system or "новых фактов" in system
+
+
+async def test_silence_respond_короткая_сборка(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """respond_node при silence вызывает build_silence_messages, не полную сборку."""
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {
+            "configurable": {
+                "turn_kind": "silence",
+                "silence_attempt": 2,
+                "thread_id": "local",
+            }
+        },
+    )
+    model["result"] = {"reply": "Может, уточню по теории — удобнее очно?"}
+    state = {
+        **new_state_defaults(),
+        "messages": [
+            HumanMessage(content="Пермь"),
+            AIMessage(content="Теорию удобнее очно или в приложении?"),
+        ],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "theory_format",
+        "head_steps": ["theory_format"],
+        "turn": 3,
+        "turn_kind": "silence",
+        "profile": {"city": "Пермь"},
+        "conversation_context": {"static_text": "Город: Пермь", "dynamic_status": "готово"},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    content = model["messages"][0].content.lower()
+    assert "шапка скрипта" not in content
+    assert "сформулировать иначе" in content
+    assert "молчи" in content
+
+
 async def test_next_step_в_промпте_первый_незакрытый_после_ведущего(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):

@@ -997,6 +997,75 @@ def test_build_filler_messages_короче_без_статики_и_приме�
     assert filler[-1].content == "Пермь"
 
 
+def test_build_silence_messages_короче_опирается_на_сказанное(script):
+    """Молчание: без статики/фактов/шапки; опора на сказанное; запрет новых фактов."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from core.config import settings
+    from graph.prompts import build_silence_messages, build_turn_messages
+
+    history = [
+        AIMessage(content="Как вас зовут?"),
+        HumanMessage(content="Мария"),
+        AIMessage(content="В каком городе будете учиться?"),
+        HumanMessage(content="Пермь"),
+        AIMessage(content="Обучение под ключ, доплат не будет. Теорию удобнее очно?"),
+        HumanMessage(content="очно"),
+    ]
+    silence = build_silence_messages(
+        script,
+        messages=history,
+        profile={"caller_name": "Мария", "city": "Пермь"},
+        step=script.step("theory_format"),
+        attempt=1,
+        history_limit=settings.silence_history_limit,
+    )
+    full = build_turn_messages(
+        script=script,
+        steps=[script.step("theory_format")],
+        profile={"caller_name": "Мария", "city": "Пермь"},
+        facts={"price_line": "Стоимость — 43900"},
+        history=history,
+        asides_done=[],
+        context_text="Статика: Пермь, автопарк Solaris",
+    )
+    content = silence[0].content
+    lowered = content.lower()
+    assert "Статика:" not in content
+    assert "43900" not in content
+    assert "Шапка скрипта" not in content
+    assert "Требования:" not in content
+    assert "Факты этого хода" not in content
+    assert "опираясь" in lowered or "о чём только что говорили" in lowered
+    assert "новыми фактами" in lowered or "новых фактов" in lowered
+    assert "вернуть" in lowered
+    assert "например" not in lowered
+    assert "алло" not in lowered
+    assert len(silence) - 1 == settings.silence_history_limit
+    assert silence[-1].content == "очно"
+    assert len(content) * 2 < len(full[0].content)
+
+    first = build_silence_messages(
+        script,
+        messages=history,
+        profile={},
+        step=None,
+        attempt=1,
+        history_limit=4,
+    )[0].content.lower()
+    second = build_silence_messages(
+        script,
+        messages=history,
+        profile={},
+        step=None,
+        attempt=2,
+        history_limit=4,
+    )[0].content.lower()
+    assert "сформулировать иначе" not in first
+    assert "сформулировать иначе" in second
+    assert "повторять" in second
+
+
 def test_шапка_текущим_помечен_первый_не_последний(script):
     """В шапке из двух шагов ведущим помечен первый, а не последний."""
     block = steps_block(

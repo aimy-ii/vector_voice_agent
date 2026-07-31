@@ -50,7 +50,12 @@ from graph.log_fmt import (
     format_spoken_preview,
 )
 from graph.progress import say, stage
-from graph.prompts import build_filler_messages, build_turn_messages, build_waiting_messages
+from graph.prompts import (
+    build_filler_messages,
+    build_silence_messages,
+    build_turn_messages,
+    build_waiting_messages,
+)
 from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import (
     BranchResolver,
@@ -132,15 +137,35 @@ def _call_id() -> str:
 
 
 def _turn_kind() -> str:
-    """Признак запуска хода: ``client`` или ``continuation``.
+    """Признак запуска хода: ``client``, ``continuation`` или ``silence``.
 
     Читает ``turn_kind`` из ``configurable`` рядом с ``call_id``.
     Отсутствует или пусто — считать ``client``.
     """
     kind = str(_configurable().get("turn_kind") or "").strip().lower()
-    if kind == "continuation":
-        return "continuation"
+    if kind in {"continuation", "silence"}:
+        return kind
     return "client"
+
+
+def _silence_attempt() -> int:
+    """Номер попытки вернуть человека в разговор при молчании.
+
+    Читает ``silence_attempt`` из ``configurable``. Отсутствует или
+    нечисловое — считать первой попыткой.
+    """
+    raw = _configurable().get("silence_attempt")
+    if raw is None or str(raw).strip() == "":
+        return 1
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _no_client_reply(turn_kind: str) -> bool:
+    """Ход без реплики клиента: продолжение или возврат из молчания."""
+    return turn_kind in {"continuation", "silence"}
 
 
 def _script_of(state: CallState) -> CompiledScript:
@@ -454,20 +479,20 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     Ждать лайв-канал нельзя: что не успел — увидим следующим ходом.
 
     Счётчик растёт у каждого шага шапки: генератор мог отработать любой
-    из них, и для чекера шаг считается заданным. На ходе-продолжении
-    (``turn_kind=continuation``) счётчики не растут — реплики клиента не было.
+    из них, и для чекера шаг считается заданным. На ходе без реплики
+    клиента (``continuation`` / ``silence``) счётчики не растут.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
     profile = _merge_profile(state, progress)
     turn = int(state.get("turn") or 0)
     turn_kind = str(state.get("turn_kind") or "client")
-    is_continuation = turn_kind == "continuation"
+    no_client_reply = _no_client_reply(turn_kind)
 
     # Inform закрывается кодом по доставке — это не модельный чекер.
-    # На продолжении реплики клиента не было — закрывать нечего.
+    # Без реплики клиента закрывать нечего.
     delivered_step = state.get("delivered_step")
-    if not is_continuation and delivered_step and state.get("last_delivered", True):
+    if not no_client_reply and delivered_step and state.get("last_delivered", True):
         before = dict(progress.status)
         progress = close_delivered_inform(
             script=script,
@@ -495,8 +520,8 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     if head and int(progress.attempts.get(head[0].id, 0)) == 0:
         new_step_id = head[0].id
 
-    # На продолжении шаги не закрываем и попытки не увеличиваем.
-    if not is_continuation:
+    # Без реплики клиента шаги не закрываем и попытки не увеличиваем.
+    if not no_client_reply:
         for head_step in head:
             prev = int(progress.attempts.get(head_step.id, 0))
             progress.attempts[head_step.id] = prev + 1
@@ -540,15 +565,15 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "current_step": step.id if step is not None else None,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
-        "head_new_step": new_step_id if not is_continuation else None,
+        "head_new_step": new_step_id if not no_client_reply else None,
     }
 
 
 async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Единственный вызов генератора за ход.
 
-    Читает кеш контекста, выбирает полную, ожидающую или живую сборку
-    промпта и генерирует реплику. В справочник не ходит.
+    Читает кеш контекста, выбирает полную, ожидающую, живую или
+    silence-сборку промпта и генерирует реплику. В справочник не ходит.
     """
     script = _script_of(state)
     head = _head_steps(state)
@@ -561,12 +586,14 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     turn_kind = str(state.get("turn_kind") or "client")
     profile = dict(state.get("profile") or {})
     is_continuation = turn_kind == "continuation"
+    is_silence = turn_kind == "silence"
 
     digest = reply_hash(user_text) if user_text else ""
     lead = head[0] if head else None
     lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
     searching = (
         not is_continuation
+        and not is_silence
         and bool(user_text)
         and ctx.dynamic_status == DYN_SEARCHING
         and ctx.dynamic_reply_hash == digest
@@ -575,7 +602,11 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     dynamic_status = ctx.dynamic_status or DYN_NONE
     pending_fields = list(ctx.pending_fields or [])
 
-    if is_continuation:
+    if is_silence:
+        prompt_kind = "silence"
+        prompt_reason = "молчание"
+        expect_continuation = False
+    elif is_continuation:
         prompt_kind = "full"
         prompt_reason = "продолжение"
         expect_continuation = False
@@ -592,7 +623,16 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         prompt_reason = "данных достаточно"
         expect_continuation = False
 
-    if prompt_kind == "waiting":
+    if prompt_kind == "silence":
+        messages = build_silence_messages(
+            script,
+            messages=state.get("messages") or [],
+            profile=profile,
+            step=lead,
+            attempt=_silence_attempt(),
+            history_limit=settings.silence_history_limit,
+        )
+    elif prompt_kind == "waiting":
         messages = build_waiting_messages(
             script,
             messages=state.get("messages") or [],
@@ -708,7 +748,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     result = dict(state.get("turn_result") or {})
     progress = await _load_progress(state)
     turn_kind = str(state.get("turn_kind") or "client")
-    is_continuation = turn_kind == "continuation"
+    no_client_reply = _no_client_reply(turn_kind)
 
     profile = dict(state.get("profile") or {})
     asides_done = list(state.get("asides_done") or [])
@@ -725,7 +765,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     spoken_text = "".join(list(state.get("spoken") or [])).strip()
     resume: str | None = None
-    if not is_continuation and step is not None and aside_id and result.get("resume_step", True):
+    if not no_client_reply and step is not None and aside_id and result.get("resume_step", True):
         if progress.status.get(step.id) != "closed":
             resume = step.id
 
@@ -761,8 +801,8 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
         conversation_context = ctx_patch["conversation_context"]
 
-    # Пустой эфир — pending не ставим. На продолжении шаги не трогаем.
-    pending_step = step.id if step is not None and spoken_text and not is_continuation else None
+    # Пустой эфир — pending не ставим. Без реплики клиента шаги не трогаем.
+    pending_step = step.id if step is not None and spoken_text and not no_client_reply else None
     # Флаг считает respond_node; сюда доезжает через состояние — не затираем.
     expect_continuation = bool(state.get("expect_continuation"))
     patch.update(
@@ -774,7 +814,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "messages": messages,
             "pending_step": pending_step,
             "pending_len": len(spoken_text)
-            if not is_continuation
+            if not no_client_reply
             else int(state.get("pending_len") or 0),
             "pending_ai_count": count_agent_messages(state.get("messages") or []),
             "city_slug": state.get("city_slug"),

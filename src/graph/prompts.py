@@ -906,6 +906,61 @@ def build_filler_messages(
     return [SystemMessage(content=system), *tail]
 
 
+def build_silence_messages(
+    script: CompiledScript,
+    *,
+    messages: Sequence[BaseMessage],
+    profile: Mapping[str, str],
+    step: AnyStep | None,
+    attempt: int,
+    history_limit: int,
+) -> list[BaseMessage]:
+    """Собирает запрос к генератору, когда человек молчит.
+
+    Реплики от клиента не было. Задача — мягко вернуть его в разговор,
+    опираясь на то, о чём только что говорили.
+
+    Args:
+        script: скомпилированный скрипт.
+        messages: история разговора.
+        profile: форма разговора.
+        step: ведущий шаг, на котором остановились.
+        attempt: какая это попытка по счёту.
+        history_limit: сколько последних сообщений оставить.
+
+    Returns:
+        Список сообщений: одно системное и хвост истории.
+    """
+    _ = script
+    _ = profile
+    lines = [
+        f"{settings.agent_name}, к клиенту на «Вы», живой тон. Одна-две коротких фразы.",
+        "Человек молчит несколько секунд после твоей реплики. "
+        "Верни его в разговор, опираясь на то, о чём только что говорили: "
+        "спроси, всё ли понятно по сказанному, есть ли вопросы, "
+        "или предложи перейти к следующему.",
+    ]
+    if int(attempt) >= 2:
+        lines.append(
+            "Это повторный заход: человек не ответил на первый. "
+            "Сформулировать иначе — повторять то же самое нельзя."
+        )
+    lines.append(
+        "Не начинать заново, не здороваться, не пересказывать уже сказанное, "
+        "не сыпать новыми фактами — сейчас задача вернуть внимание, "
+        "а не рассказать больше."
+    )
+    if step is not None:
+        name = getattr(step, "name", None) or getattr(step, "goal", None) or step.id
+        lines.append(f"Ведущий шаг: {step.id} — {name}.")
+
+    limit = max(1, int(history_limit))
+    tail = list(messages)[-limit:]
+    if not tail:
+        tail = [HumanMessage(content="(клиент молчит)")]
+    return [SystemMessage(content="\n".join(lines)), *tail]
+
+
 def build_waiting_messages(
     script: CompiledScript,
     *,
