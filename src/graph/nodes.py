@@ -943,6 +943,15 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     patch.update(progress_patch)
 
+    # Разговор закончен: все шаги явно закрыты и модель отметила прощание.
+    steps_closed = all(progress.status.get(step_id) == "closed" for step_id in script.step_order)
+    turn_result = state.get("turn_result") or {}
+    model_ended = bool(turn_result.get("conversation_ended"))
+    conversation_ended = bool(state.get("conversation_ended"))
+    if steps_closed and model_ended:
+        conversation_ended = True
+        patch["conversation_ended"] = True
+
     conversation_context = state.get("conversation_context") or {}
     if spoken_text:
         ctx = await _load_context(state)
@@ -977,11 +986,13 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         "commit",
         (
             f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
-            f"ожидание продолжения={expect_continuation}"
+            f"ожидание продолжения={expect_continuation}, "
+            f"разговор закончен={conversation_ended}"
             if spoken_text
             else (
                 f"шаг {step.id if step else '—'}, в эфир ничего не ушло, "
-                f"ожидание продолжения={expect_continuation}"
+                f"ожидание продолжения={expect_continuation}, "
+                f"разговор закончен={conversation_ended}"
             )
         ),
         "done",

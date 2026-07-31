@@ -83,6 +83,8 @@ class CallState(TypedDict, total=False):
             генерации они уже увеличены.
         expect_continuation: после реплики бот сам запустит следующий ход
             без реплики клиента (контекст ещё готовится).
+        conversation_ended: разговор закончен — все шаги закрыты и в
+            реплике прозвучало прощание (признак от модели).
         turn_kind: ``client`` — обычный ход по реплике клиента;
             ``continuation`` — продолжение собственной речи бота;
             ``silence`` — человек молчит, бот мягко возвращает в разговор.
@@ -141,6 +143,7 @@ class CallState(TypedDict, total=False):
     turn_result: dict[str, Any]
     call_finished: bool
     expect_continuation: bool
+    conversation_ended: bool
     turn_kind: str
     partial_reply: str
     partial_utterance_id: str
@@ -184,6 +187,7 @@ def new_state_defaults() -> dict[str, Any]:
         "turn_result": {},
         "call_finished": False,
         "expect_continuation": False,
+        "conversation_ended": False,
         "turn_kind": "client",
         "partial_reply": "",
         "partial_utterance_id": "",

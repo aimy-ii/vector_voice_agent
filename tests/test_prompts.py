@@ -1483,3 +1483,45 @@ def test_сборка_молчания_запрещает_решать_и_бро
     assert "решать за человека" in content
     assert "бронировать" in content
     assert "возвращает человека в разговор" in content or "вернуть" in content
+
+
+def test_silence_содержит_запрет_фактов_вне_данных(script):
+    """Системное сообщение молчания содержит запрет называть факты вне данных."""
+    from graph.prompts import _HARD_FACT_BAN, build_silence_messages
+
+    silence = build_silence_messages(
+        script,
+        messages=[AIMessage(content="Стоимость пока уточняю.")],
+        profile={},
+        step=script.step("price"),
+        attempt=1,
+        history_limit=4,
+    )
+    assert _HARD_FACT_BAN in silence[0].content
+
+
+def test_filler_содержит_запрет_фактов_вне_данных(script):
+    """Системное сообщение filler содержит запрет называть факты вне данных."""
+    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+
+    filler = build_filler_messages(
+        script,
+        messages=[HumanMessage(content="сколько стоит?")],
+        history_limit=2,
+    )
+    assert _HARD_FACT_BAN in filler[0].content
+
+
+def test_waiting_содержит_запрет_фактов_вне_данных(script):
+    """Системное сообщение waiting содержит запрет называть факты вне данных."""
+    from graph.prompts import _HARD_FACT_BAN, build_waiting_messages
+
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="сколько стоит?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("price"),
+        history_limit=2,
+    )
+    assert _HARD_FACT_BAN in waiting[0].content
