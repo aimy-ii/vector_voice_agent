@@ -34,7 +34,7 @@ from graph.prompts import (
 )
 
 #: Число правил речи — замена формулировок не увеличивает набор.
-_SPEECH_RULES_COUNT = 18
+_SPEECH_RULES_COUNT = 17
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -836,12 +836,23 @@ def test_naturalness_называть_данные_сразу_из_контек�
     assert "не обещать сходить за данными" in content
 
 
-def test_naturalness_редкое_обращение_по_имени(script):
-    """По имени — редко, не подряд в двух репликах."""
-    text = naturalness_block(ask_for_move=True).lower()
-    assert "по имени — редко" in text or "по имени обращаться редко" in text
-    assert "подряд" in text and "имени" in text
-    assert "колл-центр" in text
+def test_обращение_по_имени_одно_жёсткое_правило(script):
+    """Правило про имя — одно, в естественности: не с имени и не подряд."""
+    natural = naturalness_block(ask_for_move=True)
+    assert natural.lower().count("имя звучит один раз") == 1
+    assert "начинать реплику с имени нельзя" in natural.lower()
+    assert "две реплики подряд с именем" in natural.lower()
+    assert "закреплении места" in natural.lower()
+    assert "прощании" in natural.lower()
+    assert "на «Вы» без имени" in natural or "на «вы» без имени" in natural.lower()
+
+    persona = persona_block().lower()
+    assert "имя звучит один раз" not in persona
+    assert "начинать реплику с имени" not in persona
+    assert "две реплики подряд с именем" not in persona
+    assert "по имени — редко" not in persona
+    assert "обращение по имени и только по имени" not in persona
+
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name")],
@@ -851,7 +862,11 @@ def test_naturalness_редкое_обращение_по_имени(script):
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "по имени" in content and "редко" in content
+    assert content.count("имя звучит один раз") == 1
+    assert "начинать реплику с имени нельзя" in content
+    assert "две реплики подряд с именем" in content
+    assert "по имени — редко" not in content
+    assert "колл-центр" not in content
 
 
 def test_unknown_запрет_выдумывать_филиал(script):
