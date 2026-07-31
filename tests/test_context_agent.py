@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from graph.context import ConversationContext
 from graph.context_agent import ContextDecision, decide_context
-from graph.tools_registry import BranchesTool, CityFaqTool
+from graph.tools_registry import BranchesTool, CityFaqTool, CityTool
 
 
 class _FakeAgent:
@@ -124,3 +126,60 @@ def test_описание_query_упоминает_название_города
     assert "город" in lowered
     assert "назван" in lowered
     assert "пустым" in lowered or "пуст" in lowered
+
+
+async def test_решение_агента_целиком_в_логе_info(caplog):
+    """INFO: инструмент, запрос, предмет, слаги и реплика целиком в логе."""
+    reply = "подскажите филиалы в центре, я из Перми " + ("x" * 50)
+    agent = _FakeAgent(
+        ContextDecision(
+            need=True,
+            tool="branches",
+            query="центр",
+            subject="филиалы",
+            branch_slugs=["a", "b"],
+        )
+    )
+    with caplog.at_level(logging.INFO, logger="graph.context_agent"):
+        await decide_context(
+            reply,
+            ConversationContext(city_slug="perm"),
+            [BranchesTool()],
+            branches=[{"slug": "a"}, {"slug": "b"}],
+            agent=agent,
+        )
+    info = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    assert info
+    msg = info[0]
+    assert "need=True" in msg
+    assert "tool='branches'" in msg
+    assert "query='центр'" in msg
+    assert "subject='филиалы'" in msg
+    assert "branch_slugs=['a', 'b']" in msg
+    assert f"реплика={reply[:80]!r}" in msg
+    assert f"реплика={reply!r}" not in msg
+    assert len(reply) > 80
+
+
+async def test_пустой_query_виден_в_логе_как_пустой(caplog):
+    """Пустой query в логе как '', а не пропускается."""
+    agent = _FakeAgent(
+        ContextDecision(
+            need=True,
+            tool="city",
+            query="",
+            subject="город",
+            branch_slugs=[],
+        )
+    )
+    with caplog.at_level(logging.INFO, logger="graph.context_agent"):
+        await decide_context(
+            "Пермь",
+            ConversationContext(),
+            [CityTool()],
+            agent=agent,
+        )
+    info = [r.message for r in caplog.records if r.levelno == logging.INFO]
+    assert info
+    assert "query=''" in info[0]
+    assert "tool='city'" in info[0]

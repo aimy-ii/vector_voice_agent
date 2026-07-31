@@ -136,6 +136,7 @@ class LlmContextAgent:
             f"Инструменты:\n{tool_lines or '— нет'}\n"
             f"{faq_block}"
         )
+        log.debug("Агент контекста: системное сообщение: %s", system)
         schema = response_format_from(ContextDecision, name="vector_context")
         try:
             async with get_llm(fast=True, temperature=0.0) as llm:
@@ -228,6 +229,16 @@ async def decide_context(
     except Exception as exc:  # noqa: BLE001
         log.warning("Агент контекста упал: %s", exc)
         return ContextDecision()
+
+    log.info(
+        "Агент контекста: need=%s tool=%r query=%r subject=%r branch_slugs=%r реплика=%r",
+        decision.need,
+        decision.tool,
+        decision.query,
+        decision.subject,
+        decision.branch_slugs,
+        (reply or "")[:80],
+    )
 
     subject = _truncate_subject(decision.subject)
     branch_slugs = _valid_branch_slugs(decision.branch_slugs, branches)
