@@ -80,6 +80,9 @@ def model(monkeypatch):
 def test_промпт_не_нашлось_инструкция(script):
     block = dynamic_status_block(status=DYN_MISSING)
     assert "ничего нет" in block.lower()
+    assert "мессенджер" in block.lower()
+    assert "не сообщать об этом" in block.lower()
+    assert "тактично сказать" not in block.lower()
     messages = build_turn_messages(
         script=script,
         steps=[],
@@ -91,6 +94,8 @@ def test_промпт_не_нашлось_инструкция(script):
         dynamic_status=DYN_MISSING,
     )
     assert "ничего нет" in messages[0].content.lower()
+    assert "мессенджер" in messages[0].content.lower()
+    assert "тактично сказать" not in messages[0].content.lower()
 
 
 def test_промпт_готово_и_не_требуется_как_обычно(script):
