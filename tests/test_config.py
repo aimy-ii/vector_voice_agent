@@ -114,7 +114,7 @@ def test_waiting_history_дефолт():
     """Лимит хвоста для реплики ожидания и живой реакции."""
     assert Settings.model_fields["waiting_history_limit"].default == 4
     assert Settings.model_fields["filler_history_limit"].default == 2
-    assert Settings.model_fields["silence_history_limit"].default == 4
+    assert Settings.model_fields["silence_history_limit"].default == 12
     assert "searching_stale_turns" not in Settings.model_fields
     assert "status_wait_timeout" not in Settings.model_fields
     assert "status_poll_interval" not in Settings.model_fields

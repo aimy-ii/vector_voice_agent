@@ -822,4 +822,6 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         "done",
         profile_keys=sorted(profile),
     )
+    if spoken_text:
+        log.debug("полный текст реплики: %s", spoken_text)
     return patch

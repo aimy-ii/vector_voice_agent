@@ -34,7 +34,7 @@ from graph.prompts import (
 )
 
 #: Число правил речи — замена формулировок не увеличивает набор.
-_SPEECH_RULES_COUNT = 23
+_SPEECH_RULES_COUNT = 24
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -1063,10 +1063,32 @@ def test_build_silence_messages_короче_опирается_на_сказа�
     assert "новыми фактами" in lowered or "новых фактов" in lowered
     assert "вернуть" in lowered
     assert "например" not in lowered
-    assert "алло" not in lowered
-    assert len(silence) - 1 == settings.silence_history_limit
+    assert "дежурные оклики" in lowered
+    assert "алло" in lowered
+    assert "вы тут" in lowered
+    assert len(silence) - 1 == len(history)
+    assert len(silence) - 1 > 4
     assert silence[-1].content == "очно"
     assert len(content) * 2 < len(full[0].content)
+
+    long_history = [
+        msg
+        for i in range(7)
+        for msg in (
+            AIMessage(content=f"вопрос {i}?"),
+            HumanMessage(content=f"ответ {i}"),
+        )
+    ]
+    silence_long = build_silence_messages(
+        script,
+        messages=long_history,
+        profile={},
+        step=None,
+        attempt=1,
+        history_limit=settings.silence_history_limit,
+    )
+    assert len(silence_long) - 1 == settings.silence_history_limit
+    assert settings.silence_history_limit > 4
 
     first = build_silence_messages(
         script,
@@ -1084,9 +1106,14 @@ def test_build_silence_messages_короче_опирается_на_сказа�
         attempt=2,
         history_limit=4,
     )[0].content.lower()
+    assert "первая попытка" in first
+    assert "мягко" in first
     assert "сформулировать иначе" not in first
+    assert "с другой стороны" in second
     assert "сформулировать иначе" in second
     assert "повторять" in second
+    assert "первая попытка" not in second
+    assert "мягко верни" not in second
 
 
 def test_шапка_текущим_помечен_первый_не_последний(script):
@@ -1279,3 +1306,64 @@ def test_точные_данные_вместо_расплывчатых(script)
     content = messages[0].content
     assert "точное число" in content.lower()
     assert "несколько филиалов" in content.lower()
+
+
+def test_шапка_не_повторять_сказанное_и_ход_к_человеку(script):
+    """В шапке — запрет повтора уже сказанного и обязательный ход к человеку."""
+    block = steps_block([script.step("included")], {}, {}).lower()
+    assert "уже прозвучало" in block
+    assert "не рассказывать" in block or "не пересказывать" in block
+    assert "пройденным" in block
+    assert "одна тема" in block
+    assert "обращением к человеку" in block or "ходом к человеку" in block
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("included")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "уже прозвучало" in content
+    assert "пройденным" in content
+    assert "одна тема" in content
+    assert "обращением к человеку" in content
+
+
+def test_запрет_служебных_слов_в_эфире(script):
+    """Служебная разметка промпта вслух не произносится."""
+    rule = next(r for r in SPEECH_RULES if "служебная разметка" in r.lower())
+    assert "шаг" in rule.lower()
+    assert "шапка" in rule.lower()
+    assert "скрипт" in rule.lower()
+    assert "перечень" in rule.lower()
+    assert "нумерованных" in rule.lower() or "нумерованн" in rule.lower()
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("name")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "служебная разметка" in content
+    assert "в эфире" in content
+
+
+def test_naturalness_длина_потолок_не_ориентир(script):
+    """Два-три предложения — потолок; требования шага его не отменяют."""
+    text = naturalness_block(ask_for_move=True).lower()
+    assert "потолок" in text
+    assert "не отменяют" in text
+    assert "главное" in text
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("included")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "потолок" in messages[0].content.lower()

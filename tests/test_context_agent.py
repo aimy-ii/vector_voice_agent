@@ -115,3 +115,12 @@ async def test_сбой_агента_пустое_решение_без_искл
         agent=agent,
     )
     assert decision == ContextDecision()
+
+
+def test_описание_query_упоминает_название_города():
+    """Поле query: для инструмента города — название из реплики."""
+    description = ContextDecision.model_fields["query"].description or ""
+    lowered = description.lower()
+    assert "город" in lowered
+    assert "назван" in lowered
+    assert "пустым" in lowered or "пуст" in lowered

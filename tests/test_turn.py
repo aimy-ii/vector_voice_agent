@@ -1158,6 +1158,60 @@ async def test_commit_кладёт_last_agent_reply_в_кеш(
     assert loaded.static_text == "Город: Пермь"
 
 
+async def test_commit_логирует_полный_текст_реплики_на_debug(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
+):
+    """INFO — превью; DEBUG — полный текст произнесённого."""
+    import logging
+
+    from graph.context import ConversationContext
+    from graph.log_fmt import SPOKEN_PREVIEW_LEN, format_spoken_preview
+    from graph.progress import stage as real_stage
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", real_stage)
+    await ctx_store.save(
+        "local",
+        ConversationContext(static_text="Город: Пермь", city_slug="perm"),
+    )
+    spoken_text = (
+        "Обучение под ключ — теория, практика, автомобиль, автодром, "
+        "документы и организация экзамена в ГИБДД, доплат не будет."
+    )
+    assert len(spoken_text) > SPOKEN_PREVIEW_LEN
+    preview = format_spoken_preview(spoken_text)
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="что входит?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "spoken": [spoken_text],
+        "turn_result": {"understood": [], "aside_id": None, "reply": spoken_text},
+        "conversation_context": {"static_text": "Город: Пермь", "city_slug": "perm"},
+    }
+    with caplog.at_level(logging.DEBUG):
+        await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+
+    info_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
+    ]
+    debug_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.nodes"
+        and r.levelno == logging.DEBUG
+        and "полный текст реплики" in r.message
+    ]
+    assert info_msgs
+    assert preview in info_msgs[0]
+    assert spoken_text not in info_msgs[0]
+    assert debug_msgs
+    assert spoken_text in debug_msgs[0]
+
+
 def _closed_through(script_ids: list[str], *, until: str) -> dict[str, str]:
     """Статусы closed для всех шагов до ``until`` включительно."""
     out: dict[str, str] = {}
