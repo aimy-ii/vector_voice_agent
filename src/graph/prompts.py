@@ -1,9 +1,9 @@
 """Сборка запроса к генератору на один ход.
 
 Системное сообщение полной сборки — разделы верхнего уровня
-(``КАК РАБОТАТЬ``, ``ПРАВИЛА РЕЧИ``, ``КОНТЕКСТ``, ``ШАГИ В РАБОТЕ``,
-``ЧТО ДАЛЬШЕ``, ``ФОРМА ОТВЕТА``). Пустой раздел не выводится.
-Перечень городов в промпт не попадает никогда.
+(``КАК РАБОТАТЬ``, ``ПРАВИЛА РЕЧИ``, ``КОНТЕКСТ``, ``СЕЙЧАС ГОВОРИМ ОБ ЭТОМ``,
+``ЕЩЁ НЕ ЗАКРЫТО``, ``ЧТО ДАЛЬШЕ``, ``ФОРМА ОТВЕТА``). Пустой раздел не
+выводится. Перечень городов в промпт не попадает никогда.
 """
 
 from __future__ import annotations
@@ -171,6 +171,13 @@ _NO_MECHANICS = (
 
 #: Пометка к тексту-образцу шага с флагом verbatim.
 _SAMPLE_PREFIX = "Сформулировать в этом ключе, цифры не менять:"
+
+#: Вступление к разделу «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ»: реплика — по текущему шагу.
+_STEPS_FOCUS_INTRO = (
+    "Реплика строится по шагу из раздела «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ». "
+    "К незакрытому возвращаются, когда по текущему сказать нечего или когда "
+    "человек сам о нём заговорил."
+)
 
 
 def fill_facts(text: str, facts: Mapping[str, Any]) -> str:
@@ -621,40 +628,54 @@ def steps_block(
     context_text: str = "",
     next_step: AnyStep | None = None,
 ) -> str:
-    """Описывает шаги в работе: каждый со своей структурой требований и примеров.
+    """Собирает разделы текущего и незакрытых шагов.
 
-    ``next_step`` в этот блок не входит — его отдаёт ``next_step_block``
-    в раздел «ЧТО ДАЛЬШЕ». Параметр сохранён для совместимости вызовов.
+    Первый шаг из ``steps`` — раздел «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» целиком
+    (требования, примеры, нехватка данных). Остальные — «ЕЩЁ НЕ ЗАКРЫТО»
+    только с названием и требованиями. ``next_step`` сюда не входит.
 
     Args:
-        steps: шаги перечня; порядок — приоритет.
+        steps: шаги в работе; первый — тема реплики.
         profile: профиль.
         facts: факты хода (без перечня городов).
         context_text: документ контекста для проверки нехватки знаний.
         next_step: игнорируется; ориентир собирается отдельно.
 
     Returns:
-        Текстовый блок раздела «ШАГИ В РАБОТЕ».
+        Текст с заголовками разделов; пустая строка, если нечего показать.
     """
     del next_step
     if not steps:
-        return (
+        closed = (
             "Все шаги скрипта закрыты. Отвечать на вопросы собеседника и мягко "
             "подводить разговор к завершению."
         )
+        section = _section("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ", closed)
+        return section or ""
 
+    current_body = "\n".join(
+        [
+            _STEPS_FOCUS_INTRO,
+            "",
+            *_describe_step(
+                steps[0],
+                profile,
+                facts,
+                context_text=context_text,
+            ),
+        ]
+    )
     parts: list[str] = []
-    for step in steps:
-        parts.append(
-            "\n".join(
-                _describe_step(
-                    step,
-                    profile,
-                    facts,
-                    context_text=context_text,
-                )
-            )
-        )
+    now = _section("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ", current_body)
+    if now:
+        parts.append(now)
+
+    if len(steps) > 1:
+        hang_body = "\n\n".join(next_step_block(step, profile, facts) for step in steps[1:])
+        hang = _section("ЕЩЁ НЕ ЗАКРЫТО", hang_body)
+        if hang:
+            parts.append(hang)
+
     return "\n\n".join(parts)
 
 
@@ -1051,8 +1072,9 @@ def build_turn_messages(
 
     Args:
         script: скомпилированный скрипт.
-        steps: шаги в работе; если None — собирается из step.
-        step: ведущий шаг (совместимость).
+        steps: шаги в работе; первый — «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ»,
+            остальные — «ЕЩЁ НЕ ЗАКРЫТО»; если None — из step.
+        step: текущий шаг (совместимость).
         profile: собранный профиль.
         facts: факты хода.
         history: история звонка без системных сообщений; уходит целиком.
@@ -1122,9 +1144,8 @@ def build_turn_messages(
             sections.append(ctx_section)
 
     steps_text = steps_block(head, profile, facts, context_text=ctx_for_steps)
-    steps_section = _section("ШАГИ В РАБОТЕ", steps_text)
-    if steps_section:
-        sections.append(steps_section)
+    if steps_text:
+        sections.append(steps_text)
 
     head_ids = {item.id for item in head}
     if next_step is not None and next_step.id not in head_ids:

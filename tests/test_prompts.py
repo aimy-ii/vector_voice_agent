@@ -447,12 +447,12 @@ def test_шапка_с_образцом_тоже_требует_хода_к_со
 
 
 def test_шапка_с_висящими_и_образцом_одним_промптом(script):
-    """Несколько шагов в шапке + образец — всё в одном системном сообщении."""
+    """Несколько шагов в шапке + образец у текущего — всё в одном системном."""
     from graph.prompts import _SAMPLE_PREFIX
 
     messages = build_turn_messages(
         script=script,
-        steps=[script.step("city"), script.step("terms")],
+        steps=[script.step("terms"), script.step("city")],
         profile={},
         facts={"price_line": "срок два месяца"},
         history=[],
@@ -462,7 +462,7 @@ def test_шапка_с_висящими_и_образцом_одним_пром�
     assert script.step("city").goal in content
     assert script.step("terms").goal in content
     assert _SAMPLE_PREFIX in content
-    assert "# ШАГИ В РАБОТЕ" in content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in content
     assert "**Требования**" in content
     assert "Ведущий шаг" not in content
     assert "Висящий шаг" not in content
@@ -504,7 +504,7 @@ def test_порядок_блоков_персона_профиль_шапка(sc
     how_i = content.index("# КАК РАБОТАТЬ")
     rules_i = content.index("# ПРАВИЛА РЕЧИ")
     ctx_i = content.index("# КОНТЕКСТ")
-    steps_i = content.index("# ШАГИ В РАБОТЕ")
+    steps_i = content.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
     form_i = content.index("# ФОРМА ОТВЕТА")
     assert how_i < rules_i < ctx_i < steps_i < form_i
     assert content.index("Дарья") > how_i
@@ -717,7 +717,7 @@ def test_шапка_перечень_без_запрета_нового_вопр
     )
     content = messages[0].content
     lowered = content.lower()
-    assert "# шаги в работе" in lowered
+    assert "# сейчас говорим об этом" in lowered
     assert "**требования**" in lowered
     assert "ни одного нового вопроса не задавать" not in lowered
     assert "новый вопрос — только один" not in lowered
@@ -735,7 +735,7 @@ def test_шапка_правило_гарантированного_хода_и_
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "# шаги в работе" in content
+    assert "# сейчас говорим об этом" in content
     assert "из переданных данных как есть" in content
     assert "по последней реплике собеседника" not in content
     assert "новый вопрос" not in content
@@ -1164,14 +1164,17 @@ def test_build_silence_messages_короче_опирается_на_сказа�
 
 
 def test_шапка_текущим_помечен_первый_не_последний(script):
-    """В перечне из двух шагов первый идёт раньше второго; заголовки нейтральные."""
+    """Первый шаг — в «СЕЙЧАС», второй — в «ЕЩЁ НЕ ЗАКРЫТО»; без старых пометок."""
     t1, t2 = script.step("transmission"), script.step("terms")
     block = steps_block([t1, t2], {}, {})
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in block
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" in block
     assert f"## {t1.goal}" in block
     assert f"## {t2.goal}" in block
     lead_i = block.index(f"## {t1.goal}")
     hang_i = block.index(f"## {t2.goal}")
     assert lead_i < hang_i
+    assert block.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ") < block.index("# ЕЩЁ НЕ ЗАКРЫТО")
     assert "**Требования**" in block
     assert "Ведущий шаг" not in block
     assert "Висящий шаг" not in block
@@ -1199,7 +1202,7 @@ def test_step_block_с_next_step_текущим_ведущий(script):
 
 
 def test_шапка_не_убегать_вперёд_предпочтение(script):
-    """Порядок в перечне — подсказка, не приказ брать первый пункт."""
+    """Реплика — по разделу «СЕЙЧАС»; предпочтительного порядка в тексте нет."""
     block = steps_block(
         [script.step("city"), script.step("who_studies")],
         {},
@@ -1209,6 +1212,9 @@ def test_шапка_не_убегать_вперёд_предпочтение(sc
     assert "**требования**" in lowered
     assert script.step("city").goal.lower() in lowered
     assert "уже спрашивали, ответа нет" not in lowered
+    assert "предпочтительн" not in lowered
+    assert "необязательн" not in lowered
+    assert "подсказка, куда двигаться" not in lowered
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city"), script.step("who_studies")],
@@ -1218,9 +1224,11 @@ def test_шапка_не_убегать_вперёд_предпочтение(sc
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "# шаги в работе" in content
+    assert "# сейчас говорим об этом" in content
+    assert "# ещё не закрыто" in content
     assert script.step("city").goal.lower() in content
     assert script.step("who_studies").goal.lower() in content
+    assert "реплика строится по шагу из раздела" in content
 
 
 def test_ведущий_и_следующий_разные_роли_только_вопрос(script):
@@ -1463,7 +1471,7 @@ def test_шапка_не_повторять_сказанное_и_ход_к_че
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "# шаги в работе" in content
+    assert "# сейчас говорим об этом" in content
     assert "одна тема" in content
     assert "разговор ведёт агент" in content
 
@@ -1545,31 +1553,34 @@ def test_рамка_разговор_целиком_порядок_подска�
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "# шаги в работе" in content
+    assert "# сейчас говорим об этом" in content
     assert "**требования**" in content
     assert "разговор ведёт агент" in content
 
 
 def test_образцы_всех_шагов_шапки_полностью_и_в_порядке(script_v4):
-    """Образцы всех шагов перечня присутствуют полностью и в исходном порядке."""
-    steps = [script_v4.step("city"), script_v4.step("who_studies")]
-    for step in steps:
-        assert step.examples, step.id
+    """Примеры только у текущего шага; у незакрытого примеров нет."""
+    current = script_v4.step("city")
+    hang = script_v4.step("who_studies")
+    assert current.examples and hang.examples
     messages = build_turn_messages(
         script=script_v4,
-        steps=steps,
+        steps=[current, hang],
         profile={},
         facts={},
         history=[],
         asides_done=[],
     )
     content = messages[0].content
+    now = content.split("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ", 1)[1].split("# ЕЩЁ НЕ ЗАКРЫТО", 1)[0]
+    open_part = _top_section(content, "ЕЩЁ НЕ ЗАКРЫТО")
     positions: list[int] = []
-    for step in steps:
-        for example in step.examples:
-            assert example in content, example
-            positions.append(content.index(example))
+    for example in current.examples:
+        assert example in now, example
+        positions.append(now.index(example))
     assert positions == sorted(positions)
+    for example in hang.examples:
+        assert example not in open_part
 
 
 def test_приказ_не_совпадать_с_образцами_дословно(script_v4):
@@ -1781,24 +1792,37 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         assert _HARD_FACT_BAN in content
 
 
-#: Заголовки верхнего уровня полной сборки — порядок из PROMPT_TARGET.
+#: Заголовки верхнего уровня полной сборки — порядок разделов.
 _TOP_LEVEL_SECTIONS: tuple[str, ...] = (
     "# КАК РАБОТАТЬ",
     "# ПРАВИЛА РЕЧИ",
     "# КОНТЕКСТ",
-    "# ШАГИ В РАБОТЕ",
+    "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ",
+    "# ЕЩЁ НЕ ЗАКРЫТО",
     "# ЧТО ДАЛЬШЕ",
     "# ФОРМА ОТВЕТА",
 )
 
 
+def _top_section(content: str, title: str) -> str:
+    """Тело раздела верхнего уровня ``# title`` до следующего такого заголовка."""
+    marker = f"# {title}"
+    assert marker in content, title
+    after = content.split(marker, 1)[1]
+    if after.startswith("\n"):
+        after = after[1:]
+    match = re.search(r"^# [^#\n]", after, flags=re.MULTILINE)
+    return after[: match.start()] if match else after
+
+
 def test_системное_разделы_верхнего_уровня_в_порядке(script_v4):
     """В системном сообщении все разделы верхнего уровня в порядке из файла."""
-    step = script_v4.step("city")
-    nxt = script_v4.step("who_studies")
+    current = script_v4.step("city")
+    hang = script_v4.step("who_studies")
+    nxt = script_v4.step("experience")
     messages = build_turn_messages(
         script=script_v4,
-        steps=[step],
+        steps=[current, hang],
         profile={"city": "Пермь"},
         facts={"city": {"name": "Пермь"}},
         history=[],
@@ -1825,9 +1849,10 @@ def test_пустой_раздел_не_выводится(script_v4):
     )
     content = messages[0].content
     assert "# ЧТО ДАЛЬШЕ" not in content
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" not in content
     assert "# КАК РАБОТАТЬ" in content
     assert "# ПРАВИЛА РЕЧИ" in content
-    assert "# ШАГИ В РАБОТЕ" in content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in content
     assert "# ФОРМА ОТВЕТА" in content
     for title in _TOP_LEVEL_SECTIONS:
         if title in content:
@@ -1838,25 +1863,32 @@ def test_пустой_раздел_не_выводится(script_v4):
 
 
 def test_шаги_со_своими_заголовками_и_подразделами(script_v4):
-    """Каждый шаг подан своим заголовком с подразделами требований и примеров."""
-    steps = [script_v4.step("city"), script_v4.step("who_studies")]
+    """Текущий шаг — с примерами; незакрытый — только название и требования."""
+    current = script_v4.step("city")
+    hang = script_v4.step("who_studies")
     messages = build_turn_messages(
         script=script_v4,
-        steps=steps,
+        steps=[current, hang],
         profile={},
         facts={},
         history=[],
         asides_done=[],
     )
     content = messages[0].content
-    for step in steps:
-        assert f"## {step.name}" in content
-        assert step.requirements in content
-        assert "**Требования**" in content
-        if step.examples:
-            assert "**Примеры**" in content
-            for example in step.examples:
-                assert example in content
+    now = _top_section(content, "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    open_part = _top_section(content, "ЕЩЁ НЕ ЗАКРЫТО")
+    assert f"## {current.name}" in now
+    assert current.requirements in now
+    assert "**Требования**" in now
+    assert "**Примеры**" in now
+    for example in current.examples:
+        assert example in now
+    assert f"## {hang.name}" in open_part
+    assert hang.requirements in open_part
+    assert "**Требования**" in open_part
+    assert "**Примеры**" not in open_part
+    for example in hang.examples:
+        assert example not in open_part
 
 
 def test_системное_без_пометок_ведущий_хорошо_плохо(script_v4):
@@ -2016,4 +2048,126 @@ def test_короткие_сборки_без_разметки_разделов(
     for content in (filler, silence, waiting):
         assert "# КАК РАБОТАТЬ" not in content
         assert "# ПРАВИЛА РЕЧИ" not in content
+        assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" not in content
+        assert "# ЕЩЁ НЕ ЗАКРЫТО" not in content
         assert "# ШАГИ В РАБОТЕ" not in content
+
+
+def test_текущий_шаг_в_сейчас_с_требованиями_и_примерами(script_v4):
+    """Первый шаг из steps — в «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» с требованиями и примерами."""
+    current = script_v4.step("city")
+    hang = script_v4.step("who_studies")
+    assert current.examples
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[current, hang],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    now = _top_section(content, "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    assert f"## {current.name}" in now
+    assert "**Требования**" in now
+    assert current.requirements in now
+    assert "**Примеры**" in now
+    for example in current.examples:
+        assert example in now
+
+
+def test_остальные_шаги_в_ещё_не_закрыто_без_примеров(script_v4):
+    """Остальные шаги — в «ЕЩЁ НЕ ЗАКРЫТО» только с названием и требованиями."""
+    current = script_v4.step("city")
+    hang = script_v4.step("who_studies")
+    assert hang.examples
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[current, hang],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" in content
+    open_part = _top_section(content, "ЕЩЁ НЕ ЗАКРЫТО")
+    assert f"## {hang.name}" in open_part
+    assert "**Требования**" in open_part
+    assert hang.requirements in open_part
+    assert "**Примеры**" not in open_part
+    for example in hang.examples:
+        assert example not in open_part
+
+
+def test_один_шаг_без_раздела_ещё_не_закрыто(script_v4):
+    """При одном шаге в steps раздел «ЕЩЁ НЕ ЗАКРЫТО» не выводится."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in content
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" not in content
+
+
+def test_что_дальше_из_next_step_после_разделов_шагов(script_v4):
+    """«ЧТО ДАЛЬШЕ» строится из next_step и идёт после текущих/незакрытых."""
+    current = script_v4.step("city")
+    hang = script_v4.step("who_studies")
+    nxt = script_v4.step("experience")
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[current, hang],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        next_step=nxt,
+    )
+    content = messages[0].content
+    assert "# ЧТО ДАЛЬШЕ" in content
+    assert f"## {nxt.name}" in content.split("# ЧТО ДАЛЬШЕ", 1)[1]
+    assert content.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ") < content.index("# ЕЩЁ НЕ ЗАКРЫТО")
+    assert content.index("# ЕЩЁ НЕ ЗАКРЫТО") < content.index("# ЧТО ДАЛЬШЕ")
+
+
+def test_вступление_строит_реплику_по_сейчас(script_v4):
+    """Во вступлении — строить реплику по шагу из «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ»."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city"), script_v4.step("who_studies")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content.lower()
+    assert "реплика строится по шагу из раздела «сейчас говорим об этом»" in content
+    assert "к незакрытому возвращаются" in content
+
+
+def test_системное_без_предпочтительного_порядка_и_пометок_ведущий(script_v4):
+    """Нет предпочтительного порядка и пометок «Ведущий» / «Висящий»."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city"), script_v4.step("who_studies")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        next_step=script_v4.step("experience"),
+    )
+    content = messages[0].content
+    lowered = content.lower()
+    assert "предпочтительн" not in lowered
+    assert "необязательн" not in lowered
+    assert "подсказка, куда двигаться" not in lowered
+    assert "не обязательно брать первый" not in lowered
+    assert "Ведущий шаг" not in content
+    assert "Висящий шаг" not in content
+    assert "# ШАГИ В РАБОТЕ" not in content
