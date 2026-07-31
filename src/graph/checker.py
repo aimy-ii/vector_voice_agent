@@ -19,7 +19,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core.config import settings
-from graph.history import last_user_text
+from graph.history import last_user_text, normalize
 from graph.log_fmt import format_check_pending
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep, Step
@@ -241,8 +241,10 @@ def history_slice_for(
 
     Текущая реплика (полная или накопленный partial) в срез не входит:
     она уходит отдельным полем ``client_reply``. Из хвоста истории
-    убираем последнее human-сообщение только если его текст совпадает
-    с проверяемой репликой — иначе прошлый ответ клиента остаётся в срезе.
+    убираем последнее human-сообщение только если его текст после
+    ``normalize`` совпадает с проверяемой репликой — иначе прошлый
+    ответ клиента остаётся в срезе. Сами тексты сообщений в срезе
+    не меняем: судье нужны знаки препинания.
 
     Args:
         messages: полная история хода.
@@ -260,7 +262,7 @@ def history_slice_for(
     body = list(messages)
     if body and body[-1].type == "human":
         last_text = _message_text(body[-1])
-        if reply is None or last_text == reply:
+        if reply is None or normalize(last_text) == normalize(reply):
             body = body[:-1]
 
     has_zero = any(int(progress.attempts.get(step.id, 0)) == 0 for step in steps)

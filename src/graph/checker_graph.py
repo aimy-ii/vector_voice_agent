@@ -139,11 +139,16 @@ async def _warmup_next_step(
 ) -> Any:
     """Прогревает мету города / филиалы / цену под предстоящий шаг.
 
-    Ошибки только в лог — ход лайв-канала не роняют.
+    В лайв-треде ``current_step`` обычно нет — ведущий шаг берём из
+    прогресса через ``_lead_from_progress``, чтобы греть *следующий*
+    шаг, а не тот, что бот уже произносит. Ошибки только в лог —
+    ход лайв-канала не роняют.
     """
     script = _script_of_state(state)
     current_id = state.get("current_step")
     current = script.steps.get(current_id) if current_id else None
+    if current is None:
+        _head, current = _lead_from_progress(state, progress=progress, profile=profile)
     try:
         if current is None:
             nxt = pick_step(

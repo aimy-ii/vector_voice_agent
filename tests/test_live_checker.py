@@ -10,13 +10,16 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.checker import CheckerVerdict, check_pass, history_slice_for, run_checker
 from graph.checker_graph import (
+    _warmup_next_step,
     growth_below_threshold,
     is_new_utterance,
     live_check_node,
 )
+from graph.context import ConversationContext
 from graph.context_agent import ContextDecision
 from graph.context_store import MemoryContextStore
-from script.planner import script_head
+from graph.facts import needs_of
+from script.planner import peek_next_step, pick_step, script_head
 from script.store import ScriptProgress, progress_to_state
 
 
@@ -1003,3 +1006,127 @@ async def test_live_профиль_попадает_в_кеш_чекера(scrip
     stored = await mem.load("local")
     assert stored is not None
     assert stored.profile.get("caller_name") == "Андрей"
+
+
+def _branch_pending_progress() -> ScriptProgress:
+    """Прогресс: ведущий шаг ``branch`` уже взят, следующий — ``price``."""
+    closed = [
+        "name",
+        "city",
+        "who_studies",
+        "experience",
+        "transmission",
+        "terms",
+        "theory_format",
+        "included",
+        "practice",
+    ]
+    return ScriptProgress(
+        status={**{c: "closed" for c in closed}, "branch": "pending"},
+        attempts={**{c: 1 for c in closed}, "branch": 1},
+    )
+
+
+def _branch_profile() -> dict[str, str]:
+    """Профиль, при котором ``branch`` доступен."""
+    return {
+        "caller_name": "Андрей",
+        "city": "Пермь",
+        "student_is_caller": "да",
+        "experience": "впервые",
+        "transmission": "механика",
+        "theory_format": "очно",
+    }
+
+
+async def test_warmup_без_current_step_греет_следующий(script, fake_kb, monkeypatch):
+    """Без ``current_step`` прогрев целится в следующий шаг, не в ведущий."""
+    from core.config import settings
+
+    progress = _branch_pending_progress()
+    profile = _branch_profile()
+    soft_cap = settings.pending_steps_soft_cap
+
+    lead = pick_step(
+        script,
+        status=progress.status,
+        profile=profile,
+        attempts=progress.attempts,
+        inform_reason=False,
+        pending_soft_cap=soft_cap,
+    )
+    assert lead is not None and lead.id == "branch"
+    assert needs_of(lead) == ["branches"]
+    nxt = peek_next_step(
+        script,
+        current=lead,
+        status=progress.status,
+        profile=profile,
+        attempts=progress.attempts,
+        inform_reason=False,
+        pending_soft_cap=soft_cap,
+    )
+    assert nxt is not None and nxt.id == "price"
+    assert needs_of(nxt) == ["price"]
+
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": profile,
+    }
+    ctx = ConversationContext()
+    out = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=False,
+    )
+
+    # Ведущий branch → branches; следующий price → get_city. Без current_step
+    # раньше грели бы branch (list_branches); теперь — price.
+    assert "list_branches" not in fake_kb.calls
+    assert "get_city" in fake_kb.calls
+    assert out is not None
+
+
+async def test_warmup_ошибка_справочника_не_роняет(script, monkeypatch):
+    """Исключение справочника глотается: функция возвращает контекст."""
+
+    class BoomKB:
+        """Заглушка, которая всегда бросает."""
+
+        async def list_cities(self):
+            raise RuntimeError("kb down")
+
+        async def get_city(self, city_slug: str):
+            raise RuntimeError("kb down")
+
+        async def list_branches(self, city_slug: str):
+            raise RuntimeError("kb down")
+
+        async def get_branch(self, branch_slug: str):
+            raise RuntimeError("kb down")
+
+    monkeypatch.setattr("graph.checker_graph.vector_kb", BoomKB())
+    progress = _branch_pending_progress()
+    profile = _branch_profile()
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": profile,
+    }
+    ctx = ConversationContext()
+    out = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=False,
+    )
+    assert out is ctx

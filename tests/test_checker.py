@@ -98,6 +98,110 @@ async def test_для_счётчика_ноль_история_с_начала(s
     assert sliced[0].content == "я из Перми" or any("Перми" in str(m.content) for m in sliced[:-1])
 
 
+def test_срез_отрезает_хвост_при_разной_пунктуации(script):
+    """Хвост уходит, если реплика отличается от human только знаками."""
+    steps = [script.step("name")]
+    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
+    original = "Да, механика."
+    messages = [
+        AIMessage(content="Какая коробка?"),
+        HumanMessage(content=original),
+    ]
+    sliced = history_slice_for(
+        messages,
+        steps=steps,
+        progress=progress,
+        turn=2,
+        reply="да механика",
+    )
+    assert not any(m.type == "human" and m.content == original for m in sliced)
+
+
+def test_срез_отрезает_хвост_при_регистре_и_ё(script):
+    """Хвост уходит при отличии только регистром и «ё»/«е»."""
+    steps = [script.step("name")]
+    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
+    original = "Всё понятно"
+    messages = [
+        AIMessage(content="Вопрос?"),
+        HumanMessage(content=original),
+    ]
+    sliced = history_slice_for(
+        messages,
+        steps=steps,
+        progress=progress,
+        turn=2,
+        reply="все понятно",
+    )
+    assert not any(m.type == "human" and m.content == original for m in sliced)
+
+
+def test_срез_не_отрезает_чужой_хвост(script):
+    """Хвост остаётся, если последняя реплика в истории действительно другая."""
+    steps = [script.step("city")]
+    progress = ScriptProgress(attempts={"city": 1}, taken_turn={"city": 1})
+    messages = [
+        AIMessage(content="имя?"),
+        HumanMessage(content="Андрей"),
+        AIMessage(content="город?"),
+    ]
+    sliced = history_slice_for(
+        messages,
+        steps=steps,
+        progress=progress,
+        turn=3,
+        reply="я из Перми",
+    )
+    assert any(m.content == "Андрей" for m in sliced)
+    assert sliced[-1].type == "ai"
+
+
+def test_срез_не_меняет_текст_сообщений(script):
+    """Тексты в срезе совпадают с исходными символ в символ."""
+    steps = [script.step("name")]
+    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
+    messages = [
+        AIMessage(content="Как к вам обращаться?"),
+        HumanMessage(content="Меня зовут Андрей!"),
+        AIMessage(content="Из какого города вы звоните?"),
+        HumanMessage(content="Да, механика."),
+    ]
+    sliced = history_slice_for(
+        messages,
+        steps=steps,
+        progress=progress,
+        turn=2,
+        reply="да механика",
+    )
+    # Хвост отрезан; оставшиеся тексты — без нормализации.
+    assert [m.content for m in sliced] == [
+        "Как к вам обращаться?",
+        "Меня зовут Андрей!",
+        "Из какого города вы звоните?",
+    ]
+    for original, kept in zip(messages[:-1], sliced, strict=True):
+        assert kept.content == original.content
+
+
+def test_срез_при_reply_none_отрезает_хвостовой_human(script):
+    """При ``reply is None`` хвостовой human отрезается безусловно."""
+    steps = [script.step("name")]
+    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
+    messages = [
+        AIMessage(content="Как зовут?"),
+        HumanMessage(content="Совершенно другая фраза"),
+    ]
+    sliced = history_slice_for(
+        messages,
+        steps=steps,
+        progress=progress,
+        turn=2,
+        reply=None,
+    )
+    assert not any(m.type == "human" for m in sliced)
+    assert sliced[-1].content == "Как зовут?"
+
+
 async def test_реплика_не_годится_цикл_рвётся(script):
     client = FakeChecker([CheckerVerdict(reply_usable=False, step_closed=False)])
     progress = ScriptProgress(status={"name": "pending"}, attempts={"name": 1})
