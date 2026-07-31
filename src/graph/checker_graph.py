@@ -147,9 +147,9 @@ async def _warmup_next_step(
     script = _script_of_state(state)
     current_id = state.get("current_step")
     current = script.steps.get(current_id) if current_id else None
-    if current is None:
-        _head, current = _lead_from_progress(state, progress=progress, profile=profile)
     try:
+        if current is None:
+            _head, current = _lead_from_progress(state, progress=progress, profile=profile)
         if current is None:
             nxt = pick_step(
                 script,

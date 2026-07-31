@@ -1130,3 +1130,30 @@ async def test_warmup_ошибка_справочника_не_роняет(scri
         asks_inform=False,
     )
     assert out is ctx
+
+
+async def test_warmup_ошибка_lead_from_progress_не_роняет(script, monkeypatch):
+    """Исключение ``_lead_from_progress`` глотается: возвращается переданный ctx."""
+
+    def boom(_state, *, progress, profile):
+        raise RuntimeError("lead broken")
+
+    monkeypatch.setattr("graph.checker_graph._lead_from_progress", boom)
+    progress = _branch_pending_progress()
+    profile = _branch_profile()
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": profile,
+    }
+    ctx = ConversationContext()
+    out = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=False,
+    )
+    assert out is ctx
