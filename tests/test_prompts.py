@@ -29,12 +29,13 @@ from graph.prompts import (
     naturalness_block,
     persona_block,
     profile_block,
+    speech_rules_block,
     step_block,
     steps_block,
 )
 
-#: Число правил речи — замена формулировок не увеличивает набор.
-_SPEECH_RULES_COUNT = 17
+#: Число правил речи, включая пункт 0 про примеры.
+_SPEECH_RULES_COUNT = 18
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -80,7 +81,7 @@ def test_персона_из_настроек(monkeypatch):
     assert "спокойный и чёткий" in block
     assert "Роль:" in block
     assert "Ты —" not in block
-    assert "только на «Вы»" in block
+    assert "только на «Вы»" in speech_rules_block()
 
 
 def test_правило_рода_из_agent_gender(monkeypatch):
@@ -128,7 +129,7 @@ def test_системное_сообщение_содержит_ключевые
     content = messages[0].content
     assert "только на «Вы»" in content
     assert "Тон разговорный, не рекламный" in content
-    assert "ни свои фразы, ни образцы" in content.lower()
+    assert "ни свои фразы, ни примеры" in content.lower()
     assert "не прощаться, пока человек сам не прощается" in content.lower()
     assert "Если реплика клиента бессвязна, оборвана или не отвечает" in content
     assert "Не повторять дословно то, что уже говорил" in content
@@ -226,7 +227,6 @@ def test_профиль_разделяет_роли(script):
 
 def test_describe_step_выводит_why_examples_avoid():
     """Непустые why/examples/avoid попадают в описание; пустые метки не печатаются."""
-    from graph.prompts import _EXAMPLES_PREFIX
     from script.models import Step
 
     filled = Step.model_validate(
@@ -242,8 +242,7 @@ def test_describe_step_выводит_why_examples_avoid():
     lines = _describe_step(filled, {}, {}, heading="Шаг")
     text = "\n".join(lines)
     assert "Зачем: без города факты наугад" in text
-    assert _EXAMPLES_PREFIX in text
-    assert "Дословное или почти дословное совпадение с образцом — ошибка." in text
+    assert "**Примеры**" in text
     assert "В каком городе удобнее?" in text
     assert "Где планируете учиться?" in text
     assert "На этом шаге нельзя: не зачитывать список городов" in text
@@ -251,7 +250,7 @@ def test_describe_step_выводит_why_examples_avoid():
     bare = Step.model_validate({"id": "name", "kind": "question", "goal": "имя"})
     bare_text = "\n".join(_describe_step(bare, {}, {}, heading="Шаг"))
     assert "Зачем:" not in bare_text
-    assert "Образцы формулировок" not in bare_text
+    assert "**Примеры**" not in bare_text
     assert "На этом шаге нельзя:" not in bare_text
 
 
@@ -348,8 +347,9 @@ def test_промпт_видит_шапку_без_пометок_попыток
         {},
         {},
     )
-    assert "city" in block
-    assert "who_studies" in block
+    assert script.step("city").goal in block
+    assert script.step("who_studies").goal in block
+    assert "**Требования**" in block
     assert "новый вопрос" not in block
     assert "уже спрашивали, ответа нет" not in block
     assert "впереди — не забегать" not in block
@@ -377,8 +377,8 @@ def test_промпт_держит_границы_шага_и_незакрыты
         asides_done=[],
     )
     content = messages[0].content
-    assert "вернуться к делу" in content.lower() or "мягко вернуть к делу" in content.lower()
-    assert "name" in content
+    assert "вернуться к делу" in natural or "мягко вернуться" in natural
+    assert script.step("name").goal in content or "name" in content.lower()
     assert "уже спрашивали, ответа нет" not in content
     assert "новый вопрос" not in content
     assert messages[-1].content == "повторите, я не услышал"
@@ -413,7 +413,7 @@ def test_шапка_с_образцом_тоже_требует_хода_к_со
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "обращением к человеку" in content
+    assert "разговор ведёт агент" in content
     assert "сформулировать в этом ключе" in content
 
 
@@ -430,12 +430,13 @@ def test_шапка_с_висящими_и_образцом_одним_пром�
         asides_done=[],
     )
     content = messages[0].content
-    assert "city" in content
-    assert "terms" in content
+    assert script.step("city").goal in content
+    assert script.step("terms").goal in content
     assert _SAMPLE_PREFIX in content
-    assert "В истории — весь разговор" in content
-    assert "В перечне: city" in content
-    assert "Также в перечне: terms" in content
+    assert "# ШАГИ В РАБОТЕ" in content
+    assert "**Требования**" in content
+    assert "Ведущий шаг" not in content
+    assert "Висящий шаг" not in content
     assert "новый вопрос" not in content
     assert "уже спрашивали, ответа нет" not in content
 
@@ -471,10 +472,14 @@ def test_порядок_блоков_персона_профиль_шапка(sc
         asides_done=[],
     )
     content = messages[0].content
-    persona_i = content.index("Дарья")
-    profile_i = content.index("Что уже известно")
-    steps_i = content.index("В истории — весь разговор")
-    assert persona_i < profile_i < steps_i
+    how_i = content.index("# КАК РАБОТАТЬ")
+    rules_i = content.index("# ПРАВИЛА РЕЧИ")
+    ctx_i = content.index("# КОНТЕКСТ")
+    steps_i = content.index("# ШАГИ В РАБОТЕ")
+    form_i = content.index("# ФОРМА ОТВЕТА")
+    assert how_i < rules_i < ctx_i < steps_i < form_i
+    assert content.index("Дарья") > how_i
+    assert content.index("Что уже известно") > ctx_i
 
 
 def test_промпт_запрещает_озвучивать_механику():
@@ -683,14 +688,15 @@ def test_шапка_перечень_без_запрета_нового_вопр
     )
     content = messages[0].content
     lowered = content.lower()
-    assert "порядок в перечне — подсказка" in lowered
+    assert "# шаги в работе" in lowered
+    assert "**требования**" in lowered
     assert "ни одного нового вопроса не задавать" not in lowered
     assert "новый вопрос — только один" not in lowered
-    assert "жёсткий запрет" in lowered
+    assert "из переданных данных как есть" in lowered
 
 
 def test_шапка_правило_гарантированного_хода_и_жёсткий_запрет(script):
-    """В системном сообщении — рамка из всего разговора и запрет выдуманных фактов."""
+    """В системном сообщении — шаги в работе и запрет выдуманных фактов в правилах."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name"), script.step("city")],
@@ -700,9 +706,8 @@ def test_шапка_правило_гарантированного_хода_и_
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "реплика строится из всего этого разом" in content
-    assert "жёсткий запрет" in content
-    assert "которых нет в переданных данных" in content
+    assert "# шаги в работе" in content
+    assert "из переданных данных как есть" in content
     assert "по последней реплике собеседника" not in content
     assert "новый вопрос" not in content
     assert "уже спрашивали, ответа нет" not in content
@@ -746,9 +751,9 @@ def test_naturalness_правило_подводки_к_теме(script):
     block = naturalness_block(ask_for_move=True)
     lowered = block.lower()
     assert "подводк" not in lowered
-    assert "одна тема" in persona_block().lower() or "одна тема" in lowered
-    # «одна тема» живёт в SPEECH_RULES / persona.
-    assert "одна тема" in persona_block().lower()
+    assert "одна тема" in speech_rules_block().lower() or "одна тема" in lowered
+    # «одна тема» живёт в SPEECH_RULES.
+    assert "одна тема" in speech_rules_block().lower()
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name")],
@@ -779,7 +784,7 @@ def test_naturalness_не_пересказывать_ответ_клиента(s
     )
     content = messages[0].content.lower()
     assert "не повторять" in content
-    assert "сразу по делу" in content
+    assert "не пересказывает сказанное клиентом" in content or "начало — сразу с сути" in content
 
 
 def test_naturalness_запрет_пустых_проверок_в_конце(script):
@@ -819,9 +824,10 @@ def test_naturalness_добавлять_новое_а_не_пересказыв�
         history=[],
         asides_done=[],
     )
+    # В полной сборке правило — в naturalness_block; в системном — SPEECH_RULES.
+    assert "ещё не знает" in text
     content = messages[0].content.lower()
-    assert "ещё не знает" in content
-    assert "пересказом вопроса" in content or "другими словами — не ответ" in content
+    assert "одна тема" in content
 
 
 def test_naturalness_называть_данные_сразу_из_контекста(script):
@@ -839,8 +845,8 @@ def test_naturalness_называть_данные_сразу_из_контек�
         history=[],
         asides_done=[],
     )
+    assert "целиком" in text
     content = messages[0].content.lower()
-    assert "целиком" in content
     assert "не обещать сходить за данными" in content
 
 
@@ -870,11 +876,10 @@ def test_обращение_по_имени_одно_жёсткое_правил
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert content.count("имя звучит один раз") == 1
-    assert "начинать реплику с имени нельзя" in content
-    assert "две реплики подряд с именем" in content
+    assert "имя звучит один раз" not in content  # только в naturalness_block
     assert "по имени — редко" not in content
     assert "колл-центр" not in content
+    assert natural.lower().count("имя звучит один раз") == 1
 
 
 def test_unknown_запрет_выдумывать_филиал(script):
@@ -914,12 +919,12 @@ def test_closed_steps_в_системном_сообщении(script):
 
 def test_правило_адресов_требует_дословного_присутствия(script):
     """Правило про адреса — только дословная строка из контекста."""
-    from graph.prompts import persona_block
-
-    text = persona_block().lower()
+    rule = next(r for r in SPEECH_RULES if "утверждать наличие филиала" in r.lower())
+    text = rule.lower()
     assert "дословно" in text
-    assert "энгельса" in text
-    assert "уточню" in text or "уточнишь" in text
+    assert "не называть адресов" in text
+    assert "уточню" not in text and "уточнишь" not in text
+    assert "плохо:" not in text and "хорошо:" not in text
 
 
 def test_profile_block_pending_в_уточняется_не_в_неизвестном(script):
@@ -1131,16 +1136,14 @@ def test_build_silence_messages_короче_опирается_на_сказа�
 
 def test_шапка_текущим_помечен_первый_не_последний(script):
     """В перечне из двух шагов первый идёт раньше второго; заголовки нейтральные."""
-    block = steps_block(
-        [script.step("transmission"), script.step("terms")],
-        {},
-        {},
-    )
-    assert "В перечне: transmission" in block
-    assert "Также в перечне: terms" in block
-    lead_i = block.index("В перечне: transmission")
-    hang_i = block.index("Также в перечне: terms")
+    t1, t2 = script.step("transmission"), script.step("terms")
+    block = steps_block([t1, t2], {}, {})
+    assert f"## {t1.goal}" in block
+    assert f"## {t2.goal}" in block
+    lead_i = block.index(f"## {t1.goal}")
+    hang_i = block.index(f"## {t2.goal}")
     assert lead_i < hang_i
+    assert "**Требования**" in block
     assert "Ведущий шаг" not in block
     assert "Висящий шаг" not in block
     assert "новый вопрос" not in block
@@ -1155,13 +1158,15 @@ def test_step_block_с_next_step_текущим_ведущий(script):
         {},
         next_step=script.step("theory_format"),
     )
-    assert "В перечне: terms" in block
-    assert "Дальше: theory_format" in block
-    assert "Также в перечне: theory_format" not in block
-    assert "ориентир, куда двигаться" in block.lower()
-    assert block.index("В перечне: terms") < block.index("Дальше: theory_format")
-    lead_line = next(line for line in block.splitlines() if line.startswith("В перечне: terms"))
-    assert "новый вопрос" not in lead_line
+    terms, nxt = script.step("terms"), script.step("theory_format")
+    assert f"## {terms.goal}" in block
+    assert f"## {nxt.goal}" in block
+    assert block.index(f"## {terms.goal}") < block.index(f"## {nxt.goal}")
+    # next_step — без примеров theory_format, если они есть только у следующего
+    after_next = block.split(f"## {nxt.goal}", 1)[1]
+    assert "**Требования**" in after_next
+    assert "Ведущий шаг" not in block
+    assert "новый вопрос" not in block
 
 
 def test_шапка_не_убегать_вперёд_предпочтение(script):
@@ -1172,9 +1177,8 @@ def test_шапка_не_убегать_вперёд_предпочтение(sc
         {},
     )
     lowered = block.lower()
-    assert "в перечне" in lowered
-    assert "порядок в перечне — подсказка" in lowered
-    assert "не обязательно брать первый пункт" in lowered
+    assert "**требования**" in lowered
+    assert script.step("city").goal.lower() in lowered
     assert "уже спрашивали, ответа нет" not in lowered
     messages = build_turn_messages(
         script=script,
@@ -1185,24 +1189,22 @@ def test_шапка_не_убегать_вперёд_предпочтение(sc
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "порядок в перечне — подсказка" in content
-    assert "реплика строится из всего этого разом" in content
+    assert "# шаги в работе" in content
+    assert script.step("city").goal.lower() in content
+    assert script.step("who_studies").goal.lower() in content
 
 
 def test_ведущий_и_следующий_разные_роли_только_вопрос(script):
-    """Первый в перечне и «дальше» — разные роли; следующий не в перечне."""
-    block = steps_block(
-        [script.step("included")],
-        {},
-        {},
-        next_step=script.step("theory_format"),
-    )
-    assert "В перечне: included" in block
-    assert "Дальше: theory_format" in block
-    assert "Также в перечне: theory_format" not in block
-    lowered = block.lower()
-    assert "ориентир, куда двигаться" in lowered
-    assert "В перечне: included" in block.split("Дальше:")[0]
+    """Первый в работе и «что дальше» — разные роли; следующий не в шагах."""
+    included, nxt = script.step("included"), script.step("theory_format")
+    block = step_block(included, {}, {}, next_step=nxt)
+    assert f"## {included.goal}" in block
+    assert f"## {nxt.goal}" in block
+    assert block.index(f"## {included.goal}") < block.index(f"## {nxt.goal}")
+    assert "**Требования**" in block
+    # В steps_block next_step не попадает.
+    only_head = steps_block([included], {}, {})
+    assert f"## {nxt.goal}" not in only_head
 
 
 def test_запрет_раскрывать_содержание_следующего_шага(script):
@@ -1224,9 +1226,9 @@ def test_запрет_раскрывать_содержание_следующе
         next_step=script.step("theory_format"),
     )
     content = messages[0].content.lower()
-    assert "порядок в перечне — подсказка" in content
+    assert "# что дальше" in content
     assert "не раскрывая его содержание" not in content
-    assert "ориентир, куда двигаться" in content
+    assert script.step("theory_format").goal.lower() in content
 
 
 def test_ход_к_собеседнику_и_запрет_пустых_проверок_вместе(script):
@@ -1244,7 +1246,7 @@ def test_запрет_повторять_и_разворачивать_уже_с
     """Уже сказанное в разговоре не повторять дословно — ни свои фразы, ни образцы."""
     rule = next(r for r in SPEECH_RULES if "не повторять дословно" in r.lower())
     assert "свои фразы" in rule.lower()
-    assert "образц" in rule.lower()
+    assert "примеры" in rule.lower()
     messages = build_turn_messages(
         script=script,
         steps=[script.step("included")],
@@ -1255,7 +1257,7 @@ def test_запрет_повторять_и_разворачивать_уже_с
     )
     content = messages[0].content.lower()
     assert "не повторять дословно" in content
-    assert "ни свои фразы, ни образцы" in content
+    assert "ни свои фразы, ни примеры" in content
 
 
 def test_реплика_всегда_ходом_и_запрет_пустых_проверок(script):
@@ -1278,7 +1280,8 @@ def test_правило_речи_без_разрешения_продолжат�
     assert "не запрет на вопросы вообще" in lowered
     assert "говорить ли дальше" in lowered
     assert "разговор ведёт агент" in lowered
-    assert "следующему пункту перечня" in lowered
+    assert "следующему пункту" in lowered
+    assert "следующему пункту перечня" not in lowered
     assert "Реплика всегда заканчивается обращением к человеку" not in end_rule
     assert "Заканчивать ничем нельзя" not in end_rule
     assert "Побуждать человека к ответу" not in end_rule
@@ -1295,7 +1298,8 @@ def test_правило_речи_без_разрешения_продолжат�
     assert "разрешения продолжать не спрашивают" in content_lower
     assert "не запрет на вопросы вообще" in content_lower
     assert "разговор ведёт агент" in content_lower
-    assert "следующему пункту перечня" in content_lower
+    assert "следующему пункту" in content_lower
+    assert "следующему пункту перечня" not in content_lower
     assert "Реплика всегда заканчивается обращением к человеку" not in content
     assert "Заканчивать ничем нельзя" not in content
 
@@ -1336,7 +1340,7 @@ def test_имя_повторы_и_одна_тема_не_тронуты_усил
     assert "начинать реплику с имени нельзя" in name_in_natural
     assert "две реплики подряд с именем" in name_in_natural
     repeat_rule = next(r for r in SPEECH_RULES if "не повторять дословно" in r.lower())
-    assert "ни свои фразы, ни образцы" in repeat_rule.lower()
+    assert "ни свои фразы, ни примеры" in repeat_rule.lower()
     topic_rule = next(r for r in SPEECH_RULES if "одна тема за реплику" in r.lower())
     assert "два-три коротких предложения" in topic_rule.lower()
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
@@ -1355,8 +1359,9 @@ def test_правило_речи_ведёт_разговор_а_не_отдаё�
     assert "следующая реплика начинается именно с этого" in lowered
     assert "что вас интересует" in lowered
     assert "что осталось непонятным" in lowered
-    assert "молчание собеседника после реплики не проблема" in lowered
-    assert "вымогать ответ вопросом ради вопроса" in lowered
+    assert "молчание собеседника после реплики не проблема" not in lowered
+    assert "вымогать ответ вопросом ради вопроса" not in lowered
+    assert "если по текущей теме нового не осталось" in lowered
     assert "разрешения продолжать не спрашивают" in lowered
     assert "реплика заканчивается вопросом или конкретным предложением" not in lowered
     assert "побуждать человека к ответу" not in lowered
@@ -1402,7 +1407,8 @@ def test_точные_данные_вместо_расплывчатых(script)
     """Точное число/адрес/срок/цена — называть, не подменять «несколькими»."""
     rule = next(r for r in SPEECH_RULES if "точное число" in r.lower())
     assert "несколько" in rule
-    assert "одиннадцать филиалов" in rule.lower()
+    assert "плохо:" not in rule.lower()
+    assert "хорошо:" not in rule.lower()
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1413,15 +1419,15 @@ def test_точные_данные_вместо_расплывчатых(script)
     )
     content = messages[0].content
     assert "точное число" in content.lower()
-    assert "несколько филиалов" in content.lower()
+    assert "заменять на «несколько»" in content.lower()
 
 
 def test_шапка_не_повторять_сказанное_и_ход_к_человеку(script):
     """В рамке перечня — реплика из всего разговора; агент ведёт разговор."""
     block = steps_block([script.step("included")], {}, {}).lower()
-    assert "реплика строится из всего этого разом" in block
-    assert "уместно сейчас" in block
-    assert "разговор ведёт агент" in persona_block().lower()
+    assert "**требования**" in block
+    assert script.step("included").goal.lower() in block
+    assert "разговор ведёт агент" in speech_rules_block().lower()
     messages = build_turn_messages(
         script=script,
         steps=[script.step("included")],
@@ -1431,7 +1437,7 @@ def test_шапка_не_повторять_сказанное_и_ход_к_че
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "реплика строится из всего этого разом" in content
+    assert "# шаги в работе" in content
     assert "одна тема" in content
     assert "разговор ведёт агент" in content
 
@@ -1513,9 +1519,9 @@ def test_рамка_разговор_целиком_порядок_подска�
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "весь разговор целиком" in content
-    assert "порядок в перечне — подсказка" in content
-    assert "человек спросил — ответить на его вопрос" in content
+    assert "# шаги в работе" in content
+    assert "**требования**" in content
+    assert "разговор ведёт агент" in content
 
 
 def test_образцы_всех_шагов_шапки_полностью_и_в_порядке(script_v4):
@@ -1542,8 +1548,6 @@ def test_образцы_всех_шагов_шапки_полностью_и_в_
 
 def test_приказ_не_совпадать_с_образцами_дословно(script_v4):
     """Рядом с образцами — прямой приказ не совпадать с ними дословно."""
-    from graph.prompts import _EXAMPLES_PREFIX
-
     step = script_v4.step("city")
     assert step.examples
     messages = build_turn_messages(
@@ -1555,15 +1559,16 @@ def test_приказ_не_совпадать_с_образцами_дослов
         asides_done=[],
     )
     content = messages[0].content
-    assert _EXAMPLES_PREFIX in content
-    assert "не текст для произнесения" in content
-    assert "дословное или почти дословное совпадение с образцом — ошибка" in content.lower()
-    # Префикс стоит перед первым образцом.
-    assert content.index(_EXAMPLES_PREFIX) < content.index(step.examples[0])
+    assert "**Примеры**" in content
+    assert SPEECH_RULES[0].startswith("ВНИМАНИЕ: примеры")
+    assert "дословное или почти дословное совпадение с примером — ошибка" in content.lower()
+    assert content.index("**Примеры**") < content.index(step.examples[0])
 
 
 def test_жёсткий_запрет_фактов_вне_данных(script):
-    """Жёсткий запрет на факты вне переданных данных — явный и отдельный."""
+    """В полной сборке — правило про данные как есть; жёсткий запрет — в коротких."""
+    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1573,8 +1578,9 @@ def test_жёсткий_запрет_фактов_вне_данных(script):
         asides_done=[],
     )
     content = messages[0].content
-    assert "Жёсткий запрет:" in content
-    assert "которых нет в переданных данных" in content
+    assert "из переданных данных как есть" in content
+    filler = build_filler_messages(script, messages=[], history_limit=2)
+    assert _HARD_FACT_BAN in filler[0].content
 
 
 def test_запрет_служебных_слов_и_обещания_сходить_за_данными(script):
@@ -1707,7 +1713,7 @@ def test_правила_речи_и_короткие_сборки_без_ука�
 
 
 def test_жёсткий_запрет_фактов_во_всех_сборках(script):
-    """Жёсткий запрет на факты вне данных — в основной и коротких сборках."""
+    """Жёсткий запрет на факты вне данных — в коротких сборках; в полной — правило данных."""
     from graph.prompts import (
         _HARD_FACT_BAN,
         build_filler_messages,
@@ -1723,6 +1729,7 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         history=[],
         asides_done=[],
     )[0].content
+    assert "из переданных данных как есть" in full
     silence = build_silence_messages(
         script,
         messages=[AIMessage(content="?")],
@@ -1744,5 +1751,215 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         step=script.step("price"),
         history_limit=2,
     )[0].content
-    for content in (full, silence, filler, waiting):
+    for content in (silence, filler, waiting):
         assert _HARD_FACT_BAN in content
+
+
+#: Заголовки верхнего уровня полной сборки — порядок из PROMPT_TARGET.
+_TOP_LEVEL_SECTIONS: tuple[str, ...] = (
+    "# КАК РАБОТАТЬ",
+    "# ПРАВИЛА РЕЧИ",
+    "# КОНТЕКСТ",
+    "# ШАГИ В РАБОТЕ",
+    "# ЧТО ДАЛЬШЕ",
+    "# ФОРМА ОТВЕТА",
+)
+
+
+def test_системное_разделы_верхнего_уровня_в_порядке(script_v4):
+    """В системном сообщении все разделы верхнего уровня в порядке из файла."""
+    step = script_v4.step("city")
+    nxt = script_v4.step("who_studies")
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[step],
+        profile={"city": "Пермь"},
+        facts={"city": {"name": "Пермь"}},
+        history=[],
+        asides_done=[],
+        next_step=nxt,
+        context_text="Город: Пермь",
+        dynamic_status="не нашлось",
+        closed_steps=[script_v4.step("greeting")],
+    )
+    content = messages[0].content
+    positions = [content.index(title) for title in _TOP_LEVEL_SECTIONS]
+    assert positions == sorted(positions)
+
+
+def test_пустой_раздел_не_выводится(script_v4):
+    """Раздел без содержимого не выводится: пустых заголовков нет."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("greeting")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "# ЧТО ДАЛЬШЕ" not in content
+    assert "# КАК РАБОТАТЬ" in content
+    assert "# ПРАВИЛА РЕЧИ" in content
+    assert "# ШАГИ В РАБОТЕ" in content
+    assert "# ФОРМА ОТВЕТА" in content
+    for title in _TOP_LEVEL_SECTIONS:
+        if title in content:
+            # После заголовка есть непустая строка содержимого.
+            after = content.split(title, 1)[1].lstrip("\n")
+            first = after.split("\n", 1)[0].strip()
+            assert first, f"пустой раздел: {title}"
+
+
+def test_шаги_со_своими_заголовками_и_подразделами(script_v4):
+    """Каждый шаг подан своим заголовком с подразделами требований и примеров."""
+    steps = [script_v4.step("city"), script_v4.step("who_studies")]
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=steps,
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    for step in steps:
+        assert f"## {step.name}" in content
+        assert step.requirements in content
+        assert "**Требования**" in content
+        if step.examples:
+            assert "**Примеры**" in content
+            for example in step.examples:
+                assert example in content
+
+
+def test_системное_без_пометок_ведущий_хорошо_плохо(script_v4):
+    """Нет пометок «Ведущий шаг», «Висящий шаг», «Хорошо:», «Плохо:»."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city"), script_v4.step("who_studies")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        next_step=script_v4.step("experience"),
+    )
+    content = messages[0].content
+    assert "Ведущий шаг" not in content
+    assert "Висящий шаг" not in content
+    assert "Плохо:" not in content
+    assert "Хорошо:" not in content
+    for rule in SPEECH_RULES:
+        assert "Плохо:" not in rule
+        assert "Хорошо:" not in rule
+
+
+def test_правила_нумерованный_список_пункт_про_примеры_первый(script):
+    """Правила выведены нумерованным списком, пункт про примеры — первым."""
+    assert SPEECH_RULES[0].startswith("ВНИМАНИЕ: примеры")
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    rules_part = content.split("# ПРАВИЛА РЕЧИ", 1)[1].split("# ", 1)[0]
+    assert rules_part.strip().startswith("0. ВНИМАНИЕ: примеры")
+    for index in range(len(SPEECH_RULES)):
+        assert f"\n{index}. " in f"\n{rules_part}" or rules_part.startswith(f"{index}. ")
+
+
+def test_нет_формулировки_молчание_не_проблема(script):
+    """Формулировки о том, что молчание собеседника не проблема, нет."""
+    end_rule = _lead_speech_rule()
+    assert "молчание собеседника" not in end_rule.lower()
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "молчание собеседника после реплики не проблема" not in messages[0].content.lower()
+
+
+def test_реплика_ведёт_дальше_три_вида_продолжения(script):
+    """Есть требование, что реплика ведёт разговор дальше, и три вида продолжения."""
+    end_rule = _lead_speech_rule()
+    lowered = end_rule.lower()
+    assert "не заканчивается в никуда" in lowered
+    assert "вопрос по делу" in lowered
+    assert "переход к следующей теме" in lowered
+    assert "обозначение того, о чём пойдёт речь" in lowered
+
+
+def test_строить_реплику_по_уже_известному(script):
+    """Есть указание строить реплику по уже известному, когда нового по теме нет."""
+    end_rule = _lead_speech_rule()
+    lowered = end_rule.lower()
+    assert "если по текущей теме нового не осталось" in lowered
+    assert "уже известно из разговора" in lowered
+
+
+def test_бессвязная_реплика_про_искажённые_названия(script):
+    """Правило про бессвязную реплику упоминает искажённые названия."""
+    rule = next(r for r in SPEECH_RULES if "бессвязна" in r.lower())
+    assert "искажённ" in rule.lower()
+    assert "не принимают за верные" in rule.lower()
+
+
+def test_отвеченное_упоминает_сведения_из_формы(script):
+    """Правило про отвеченное упоминает сведения из формы."""
+    rule = next(r for r in SPEECH_RULES if "на отвеченное" in r.lower())
+    lowered = rule.lower()
+    assert "форме" in lowered
+    assert "город" in lowered
+    assert "имя" in lowered
+    assert "коробк" in lowered
+
+
+def test_адреса_филиалов_без_обещания_уточнить_и_вернуться(script):
+    """Правило про адреса филиалов не содержит обещания уточнить и вернуться."""
+    rule = next(r for r in SPEECH_RULES if "утверждать наличие филиала" in r.lower())
+    lowered = rule.lower()
+    assert "уточню" not in lowered
+    assert "вернус" not in lowered
+    assert "плохо:" not in lowered
+    assert "хорошо:" not in lowered
+
+
+def test_короткие_сборки_без_разметки_разделов(script):
+    """Короткие сборки не изменились: без заголовков разделов полной сборки."""
+    from graph.prompts import (
+        build_filler_messages,
+        build_silence_messages,
+        build_waiting_messages,
+    )
+
+    filler = build_filler_messages(script, messages=[HumanMessage(content="?")], history_limit=2)[
+        0
+    ].content
+    silence = build_silence_messages(
+        script,
+        messages=[AIMessage(content="?")],
+        profile={},
+        step=script.step("city"),
+        attempt=1,
+        history_limit=2,
+    )[0].content
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("city"),
+        history_limit=2,
+    )[0].content
+    for content in (filler, silence, waiting):
+        assert "# КАК РАБОТАТЬ" not in content
+        assert "# ПРАВИЛА РЕЧИ" not in content
+        assert "# ШАГИ В РАБОТЕ" not in content

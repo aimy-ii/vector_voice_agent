@@ -1120,7 +1120,7 @@ async def test_respond_при_чужом_searching_hash_полная_сборк�
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
     prompt = model["messages"][0].content
-    assert "В истории — весь разговор" in prompt
+    assert "# ШАГИ В РАБОТЕ" in prompt
     assert fact in prompt
     assert "Город: Пермь" in prompt
     assert model["calls"] == 1
@@ -1351,7 +1351,7 @@ async def test_ready_hash_полная_и_короткая_сборка(
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
     assert kinds == ["full"]
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
 
     for status in (DYN_READY, DYN_MISSING):
         kinds.clear()
@@ -1370,7 +1370,7 @@ async def test_ready_hash_полная_и_короткая_сборка(
         out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
         assert out.get("expect_continuation") is False
         assert kinds == ["full"]
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
 
 
 async def test_commit_протаскивает_expect_continuation(
@@ -1438,7 +1438,7 @@ async def test_respond_без_знаний_полная_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
 
 
 async def test_respond_недостающие_факты_живая_реакция(
@@ -1494,7 +1494,7 @@ async def test_respond_недостающие_факты_живая_реакци
     assert out.get("expect_continuation") is False
     assert kinds[0] == "filler"
     prompt = model["all_messages"][0][0].content
-    assert "В истории — весь разговор" not in prompt
+    assert "# ШАГИ В РАБОТЕ" not in prompt
     assert "думает вслух" in prompt.lower() or "паузу" in prompt.lower()
 
 
@@ -1534,7 +1534,7 @@ async def test_respond_searching_даже_если_данные_на_месте(
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
     assert model["calls"] == 1
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
 
 
 async def test_continuation_всегда_полная_сборка(
@@ -1575,7 +1575,7 @@ async def test_continuation_всегда_полная_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
 
 
 async def test_continuation_не_растит_счётчики(
@@ -1786,10 +1786,10 @@ async def test_next_step_в_промпте_первый_незакрытый_п�
     assert state["current_step"] == "included"
     assert state["next_step"] == "practice"
     prompt = model["messages"][0].content
-    assert "В перечне: included" in prompt
-    assert "Дальше: practice" in prompt
-    assert "Также в перечне: practice" not in prompt
-    assert "ориентир, куда двигаться" in prompt.lower()
+    assert "# ШАГИ В РАБОТЕ" in prompt
+    assert "# ЧТО ДАЛЬШЕ" in prompt
+    assert "practice" in prompt.lower() or "практик" in prompt.lower()
+    assert prompt.index("# ШАГИ В РАБОТЕ") < prompt.index("# ЧТО ДАЛЬШЕ")
 
 
 async def test_без_следующего_шага_вопрос_ведущего(
@@ -1848,11 +1848,11 @@ async def test_без_следующего_шага_вопрос_ведущег�
     assert state["current_step"] == "messenger"
     assert state.get("next_step") in (None, "")
     prompt = model["messages"][0].content
-    assert "В перечне: messenger" in prompt
-    assert "Дальше:" not in prompt
+    assert "# ШАГИ В РАБОТЕ" in prompt
+    assert "# ЧТО ДАЛЬШЕ" not in prompt
     assert "Следующий шаг:" not in prompt
     # Вопрос ведущего шага на месте — правило перехода не подменяет его.
-    assert "messenger" in prompt.lower() or "мессенджер" in prompt.lower()
+    assert "канал связи" in prompt.lower() or "продублировать" in prompt.lower()
 
 
 def _all_steps_closed(script) -> dict[str, str]:

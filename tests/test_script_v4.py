@@ -8,7 +8,7 @@ import pytest
 
 from core.config import settings
 from graph.facts import needs_of
-from graph.prompts import _EXAMPLES_PREFIX, _describe_step, build_turn_messages, unknown_block
+from graph.prompts import _describe_step, build_turn_messages, unknown_block
 from graph.tools_registry import build_context_tools, needs_from_knowledge
 from script.build import ScriptError, build_script, params_from_settings
 from script.models import RawSalesScript, SalesStep
@@ -159,14 +159,14 @@ def test_v1_v2_v3_собираются_как_раньше(script, script_v1, sc
 
 
 def test_промпт_v4_название_требования_образцы(script_v4):
-    """Вывод шага: название, требования, образцы с пометкой про дословность."""
+    """Вывод шага: название, требования, примеры."""
     step = script_v4.step("city")
     lines = _describe_step(step, {}, {}, heading="Шаг")
     text = "\n".join(lines)
-    assert "Название: Выявление города" in text
-    assert "Требования:" in text
+    assert "## Выявление города" in text
+    assert "**Требования**" in text
     assert "Записать город в форму как city" in text
-    assert _EXAMPLES_PREFIX in text
+    assert "**Примеры**" in text
     assert "Подскажите, в каком городе планируете обучение?" in text
 
     messages = build_turn_messages(
@@ -179,7 +179,8 @@ def test_промпт_v4_название_требования_образцы(sc
     )
     content = messages[0].content
     assert "Выявление города" in content
-    assert _EXAMPLES_PREFIX in content
+    assert "**Примеры**" in content
+    assert "ВНИМАНИЕ: примеры" in content
 
 
 def test_промпт_v4_нехватка_данных_из_knowledge(script_v4):

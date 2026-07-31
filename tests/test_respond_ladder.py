@@ -154,7 +154,7 @@ async def test_лестница_не_запускается_если_данны�
     assert model["calls"] == 1
     assert spoken.kinds == ["full"]
     assert out.get("expect_continuation") is False
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
 
 
 async def test_лестница_в_работе_затем_готово(spoken, store, ctx_store, model, use_v2):
@@ -366,4 +366,4 @@ async def test_лестница_истёкший_дедлайн_штатная(
     assert model["calls"] == 1
     assert spoken.kinds == ["full"]
     assert out.get("expect_continuation") is False
-    assert "В истории — весь разговор" in model["messages"][0].content
+    assert "# ШАГИ В РАБОТЕ" in model["messages"][0].content
