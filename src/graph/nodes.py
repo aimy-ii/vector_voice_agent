@@ -708,7 +708,9 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     Лестница включается только когда ведущему шагу нужны данные, которых
     ещё нет в контексте. Ступени — отдельные генерации (filler → waiting →
     full) с перечитыванием статуса из кеша; произнесённое дописывается в
-    локальную историю узла. Флаг продолжения на лестнице не ставится.
+    локальную историю узла. Одна и та же сборка подряд не повторяется:
+    без смены статуса лестница уходит в штатную генерацию. Флаг
+    продолжения на лестнице не ставится.
     """
     script = _script_of(state)
     head = _head_steps(state)
@@ -750,7 +752,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     last_ctx = ctx
     last_error: str | None = None
 
-    async def _generate(kind: str, reason: str) -> str:
+    async def _generate(kind: str, reason: str, *, step: int | None = None) -> str:
         """Одна генерация; дописывает в ``spoken`` и возвращает текст реплики."""
         nonlocal last_result, last_ctx, last_error
         context_text = last_ctx.render()
@@ -771,13 +773,15 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             turn_kind=turn_kind,
         )
         system_len = len(messages[0].content) if messages else 0
+        step_prefix = f"ступень {step}, " if step is not None else ""
         stage(
             "prompt",
-            f"сборка {kind}, {reason}, системное сообщение {system_len} символов",
+            f"{step_prefix}сборка {kind}, {reason}, системное сообщение {system_len} символов",
             "done",
             chars=system_len,
             prompt=kind,
             reason=reason,
+            step=step,
         )
         if messages:
             log.debug("[prompt|done] %s", messages[0].content)
@@ -832,9 +836,11 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         return out
 
     # Лестница: filler / waiting / full, не больше двух заглушек за ход.
+    # Одна и та же сборка дважды подряд не выполняется: статус без смены → full.
     deadline = time.monotonic() + float(settings.ladder_deadline_seconds)
     stubs_spoken = 0
     step_index = 0
+    prev_kind: str | None = None
     while True:
         last_ctx = await _load_context(state)
         if step_index > 0 and digest and last_ctx.dynamic_reply_hash != digest:
@@ -854,7 +860,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 stubs_spoken=stubs_spoken,
                 force_full=False,
             )
-            if stubs_spoken >= 2:
+            if prev_kind is not None and kind == prev_kind and kind != "full":
+                kind = "full"
+                reason = "сборка не сменилась"
+            elif stubs_spoken >= 2:
                 reason = "лимит заглушек"
             elif kind == "filler":
                 reason = "статус в работе"
@@ -863,12 +872,18 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             else:
                 reason = f"статус {status}"
 
-        text = await _generate(kind, reason)
+        # Между ступенями — разделитель, чтобы commit не склеил фразы.
+        if step_index > 0 and spoken:
+            spoken.append(" ")
+            say(" ")
+
+        text = await _generate(kind, reason, step=step_index + 1)
         if text:
-            local_history = list(local_history) + [AIMessage(content=text)]
+            local_history.append(AIMessage(content=text))
         step_index += 1
         if kind == "full":
             break
+        prev_kind = kind
         stubs_spoken += 1
 
     return {

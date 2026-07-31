@@ -225,19 +225,33 @@ async def test_лестница_в_работе_поиск_готово(spoken, 
     assert out.get("expect_continuation") is False
 
 
-async def test_лестница_две_заглушки_потом_штатная(spoken, store, ctx_store, model, use_v2):
-    """Статус не меняется — после двух заглушек идёт штатная генерация."""
+async def test_лестница_статус_не_меняется_штатная(spoken, store, ctx_store, model, use_v2):
+    """Статус не меняется — та же сборка не повторяется, сразу штатная."""
     reply = "какие филиалы у Просвещения?"
     ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
     await ctx_store.save("local", ctx)
     model["result"] = [
         {"reply": "Секунду…"},
-        {"reply": "Минутку…"},
         {"reply": "Пока точных данных нет, давайте так."},
     ]
     out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    assert model["calls"] == 3
-    assert spoken.kinds == ["filler", "filler", "full"]
+    assert model["calls"] == 2
+    assert spoken.kinds == ["filler", "full"]
+    assert out.get("expect_continuation") is False
+
+
+async def test_лестница_поиск_не_повторяет_waiting(spoken, store, ctx_store, model, use_v2):
+    """«в поиске» без смены — waiting один раз, затем штатная."""
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_SEARCHING)
+    await ctx_store.save("local", ctx)
+    model["result"] = [
+        {"reply": "Сейчас подберу филиалы."},
+        {"reply": "Пока точных адресов нет."},
+    ]
+    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
+    assert model["calls"] == 2
+    assert spoken.kinds == ["waiting", "full"]
     assert out.get("expect_continuation") is False
 
 
@@ -264,6 +278,53 @@ async def test_лестница_вторая_ступень_слышит_пер�
     assert model["calls"] == 2
     second_history = [m.content for m in model["all_messages"][1][1:]]
     assert first_reply in second_history
+
+
+async def test_лестница_произнесённое_не_слипается(spoken, store, ctx_store, model, use_v2):
+    """Между текстами ступеней в накопителе есть разделитель."""
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
+    await ctx_store.save("local", ctx)
+    first = "Секунду, уточню."
+    second = "Сейчас подберу филиалы."
+    third = "Ближайший на Ленина."
+
+    async def _on_call(n: int, _messages: Any) -> None:
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_SEARCHING,
+                        "situation_slug": "филиалы",
+                    }
+                ),
+            )
+        elif n == 2:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "dynamic_text": "Филиалы: ул. Ленина, 1.",
+                        "situation_slug": None,
+                    }
+                ),
+            )
+
+    model["on_call"] = _on_call
+    model["result"] = [
+        {"reply": first},
+        {"reply": second},
+        {"reply": third},
+    ]
+    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
+    joined = "".join(out.get("spoken") or [])
+    assert spoken.kinds == ["filler", "waiting", "full"]
+    assert f"{first}{second}" not in joined
+    assert f"{second}{third}" not in joined
+    assert f"{first} {second}" in joined
+    assert f"{second} {third}" in joined
 
 
 async def test_лестница_смена_хеша_обрывает(spoken, store, ctx_store, model, use_v2):
