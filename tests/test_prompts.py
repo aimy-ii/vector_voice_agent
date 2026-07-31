@@ -35,7 +35,20 @@ from graph.prompts import (
 )
 
 #: Число правил речи, включая пункт 0 про примеры.
-_SPEECH_RULES_COUNT = 18
+_SPEECH_RULES_COUNT = 26
+
+#: Начала девяти правил про ведение разговора — подряд после «одна тема».
+_LEAD_SPEECH_RULE_STARTS: tuple[str, ...] = (
+    "Разговор ведёт агент:",
+    "Реплика не заканчивается в никуда",
+    "Что пообещал рассказать — обязан рассказать:",
+    "Если по текущей теме нового не осталось",
+    "Вопрос по делу двигает разговор дальше:",
+    "Вопросы вида «что бы Вы хотели узнать»",
+    "Разрешения продолжать не спрашивают:",
+    "Пустые проверки «что скажете?»",
+    "Если по текущему пункту сказать нечего",
+)
 
 #: Обращения к модели на «ты» (после удаления цитат-примеров в «ёлочках»).
 _TY_ADDRESS = re.compile(
@@ -49,13 +62,19 @@ def _strip_guillemets(text: str) -> str:
     return re.sub(r"«[^»]*»", "", text)
 
 
-def _lead_speech_rule() -> str:
-    """Возвращает правило речи про ведение разговора агентом."""
-    return next(
-        rule
-        for rule in SPEECH_RULES
-        if "разговор ведёт агент" in rule.lower() and "пустые проверки" in rule.lower()
+def _lead_speech_rules() -> tuple[str, ...]:
+    """Возвращает подряд идущие правила речи про ведение разговора агентом."""
+    start = next(
+        index
+        for index, rule in enumerate(SPEECH_RULES)
+        if rule.startswith(_LEAD_SPEECH_RULE_STARTS[0])
     )
+    return SPEECH_RULES[start : start + len(_LEAD_SPEECH_RULE_STARTS)]
+
+
+def _lead_speech_joined() -> str:
+    """Склеивает правила ведения разговора для поиска по объединённому тексту."""
+    return "\n".join(_lead_speech_rules())
 
 
 def test_подстановка_фактов_в_текст():
@@ -176,16 +195,26 @@ def test_системное_сообщение_содержит_правила_�
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
 
 
-def test_правила_окончания_и_запрета_проверок_идут_подряд():
-    """Ведение разговора и запрет пустых проверок — в одном правиле речи."""
-    end_rule = _lead_speech_rule()
-    assert "вопрос по делу" in end_rule.lower()
-    assert "разговор ведёт агент" in end_rule.lower()
-    assert "реплика ожидания" in end_rule.lower()
-    assert "согласие с содержанием" in end_rule.lower()
-    assert "запретом не считается" not in end_rule
-    assert "Заканчивать ничем нельзя" not in end_rule
-    assert "Побуждать человека к ответу" not in end_rule
+def test_правила_ведения_разговора_идут_подряд():
+    """Девять правил ведения разговора идут подряд; соседние не сдвинуты."""
+    lead = _lead_speech_rules()
+    assert len(lead) == len(_LEAD_SPEECH_RULE_STARTS)
+    for rule, start in zip(lead, _LEAD_SPEECH_RULE_STARTS, strict=True):
+        assert rule.startswith(start)
+    topic_index = next(
+        index for index, rule in enumerate(SPEECH_RULES) if "одна тема за реплику" in rule.lower()
+    )
+    lead_index = SPEECH_RULES.index(lead[0])
+    assert lead_index == topic_index + 1
+    after = SPEECH_RULES[lead_index + len(lead)]
+    assert after.startswith("Вопрос звучит так, как спросил бы человек")
+    joined = _lead_speech_joined().lower()
+    assert "вопрос по делу" in joined
+    assert "реплика ожидания" in joined
+    assert "согласие с содержанием" in joined
+    assert "запретом не считается" not in joined
+    assert "Заканчивать ничем нельзя" not in joined
+    assert "Побуждать человека к ответу" not in joined
 
 
 def test_скрипты_v1_v4_собирают_ход_с_правилами_речи(script_v1, script, script_v3, script_v4):
@@ -1233,10 +1262,10 @@ def test_запрет_раскрывать_содержание_следующе
 
 def test_ход_к_собеседнику_и_запрет_пустых_проверок_вместе(script):
     """Ведение разговора агентом и запрет пустых проверок — в правилах."""
-    end_rule = _lead_speech_rule()
-    assert "разговор ведёт агент" in end_rule.lower()
-    assert "продолжим" in end_rule.lower()
-    assert "вопрос по делу" in end_rule.lower()
+    joined = _lead_speech_joined().lower()
+    assert "разговор ведёт агент" in joined
+    assert "продолжим" in joined
+    assert "вопрос по делу" in joined
     natural = naturalness_block(ask_for_move=True)
     assert "Пустая проверка" in natural
     assert "либо ничем" not in natural.lower()
@@ -1262,10 +1291,10 @@ def test_запрет_повторять_и_разворачивать_уже_с
 
 def test_реплика_всегда_ходом_и_запрет_пустых_проверок(script):
     """Реплика ведёт разговор дальше; пустые проверки и разрешения запрещены."""
-    end_rule = _lead_speech_rule()
-    assert "разговор ведёт агент" in end_rule.lower()
-    assert "не заканчивается в никуда" in end_rule.lower()
-    assert "продолжим" in end_rule.lower()
+    joined = _lead_speech_joined().lower()
+    assert "разговор ведёт агент" in joined
+    assert "не заканчивается в никуда" in joined
+    assert "продолжим" in joined
     natural = naturalness_block(ask_for_move=True)
     assert "Пустая проверка" in natural
     assert "либо ничем" not in natural.lower()
@@ -1273,18 +1302,17 @@ def test_реплика_всегда_ходом_и_запрет_пустых_п�
 
 def test_правило_речи_без_разрешения_продолжать(script):
     """Агент ведёт разговор; запрет разрешений; переход к следующему пункту."""
-    end_rule = _lead_speech_rule()
-    lowered = end_rule.lower()
-    assert "разрешения продолжать не спрашивают" in lowered
-    assert "рассказать подробнее" in lowered
-    assert "не запрет на вопросы вообще" in lowered
-    assert "говорить ли дальше" in lowered
-    assert "разговор ведёт агент" in lowered
-    assert "следующему пункту" in lowered
-    assert "следующему пункту перечня" not in lowered
-    assert "Реплика всегда заканчивается обращением к человеку" not in end_rule
-    assert "Заканчивать ничем нельзя" not in end_rule
-    assert "Побуждать человека к ответу" not in end_rule
+    joined = _lead_speech_joined().lower()
+    assert "разрешения продолжать не спрашивают" in joined
+    assert "рассказать подробнее" in joined
+    assert "не запрет на вопросы вообще" in joined
+    assert "говорить ли дальше" in joined
+    assert "разговор ведёт агент" in joined
+    assert "переходить к следующему" in joined
+    assert "следующему пункту перечня" not in joined
+    assert "Реплика всегда заканчивается обращением к человеку" not in joined
+    assert "Заканчивать ничем нельзя" not in joined
+    assert "Побуждать человека к ответу" not in joined
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1298,7 +1326,7 @@ def test_правило_речи_без_разрешения_продолжат�
     assert "разрешения продолжать не спрашивают" in content_lower
     assert "не запрет на вопросы вообще" in content_lower
     assert "разговор ведёт агент" in content_lower
-    assert "следующему пункту" in content_lower
+    assert "переходить к следующему" in content_lower
     assert "следующему пункту перечня" not in content_lower
     assert "Реплика всегда заканчивается обращением к человеку" not in content
     assert "Заканчивать ничем нельзя" not in content
@@ -1306,19 +1334,18 @@ def test_правило_речи_без_разрешения_продолжат�
 
 def test_вопрос_в_конце_двигает_разговор_а_не_проверяет_понимание(script):
     """Вопрос по делу двигает разговор; пустые «что интересует» запрещены."""
-    end_rule = _lead_speech_rule()
-    lowered = end_rule.lower()
-    assert "двигает разговор дальше" in lowered
-    assert "выбор из двух вариантов" in lowered
-    assert "уточнение недостающего" in lowered
-    assert "предложение следующего шага" in lowered
-    assert "не проверка понимания" in lowered
-    assert "что осталось непонятным" in lowered
-    assert "что вас интересует" in lowered
-    assert "что бы вы хотели узнать" in lowered
-    assert "о чём рассказать" in lowered
-    assert "побуждать человека к ответу" not in lowered
-    assert "реплика заканчивается вопросом или конкретным предложением" not in lowered
+    joined = _lead_speech_joined().lower()
+    assert "двигает разговор дальше" in joined
+    assert "выбор из двух вариантов" in joined
+    assert "уточнение недостающего" in joined
+    assert "предложение следующего шага" in joined
+    assert "не проверка понимания" in joined
+    assert "что осталось непонятным" in joined
+    assert "что вас интересует" in joined
+    assert "что бы вы хотели узнать" in joined
+    assert "о чём рассказать" in joined
+    assert "побуждать человека к ответу" not in joined
+    assert "реплика заканчивается вопросом или конкретным предложением" not in joined
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1348,24 +1375,23 @@ def test_имя_повторы_и_одна_тема_не_тронуты_усил
 
 def test_правило_речи_ведёт_разговор_а_не_отдаёт_ход(script):
     """Агент ведёт разговор: три вида продолжения, обещание, без пустых вопросов."""
-    end_rule = _lead_speech_rule()
-    lowered = end_rule.lower()
-    assert "разговор ведёт агент" in lowered
-    assert "не спрашивает у собеседника, что тому рассказать" in lowered
-    assert "вопрос по делу" in lowered
-    assert "переход к следующей теме" in lowered
-    assert "обозначение того, о чём пойдёт речь" in lowered
-    assert "что пообещал рассказать — обязан рассказать" in lowered
-    assert "следующая реплика начинается именно с этого" in lowered
-    assert "что вас интересует" in lowered
-    assert "что осталось непонятным" in lowered
-    assert "молчание собеседника после реплики не проблема" not in lowered
-    assert "вымогать ответ вопросом ради вопроса" not in lowered
-    assert "если по текущей теме нового не осталось" in lowered
-    assert "разрешения продолжать не спрашивают" in lowered
-    assert "реплика заканчивается вопросом или конкретным предложением" not in lowered
-    assert "побуждать человека к ответу" not in lowered
-    assert "обязательным такой конец не является" not in lowered
+    joined = _lead_speech_joined().lower()
+    assert "разговор ведёт агент" in joined
+    assert "не спрашивает у собеседника, что тому рассказать" in joined
+    assert "вопрос по делу" in joined
+    assert "переход к следующей теме" in joined
+    assert "обозначение того, о чём пойдёт речь" in joined
+    assert "что пообещал рассказать — обязан рассказать" in joined
+    assert "следующая реплика начинается именно с этого" in joined
+    assert "что вас интересует" in joined
+    assert "что осталось непонятным" in joined
+    assert "молчание собеседника после реплики не проблема" not in joined
+    assert "вымогать ответ вопросом ради вопроса" not in joined
+    assert "если по текущей теме нового не осталось" in joined
+    assert "разрешения продолжать не спрашивают" in joined
+    assert "реплика заканчивается вопросом или конкретным предложением" not in joined
+    assert "побуждать человека к ответу" not in joined
+    assert "обязательным такой конец не является" not in joined
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1874,8 +1900,8 @@ def test_правила_нумерованный_список_пункт_про_
 
 def test_нет_формулировки_молчание_не_проблема(script):
     """Формулировки о том, что молчание собеседника не проблема, нет."""
-    end_rule = _lead_speech_rule()
-    assert "молчание собеседника" not in end_rule.lower()
+    joined = _lead_speech_joined().lower()
+    assert "молчание собеседника" not in joined
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city")],
@@ -1889,20 +1915,48 @@ def test_нет_формулировки_молчание_не_проблема(
 
 def test_реплика_ведёт_дальше_три_вида_продолжения(script):
     """Есть требование, что реплика ведёт разговор дальше, и три вида продолжения."""
-    end_rule = _lead_speech_rule()
-    lowered = end_rule.lower()
-    assert "не заканчивается в никуда" in lowered
-    assert "вопрос по делу" in lowered
-    assert "переход к следующей теме" in lowered
-    assert "обозначение того, о чём пойдёт речь" in lowered
+    joined = _lead_speech_joined().lower()
+    assert "не заканчивается в никуда" in joined
+    assert "вопрос по делу" in joined
+    assert "переход к следующей теме" in joined
+    assert "обозначение того, о чём пойдёт речь" in joined
 
 
 def test_строить_реплику_по_уже_известному(script):
     """Есть указание строить реплику по уже известному, когда нового по теме нет."""
-    end_rule = _lead_speech_rule()
-    lowered = end_rule.lower()
-    assert "если по текущей теме нового не осталось" in lowered
-    assert "уже известно из разговора" in lowered
+    joined = _lead_speech_joined().lower()
+    assert "если по текущей теме нового не осталось" in joined
+    assert "уже известно из разговора" in joined
+
+
+def test_пункты_speech_rules_не_длиннее_500():
+    """Ни один пункт SPEECH_RULES не длиннее 500 символов."""
+    for index, rule in enumerate(SPEECH_RULES):
+        assert len(rule) <= 500, f"пункт {index}: {len(rule)} символов"
+
+
+def test_девять_правил_ведения_в_системном_сообщении(script):
+    """Все девять правил разбивки присутствуют в системном сообщении отдельно."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "Разговор ведёт агент: сам решает, о чём говорить дальше" in content
+    assert "Реплика не заканчивается в никуда" in content
+    assert "Что пообещал рассказать — обязан рассказать" in content
+    assert "Если по текущей теме нового не осталось" in content
+    assert "Вопрос по делу двигает разговор дальше" in content
+    assert "Вопросы вида «что бы Вы хотели узнать»" in content
+    assert "Разрешения продолжать не спрашивают" in content
+    assert "Пустые проверки «что скажете?»" in content
+    assert "переходить к следующему, а не спрашивать разрешения" in content
+    for rule in _lead_speech_rules():
+        assert rule in content
 
 
 def test_бессвязная_реплика_про_искажённые_названия(script):
