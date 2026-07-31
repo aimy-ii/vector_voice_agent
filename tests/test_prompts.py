@@ -312,7 +312,7 @@ def test_промпт_требует_живой_проверочный_вопр�
     """check_question — образец смысла; правило требует живую формулировку."""
     step = script.step("practice")
     assert step.check_question
-    block = steps_block([step], {}, {}, attempts={})
+    block = steps_block([step], {}, {})
     assert "Образец смысла проверки" in block
     assert step.check_question in block
     assert f"«{step.check_question}»" in block
@@ -343,17 +343,18 @@ def test_обычный_шаг_разрешает_свои_слова(script):
     assert "своими словами" in block
 
 
-def test_промпт_видит_шапку_и_запрет_переспрашивать(script):
+def test_промпт_видит_шапку_без_пометок_попыток(script):
+    """Шапка перечисляет шаги без пометок «новый» / «уже спрашивали»."""
     block = steps_block(
         [script.step("city"), script.step("who_studies")],
         {},
         {},
-        attempts={"city": 1},
     )
     assert "city" in block
     assert "who_studies" in block
-    assert "незакрытые" in block.lower() or "незакрытая" in block.lower()
-    assert "уже спрашивали, ответа нет" in block
+    assert "новый вопрос" not in block
+    assert "уже спрашивали, ответа нет" not in block
+    assert "впереди — не забегать" not in block
     natural = naturalness_block(ask_for_move=True)
     assert "не переспрашивать" in natural.lower()
     assert "верно?" in natural.lower()
@@ -379,13 +380,13 @@ def test_промпт_держит_границы_шага_и_незакрыты
             HumanMessage(content="повторите, я не услышал"),
         ],
         asides_done=[],
-        attempts={"name": 1},
     )
     content = messages[0].content
     assert "своих вопросов не придумывать" in content.lower()
     assert "незакрытый вопрос не исчезает" in content.lower()
     assert "name" in content
-    assert "уже спрашивали, ответа нет" in content
+    assert "уже спрашивали, ответа нет" not in content
+    assert "новый вопрос" not in content
     assert messages[-1].content == "повторите, я не услышал"
     assert messages[-2].content == "Как вас зовут?"
 
@@ -430,7 +431,6 @@ def test_шапка_с_висящими_и_образцом_одним_пром�
         facts={"price_line": "срок два месяца"},
         history=[],
         asides_done=[],
-        attempts={"city": 1},
     )
     content = messages[0].content
     assert "city" in content
@@ -439,6 +439,8 @@ def test_шапка_с_висящими_и_образцом_одним_пром�
     assert "Шапка скрипта" in content
     assert "Ведущий шаг: city" in content
     assert "Висящий шаг: terms" in content
+    assert "новый вопрос" not in content
+    assert "уже спрашивали, ответа нет" not in content
 
 
 def test_шапка_пуста_текст_завершения(script):
@@ -553,6 +555,7 @@ def test_справка_доходит_через_динамику_контек�
 
 
 def test_запрос_к_модели_содержит_системный_блок_и_хвост(script):
+    """Полная сборка: системное сообщение + вся переданная история."""
     history = [HumanMessage(content=f"реплика {i}") for i in range(12)]
     messages = build_turn_messages(
         script=script,
@@ -563,7 +566,8 @@ def test_запрос_к_модели_содержит_системный_бло
         asides_done=[],
     )
     assert isinstance(messages[0], SystemMessage)
-    assert len(messages) == 9
+    assert len(messages) == 13
+    assert messages[1].content == "реплика 0"
     assert messages[-1].content == "реплика 11"
 
 
@@ -670,8 +674,8 @@ def test_context_block_пустой():
     assert "Пермь" in context_block("город Пермь")
 
 
-def test_шапка_из_висящих_запрещает_новый_вопрос(script):
-    """Без нового шага — запрет сочинять вопрос, нет «новый вопрос — только один»."""
+def test_шапка_перечень_без_запрета_нового_вопроса(script):
+    """Шапка — перечень уместных тем; нет запрета «новых вопросов нет»."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name"), script.step("city")],
@@ -679,17 +683,18 @@ def test_шапка_из_висящих_запрещает_новый_вопро
         facts={},
         history=[],
         asides_done=[],
-        attempts={"name": 2, "city": 2},
-        new_step_id=None,
     )
     content = messages[0].content
     lowered = content.lower()
-    assert "ни одного нового вопроса не задавать" in lowered
+    assert "перечень того, о чём сейчас уместно" in lowered
+    assert "ни одного нового вопроса не задавать" not in lowered
     assert "новый вопрос — только один" not in lowered
+    assert "гарантированного" in lowered or "по последней реплике" in lowered
+    assert "жёсткий запрет" in lowered
 
 
-def test_шапка_с_новым_шагом_текст_прежний(script):
-    """Есть новый шаг — вводная как раньше, запрета сочинять нет."""
+def test_шапка_правило_гарантированного_хода_и_жёсткий_запрет(script):
+    """В системном сообщении — гарантированный ход и запрет выдуманных фактов."""
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name"), script.step("city")],
@@ -697,12 +702,14 @@ def test_шапка_с_новым_шагом_текст_прежний(script):
         facts={},
         history=[],
         asides_done=[],
-        attempts={"name": 2, "city": 1},
-        new_step_id="city",
     )
-    content = messages[0].content
-    assert "новый вопрос — только один" in content.lower()
-    assert "нового вопроса не задавать" not in content.lower()
+    content = messages[0].content.lower()
+    assert "по последней реплике собеседника" in content
+    assert "жёсткий запрет" in content
+    assert "которых нет в переданных данных" in content
+    assert "новый вопрос" not in content
+    assert "уже спрашивали, ответа нет" not in content
+    assert "впереди — не забегать" not in content
 
 
 def test_naturalness_pending_only_отличается_от_обычного():
@@ -716,19 +723,25 @@ def test_naturalness_pending_only_отличается_от_обычного():
     assert "не оценивать" in ordinary.lower() and "не оценивать" in pending.lower()
 
 
-def test_build_turn_messages_без_new_step_id_обратная_совместимость(script):
-    """Вызов без new_step_id не падает и собирает системное сообщение."""
+def test_build_turn_messages_история_целиком(script):
+    """Полная сборка кладёт всю переданную историю, без обрезки хвоста."""
+    history = [
+        HumanMessage(content=f"реплика {i}") if i % 2 == 0 else AIMessage(content=f"ответ {i}")
+        for i in range(40)
+    ]
     messages = build_turn_messages(
         script=script,
         steps=[script.step("name")],
         profile={},
         facts={},
-        history=[HumanMessage(content="здравствуйте")],
+        history=history,
         asides_done=[],
     )
     assert isinstance(messages[0], SystemMessage)
     assert messages[0].content
-    assert messages[-1].content == "здравствуйте"
+    assert len(messages) - 1 == 40
+    assert messages[1].content == "реплика 0"
+    assert messages[-1].content == "ответ 39"
 
 
 def test_naturalness_правило_подводки_к_теме(script):
@@ -914,7 +927,8 @@ def test_profile_block_pending_в_уточняется_не_в_неизвест�
     assert "- city" not in unknown_part
 
 
-def test_build_waiting_messages_короче_без_статики_и_фактов(script):
+def test_build_waiting_messages_с_контекстом_и_без(script):
+    """Waiting кладёт context_text в системное; пустой не ломает; лимит истории свой."""
     from langchain_core.messages import AIMessage, HumanMessage
 
     from graph.prompts import build_turn_messages, build_waiting_messages
@@ -934,6 +948,16 @@ def test_build_waiting_messages_короче_без_статики_и_факто
         pending_fields=[],
         step=script.step("name"),
         history_limit=4,
+        context_text="Статика: Пермь, автопарк Solaris",
+    )
+    empty_ctx = build_waiting_messages(
+        script,
+        messages=history,
+        profile={"city": "Пермь"},
+        pending_fields=[],
+        step=script.step("name"),
+        history_limit=4,
+        context_text="",
     )
     full = build_turn_messages(
         script=script,
@@ -946,18 +970,17 @@ def test_build_waiting_messages_короче_без_статики_и_факто
         pending_fields=["branch"],
     )
     content = waiting[0].content
-    assert "Статика:" not in content
+    assert "Статика: Пермь" in content
+    assert "автопарк Solaris" in content
+    assert "Статика:" not in empty_ctx[0].content
     assert "43900" not in content
     assert "Шапка скрипта" not in content
     assert "Требования:" not in content
-    # Инструкция ожидания — без примера про филиалы; предмет назвать обязательно.
-    instruction = content.split("Ведущий шаг:")[0].split("Анкета")[0].split("Форма")[0]
-    assert "филиал" not in instruction.lower()
     assert "предмет" in content.lower()
     assert "восьми слов" in content.lower() or "восемь слов" in content.lower()
     assert "придаточн" in content.lower()
     assert len(waiting) - 1 == 4
-    assert len(content) * 2 < len(full[0].content)
+    assert len(content) < len(full[0].content)
 
 
 def test_build_filler_messages_короче_без_статики_и_примеров(script):
@@ -1072,19 +1095,17 @@ def test_шапка_текущим_помечен_первый_не_послед
         [script.step("transmission"), script.step("terms")],
         {},
         {},
-        attempts={"transmission": 0},
-        new_step_id="transmission",
     )
     assert "Ведущий шаг: transmission" in block
     assert "Висящий шаг: terms" in block
     lead_i = block.index("Ведущий шаг: transmission")
     hang_i = block.index("Висящий шаг: terms")
     assert lead_i < hang_i
-    # Пометка «новый» — у ведущего, не у следующего.
     lead_line = block[lead_i : block.index("\n", lead_i)]
     hang_line = block[hang_i : block.index("\n", hang_i)]
-    assert "новый вопрос" in lead_line
+    assert "новый вопрос" not in lead_line
     assert "новый вопрос" not in hang_line
+    assert "уже спрашивали" not in block
 
 
 def test_step_block_с_next_step_текущим_ведущий(script):
@@ -1101,22 +1122,20 @@ def test_step_block_с_next_step_текущим_ведущий(script):
     assert "только завершающий вопрос" in block.lower()
     assert block.index("Ведущий шаг: terms") < block.index("Следующий шаг: theory_format")
     lead_line = next(line for line in block.splitlines() if line.startswith("Ведущий шаг: terms"))
-    assert "новый вопрос" in lead_line
+    assert "новый вопрос" not in lead_line
 
 
-def test_шапка_запрет_рассказывать_шаги_дальше_ведущего(script):
-    """Есть запрет рассказывать содержание шагов, стоящих дальше ведущего."""
+def test_шапка_не_убегать_вперёд_предпочтение(script):
+    """В шапке — предпочтение не убегать далеко вперёд по скрипту."""
     block = steps_block(
         [script.step("city"), script.step("who_studies")],
         {},
         {},
-        attempts={"city": 1},
-        new_step_id=None,
     )
     lowered = block.lower()
-    assert "ведущему шагу" in lowered or "ведущий шаг" in lowered
-    assert "не рассказывать" in lowered
-    assert "вперёд по ним не забегать" in lowered
+    assert "ведущий шаг" in lowered
+    assert "далеко вперёд по скрипту не убегать" in lowered
+    assert "уже спрашивали, ответа нет" not in lowered
     messages = build_turn_messages(
         script=script,
         steps=[script.step("city"), script.step("who_studies")],
@@ -1124,11 +1143,10 @@ def test_шапка_запрет_рассказывать_шаги_дальше_
         facts={},
         history=[],
         asides_done=[],
-        attempts={"city": 1},
     )
     content = messages[0].content.lower()
-    assert "не рассказывать" in content
-    assert "вперёд по ним не забегать" in content
+    assert "далеко вперёд по скрипту не убегать" in content
+    assert "по последней реплике собеседника" in content
 
 
 def test_ведущий_и_следующий_разные_роли_только_вопрос(script):
@@ -1137,8 +1155,6 @@ def test_ведущий_и_следующий_разные_роли_только
         [script.step("included")],
         {},
         {},
-        attempts={"included": 0},
-        new_step_id="included",
         next_step=script.step("theory_format"),
     )
     assert "Ведущий шаг: included" in block

@@ -104,7 +104,6 @@ def test_статика_города_в_системном_сообщении_о
         profile={"caller_name": "Андрей", "city": "Пермь"},
         facts={},
         steps=[step],
-        attempts={"city": 1},
         context_text=ctx.render(),
         asides_done=[],
     )

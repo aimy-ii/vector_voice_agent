@@ -154,21 +154,40 @@ class CityTool:
         """
         _ = slugs
         text = (query or "").strip()
+        preview = text[:60]
         if not text or context.city_slug:
+            log.info(
+                "CityTool: пустой запрос или город уже зафиксирован, query=%r",
+                preview,
+            )
             return ""
         cities = await vector_kb.list_cities()
         if not cities:
+            log.info(
+                "CityTool: пустой перечень городов из справочника, query=%r",
+                preview,
+            )
             return ""
         resolution = await resolve_city(text, cities, resolver=self.resolver)
         if resolution.is_district:
+            log.info("CityTool: резолвер вернул район, query=%r", preview)
             return (
                 "Клиент назвал район внутри города, а не город сети. "
                 "Уточни город обучения, район городом не записывай."
             )
         if not resolution.slug or not resolution.name:
+            log.info(
+                "CityTool: резолвер не дал слаг или название, query=%r",
+                preview,
+            )
             return ""
         city_meta = await vector_kb.get_city(resolution.slug)
         if not city_meta:
+            log.info(
+                "CityTool: справочник не отдал мету города, query=%r slug=%r",
+                preview,
+                resolution.slug,
+            )
             return ""
         price_phrase = _price_phrase(self.script, city_meta.get("price"))
         merged = merge_static(
@@ -179,6 +198,7 @@ class CityTool:
             price_line=price_phrase,
         )
         _apply_merged(context, merged)
+        log.info("CityTool: город найден, slug=%r query=%r", resolution.slug, preview)
         return f"Город: {resolution.name}."
 
 

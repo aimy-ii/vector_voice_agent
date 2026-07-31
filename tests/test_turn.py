@@ -236,7 +236,10 @@ async def test_генератор_плюсует_счётчик_в_момент_
     assert loaded.attempts["name"] == 1
 
 
-async def test_возражение_меняет_состояние(spoken, store, checker, kb, resolvers, model, use_v2):
+async def test_возражение_не_пишет_asides_и_resume(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """commit_node не наполняет asides_done и не пишет resume_step из ответа модели."""
     model["result"] = {
         "understood": [],
         "aside_id": "think",
@@ -252,8 +255,9 @@ async def test_возражение_меняет_состояние(spoken, stor
             "step_status": {"name": "closed", "city": "closed"},
         }
     )
-    assert state["profile"]["urgency"] == "думает"
-    assert "think" in state["asides_done"]
+    assert "think" not in state["asides_done"]
+    assert state.get("resume_step") is None
+    assert state["profile"].get("urgency") != "думает"
 
 
 async def test_модель_не_ответила_в_эфир_идёт_заглушка(

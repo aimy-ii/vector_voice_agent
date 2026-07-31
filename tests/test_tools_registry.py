@@ -99,7 +99,7 @@ async def test_city_faq_игнорирует_slugs():
     assert await tool.run("Медкомиссия?", ctx, slugs=["ignored"]) == "Нужна к практике."
 
 
-async def test_city_tool_слаг_из_перечня_и_статика(monkeypatch, data_dir):
+async def test_city_tool_слаг_из_перечня_и_статика(monkeypatch, data_dir, caplog):
     """Инструмент города возвращает слаг из перечня и кладёт статику."""
     kb = _FakeKB(
         cities=[{"slug": "perm", "name": "Пермь"}],
@@ -121,12 +121,78 @@ async def test_city_tool_слаг_из_перечня_и_статика(monkeypa
     script = build_script(raw)
     tool = CityTool(script, resolver=_Resolver())
     ctx = ConversationContext()
-    text = await tool.run("Пермь", ctx)
+    with caplog.at_level("INFO"):
+        text = await tool.run("Пермь", ctx)
     assert "Пермь" in text
     assert ctx.city_slug == "perm"
     assert ctx.city_name == "Пермь"
     assert "Статика разговора" in ctx.static_text
     assert kb.calls == ["list_cities", "get_city:perm"]
+    assert any("город найден" in rec.message and "perm" in rec.message for rec in caplog.records)
+
+
+async def test_city_tool_логирует_причины_отказа(monkeypatch, data_dir, caplog):
+    """Каждый отказ CityTool.run пишет свою причину в INFO-лог."""
+    raw = JsonScriptSource(data_dir).fetch("vector_ru", "2")
+    script = build_script(raw)
+
+    with caplog.at_level("INFO"):
+        empty = await CityTool(script).run("", ConversationContext())
+    assert empty == ""
+    assert any("пустой запрос или город уже зафиксирован" in r.message for r in caplog.records)
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        already = await CityTool(script).run("Пермь", ConversationContext(city_slug="perm"))
+    assert already == ""
+    assert any("пустой запрос или город уже зафиксирован" in r.message for r in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB(cities=[]))
+    with caplog.at_level("INFO"):
+        no_cities = await CityTool(script).run("Пермь", ConversationContext())
+    assert no_cities == ""
+    assert any("пустой перечень городов" in r.message for r in caplog.records)
+
+    class _District:
+        async def resolve(self, text, cities):
+            return CityResolution(slug=None, name=None, is_district=True)
+
+    caplog.clear()
+    monkeypatch.setattr(
+        "graph.tools_registry.vector_kb",
+        _FakeKB(cities=[{"slug": "perm", "name": "Пермь"}]),
+    )
+    with caplog.at_level("INFO"):
+        district = await CityTool(script, resolver=_District()).run(
+            "Просвещения", ConversationContext()
+        )
+    assert "район" in district.lower()
+    assert any("резолвер вернул район" in r.message for r in caplog.records)
+
+    class _Empty:
+        async def resolve(self, text, cities):
+            return CityResolution(slug=None, name=None, is_district=False)
+
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        no_slug = await CityTool(script, resolver=_Empty()).run("Москва", ConversationContext())
+    assert no_slug == ""
+    assert any("не дал слаг или название" in r.message for r in caplog.records)
+
+    class _Ok:
+        async def resolve(self, text, cities):
+            return CityResolution(slug="perm", name="Пермь", is_district=False)
+
+    caplog.clear()
+    monkeypatch.setattr(
+        "graph.tools_registry.vector_kb",
+        _FakeKB(cities=[{"slug": "perm", "name": "Пермь"}], city=None),
+    )
+    with caplog.at_level("INFO"):
+        no_meta = await CityTool(script, resolver=_Ok()).run("Пермь", ConversationContext())
+    assert no_meta == ""
+    assert any("не отдал мету города" in r.message for r in caplog.records)
 
 
 async def test_facts_tool_зовёт_collect_facts(monkeypatch, data_dir):

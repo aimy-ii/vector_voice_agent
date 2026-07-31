@@ -22,7 +22,9 @@ from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import render_step_text
 
-#: Сколько последних реплик отдаём модели.
+#: Исторический лимит хвоста полной сборки; в ``build_turn_messages``
+#: больше не применяется — история уходит целиком. Короткие сборки
+#: берут свой лимит из настроек.
 HISTORY_TURNS = 8
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
@@ -415,40 +417,26 @@ def _missing_knowledge_line(
     )
 
 
-def _asked_mark(*, is_lead: bool, is_new: bool, attempts: int) -> str:
-    """Пометка к шагу: новый / висящий / ещё не открытый.
-
-    Args:
-        is_lead: True — ведущий (первый) шаг шапки.
-        is_new: True — ведущий взят впервые на этот ход.
-        attempts: сколько раз шаг уже брали.
-
-    Returns:
-        Короткая пометка в скобках у заголовка шага.
-    """
-    if is_lead and is_new:
-        return "новый вопрос"
-    if attempts > 0:
-        return "уже спрашивали, ответа нет"
-    if is_lead:
-        return "новый вопрос"
-    return "впереди — не забегать"
-
-
 def _describe_sales_step(
     step: SalesStep,
     *,
     heading: str,
-    attempts: int = 0,
     context_text: str = "",
     facts: Mapping[str, Any] | None = None,
-    is_lead: bool = True,
-    is_new: bool = False,
 ) -> list[str]:
-    """Собирает строки описания шага продаж: название, требования, образцы."""
-    asked = _asked_mark(is_lead=is_lead, is_new=is_new, attempts=attempts)
+    """Собирает строки описания шага продаж: название, требования, образцы.
+
+    Args:
+        step: шаг продаж.
+        heading: заголовок строки («Ведущий шаг» / «Висящий шаг»).
+        context_text: документ контекста (для проверки ``knowledge``).
+        facts: факты хода.
+
+    Returns:
+        Список строк описания.
+    """
     lines = [
-        f"{heading}: {step.id} ({asked}).",
+        f"{heading}: {step.id}.",
         f"Название: {step.name}",
         f"Требования:\n{step.requirements}",
     ]
@@ -467,10 +455,7 @@ def _describe_step(
     facts: Mapping[str, Any],
     *,
     heading: str,
-    attempts: int = 0,
     context_text: str = "",
-    is_lead: bool = True,
-    is_new: bool = False,
 ) -> list[str]:
     """Собирает строки описания одного шага для промпта.
 
@@ -479,10 +464,7 @@ def _describe_step(
         profile: профиль для ветвления текста.
         facts: факты хода для подстановки.
         heading: заголовок строки («Ведущий шаг» / «Висящий шаг»).
-        attempts: сколько раз шаг уже брали.
         context_text: документ контекста (для проверки ``knowledge``).
-        is_lead: True — ведущий шаг шапки.
-        is_new: True — ведущий взят впервые на этот ход.
 
     Returns:
         Список строк описания.
@@ -491,15 +473,11 @@ def _describe_step(
         return _describe_sales_step(
             step,
             heading=heading,
-            attempts=attempts,
             context_text=context_text,
             facts=facts,
-            is_lead=is_lead,
-            is_new=is_new,
         )
 
-    asked = _asked_mark(is_lead=is_lead, is_new=is_new, attempts=attempts)
-    lines = [f"{heading}: {step.id} ({step.kind}, {asked}).", f"Задача: {step.goal}"]
+    lines = [f"{heading}: {step.id} ({step.kind}).", f"Задача: {step.goal}"]
     if step.why:
         lines.append(f"Зачем: {step.why}")
     text = render_step_text(step, profile)
@@ -599,26 +577,22 @@ def steps_block(
     profile: Mapping[str, str],
     facts: Mapping[str, Any],
     *,
-    attempts: Mapping[str, int],
     context_text: str = "",
-    new_step_id: str | None = None,
     next_step: AnyStep | None = None,
 ) -> str:
-    """Описывает шапку: ведущий текущий, висящие и отдельно следующий.
+    """Описывает шапку: перечень уместных тем и отдельно следующий шаг.
 
-    Ведущий — единственный источник содержания реплики. Следующий шаг
-    (``next_step``) в шапку висящих не входит: из него берётся только
-    завершающий вопрос, когда у ведущего своего нет.
+    Шапка — ориентир, о чём сейчас говорить и спрашивать. Порядок
+    предпочтительный, не жёсткий. Генератор видит историю и сам знает,
+    что уже спрашивали. Следующий шаг (``next_step``) в перечень висящих
+    не входит: из него берётся только завершающий вопрос, когда у
+    ведущего своего нет.
 
     Args:
-        steps: шаги шапки; первый — ведущий, по нему строится реплика.
+        steps: шаги шапки; первый предпочтителен, если по нему есть что сказать.
         profile: профиль.
         facts: факты хода (без перечня городов).
-        attempts: счётчики попыток.
         context_text: документ контекста для проверки нехватки знаний.
-        new_step_id: ведущий шаг, впервые попавший в шапку на этот ход;
-            ``None`` — шапка из висящих или ведущий уже брали; новый вопрос
-            задавать нельзя. Никогда не указывает на шаг дальше первого.
         next_step: первый незакрытый шаг после ведущего по порядку скрипта;
             только источник завершающего вопроса, не предмет рассказа.
 
@@ -631,45 +605,22 @@ def steps_block(
             "подводить разговор к завершению."
         )
 
-    focus_rule = (
-        "Реплика строится по ведущему шагу шапки (первому). Он — единственный "
-        "источник содержания. Содержание висящих и следующего шага не "
-        "рассказывать, пока разговор до них не дошёл — иначе придётся "
-        "повторять их заново, когда очередь дойдёт. "
-        "Если у ведущего нет своего вопроса — закончить реплику вопросом "
+    intro = (
+        "Шапка скрипта на этот ход — перечень того, о чём сейчас уместно "
+        "говорить и спрашивать. Порядок в перечне предпочтительный, но не "
+        "обязательный: разумнее взять первый, если по нему есть что сказать. "
+        "Что уже прозвучало в диалоге, повторно не спрашивать — это видно "
+        "по истории. Далеко вперёд по скрипту не убегать. "
+        "Если в задачах есть и рассказ, и вопрос — рассказать и задать этот "
+        "вопрос в одной реплике, а не разносить на два хода. "
+        "У ведущего нет своего вопроса — закончить реплику вопросом "
         "следующего шага, не раскрывая его содержание. "
-        "К висящим можно вернуться, если человек сам о них заговорит, "
-        "но вперёд по ним не забегать."
+        "К пунктам перечня можно вернуться, если человек сам о них заговорит."
     )
-    if new_step_id is not None:
-        intro = (
-            "Шапка скрипта на этот ход — текущие незакрытые шаги. Новый вопрос — "
-            "только один; спрашивать только то, что в этих шагах, ничего сверх. "
-            "Уже спрашивавшиеся (ответа ещё нет) — незакрытая задача: "
-            "вернуться к ним после побочного обмена. Не затыкать ими каждую реплику. "
-            "Если в задачах есть и рассказ, и вопрос — рассказать и задать этот "
-            "вопрос в одной реплике, а не разносить на два хода. "
-            f"{focus_rule}"
-        )
-    else:
-        intro = (
-            "Шапка скрипта на этот ход — текущие незакрытые шаги. Новых вопросов "
-            "на этот ход нет: ни одного нового вопроса не задавать и не придумывать. "
-            "Работать с тем, что уже висит: помочь человеку ответить, "
-            "переформулировать проще, снять затруднение, дать недостающий факт. "
-            "Ход к собеседнику делать по висящему шагу, а не новой темой. "
-            "Уже спрашивавшиеся (ответа ещё нет) — незакрытая задача: "
-            "вернуться к ним после побочного обмена. Не затыкать ими каждую реплику. "
-            "Если в задачах есть и рассказ, и вопрос — рассказать и задать этот "
-            "вопрос в одной реплике, а не разносить на два хода. "
-            f"{focus_rule}"
-        )
     lines = [intro]
     head_ids = {step.id for step in steps}
     for index, step in enumerate(steps):
         is_lead = index == 0
-        count = int(attempts.get(step.id, 0))
-        is_new = is_lead and (step.id == new_step_id if new_step_id is not None else count == 0)
         lines.append("")
         lines.extend(
             _describe_step(
@@ -677,16 +628,24 @@ def steps_block(
                 profile,
                 facts,
                 heading="Ведущий шаг" if is_lead else "Висящий шаг",
-                attempts=count,
                 context_text=context_text,
-                is_lead=is_lead,
-                is_new=is_new,
             )
         )
     # Следующий — не в шапке висящих: только вопрос, без предмета рассказа.
     if next_step is not None and next_step.id not in head_ids:
         lines.append("")
         lines.extend(_describe_next_step_for_question(next_step, profile, facts))
+    lines.append("")
+    lines.append(
+        "Жёсткий запрет: не называть цифр, цен, сроков, адресов, дат и "
+        "названий, которых нет в переданных данных."
+    )
+    lines.append(
+        "Если по шагам перечня сказать нечего, реплика строится по последней "
+        "реплике собеседника — ответить на сказанное по-человечески и мягко "
+        "вернуть разговор к делу. Молчать, придумывать факты и обещать "
+        "сходить куда-то за данными нельзя."
+    )
     return "\n".join(lines)
 
 
@@ -696,7 +655,6 @@ def step_block(
     facts: Mapping[str, Any],
     *,
     next_step: AnyStep | None = None,
-    attempts: Mapping[str, int] | None = None,
     context_text: str = "",
 ) -> str:
     """Совместимая обёртка: ведущий шаг и отдельно следующий для вопроса.
@@ -706,20 +664,16 @@ def step_block(
         profile: профиль.
         facts: факты хода.
         next_step: следующий шаг или None; не висящий, а источник вопроса.
-        attempts: счётчики попыток.
         context_text: документ контекста.
 
     Returns:
         Текстовый блок шапки.
     """
-    counts = attempts or {}
     return steps_block(
         [step],
         profile,
         facts,
-        attempts=counts,
         context_text=context_text,
-        new_step_id=step.id,
         next_step=next_step,
     )
 
@@ -970,12 +924,13 @@ def build_waiting_messages(
     step: AnyStep | None,
     history_limit: int,
     turn_kind: str = "client",
+    context_text: str = "",
 ) -> list[BaseMessage]:
     """Собирает укороченный запрос к генератору для реплики ожидания.
 
-    Реплика короткая и нужна быстро, поэтому в промпт не идут статика
-    города, факты и шапка шагов: только правила речи, ведущий шаг одной
-    строкой, что уточняется, и хвост диалога.
+    Реплика короткая и нужна быстро, поэтому в промпт не идут факты
+    и шапка шагов: только правила речи, уже добытый контекст, ведущий
+    шаг одной строкой, что уточняется, и хвост диалога.
 
     Args:
         script: скомпилированный скрипт.
@@ -985,6 +940,7 @@ def build_waiting_messages(
         step: ведущий шаг, чтобы не терять нить.
         history_limit: сколько последних сообщений оставить.
         turn_kind: ``client`` или ``continuation``.
+        context_text: уже добытый контекст (статика и динамика).
 
     Returns:
         Список сообщений: одно системное и обрезанный хвост истории.
@@ -1009,6 +965,9 @@ def build_waiting_messages(
     cont = continuation_block(turn_kind=turn_kind)
     if cont:
         lines.append(cont)
+    ctx = context_block(context_text)
+    if ctx:
+        lines.append(ctx)
     if step is not None:
         name = getattr(step, "name", None) or getattr(step, "goal", None) or step.id
         lines.append(f"Ведущий шаг: {step.id} — {name}.")
@@ -1033,9 +992,7 @@ def build_turn_messages(
     asides_done: Sequence[str],
     next_step: AnyStep | None = None,
     context_text: str = "",
-    attempts: Mapping[str, int] | None = None,
     dynamic_status: str = "",
-    new_step_id: str | None = None,
     pending_fields: Sequence[str] = (),
     turn_kind: str = "client",
     closed_steps: Sequence[AnyStep] = (),
@@ -1044,7 +1001,7 @@ def build_turn_messages(
 
     Порядок: персона + естественность + unknown → статика контекста →
     профиль → факты хода → шапка → возражения → инструкция схемы →
-    хвост истории. Ветка ожидания сюда не входит.
+    история целиком. Ветка ожидания сюда не входит.
 
     Args:
         script: скомпилированный скрипт.
@@ -1052,24 +1009,19 @@ def build_turn_messages(
         step: ведущий шаг (совместимость).
         profile: собранный профиль.
         facts: факты хода.
-        history: история звонка без системных сообщений.
+        history: история звонка без системных сообщений; уходит целиком.
         asides_done: отработанные возражения.
         next_step: следующий шаг; только источник завершающего вопроса,
             в шапку висящих не входит.
         context_text: документ контекста.
-        attempts: счётчики попыток.
         dynamic_status: статус динамики контекста (``готово`` / ``не нашлось``).
-        new_step_id: ведущий шаг, впервые взятый в шапку на этот ход; ``None`` —
-            ведущий уже висящий или шапка пуста; новый вопрос задавать нельзя.
-            Не указывает на шаг дальше первого в шапке.
         pending_fields: поля профиля, которые сейчас разбираются.
         turn_kind: ``client`` или ``continuation``.
         closed_steps: шаги, уже закрытые к этому ходу.
 
     Returns:
-        Список сообщений: одно системное и хвост истории.
+        Список сообщений: одно системное и полная история.
     """
-    counts = dict(attempts or {})
     head: list[AnyStep]
     if steps is not None:
         head = list(steps)
@@ -1080,10 +1032,9 @@ def build_turn_messages(
         head = []
 
     ask_for_move = bool(head)
-    pending_only = ask_for_move and new_step_id is None
     blocks: list[str] = [
         persona_block(),
-        naturalness_block(ask_for_move=ask_for_move, pending_only=pending_only),
+        naturalness_block(ask_for_move=ask_for_move, pending_only=False),
         unknown_block(script),
     ]
     closed = closed_steps_block(closed_steps)
@@ -1112,9 +1063,7 @@ def build_turn_messages(
             head,
             profile,
             facts,
-            attempts=counts,
             context_text=ctx_for_steps,
-            new_step_id=new_step_id,
             next_step=next_step,
         )
     )
@@ -1125,7 +1074,7 @@ def build_turn_messages(
         "вслух: живой разговорный русский, без списков и канцелярита."
     )
 
-    tail = list(history)[-HISTORY_TURNS:]
+    tail = list(history)
     if not tail:
         tail = [HumanMessage(content="(клиент молчит)")]
     return [SystemMessage(content="\n\n".join(blocks)), *tail]

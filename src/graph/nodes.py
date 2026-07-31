@@ -215,10 +215,6 @@ def _lead_from_progress(
         pending_soft_cap=settings.pending_steps_soft_cap,
     )
     step = head[0] if head else None
-    if state.get("resume_step") and state["resume_step"] in script.steps:
-        resume = script.step(state["resume_step"])
-        if any(s.id == resume.id for s in head):
-            step = resume
     return head, step
 
 
@@ -641,6 +637,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             step=lead,
             history_limit=settings.waiting_history_limit,
             turn_kind=turn_kind,
+            context_text=context_text,
         )
     elif prompt_kind == "filler":
         messages = build_filler_messages(
@@ -667,9 +664,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             asides_done=list(state.get("asides_done") or []),
             next_step=next_step,
             context_text=context_text,
-            attempts=state.get("step_attempts") or {},
             dynamic_status=dynamic_status,
-            new_step_id=state.get("head_new_step"),
             pending_fields=pending_fields,
             turn_kind=turn_kind,
             closed_steps=closed_steps,
@@ -684,6 +679,8 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         prompt=prompt_kind,
         reason=prompt_reason,
     )
+    if messages:
+        log.debug("[prompt|done] %s", messages[0].content)
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
 
     def _on_delta(delta: str) -> None:
@@ -722,7 +719,6 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     if integrity:
         stage("respond", integrity, "done")
         log.warning("%s", integrity)
-    stage("respond", f"разбор: вопрос {result.aside_id or '—'}", "done", aside_id=result.aside_id)
     return {
         "turn_result": result.model_dump(),
         "spoken": list(state.get("spoken") or []) + spoken,
@@ -745,7 +741,6 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     """Раскладывает разобранное по состоянию; в конце звонка — слепок в тред."""
     script = _script_of(state)
     step = _current_step(state)
-    result = dict(state.get("turn_result") or {})
     progress = await _load_progress(state)
     turn_kind = str(state.get("turn_kind") or "client")
     no_client_reply = _no_client_reply(turn_kind)
@@ -754,20 +749,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     asides_done = list(state.get("asides_done") or [])
     patch: dict[str, Any] = {}
 
-    aside_id = result.get("aside_id")
-    if aside_id and aside_id not in asides_done:
-        record = script.aside(str(aside_id))
-        if record is not None:
-            asides_done.append(str(aside_id))
-            for key, value in getattr(record, "sets", {}).items():
-                if script.is_sales or key in script.profile_fields:
-                    profile[key] = value
-
     spoken_text = "".join(list(state.get("spoken") or [])).strip()
-    resume: str | None = None
-    if not no_client_reply and step is not None and aside_id and result.get("resume_step", True):
-        if progress.status.get(step.id) != "closed":
-            resume = step.id
 
     messages = list(state.get("messages") or [])
     if spoken_text:
@@ -809,7 +791,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         {
             "profile": profile,
             "asides_done": asides_done,
-            "resume_step": resume,
+            "resume_step": None,
             "outcome": profile.get("outcome") or state.get("outcome"),
             "messages": messages,
             "pending_step": pending_step,

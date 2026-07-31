@@ -97,8 +97,8 @@ def test_промпт_готово_и_не_требуется_как_обычн�
         assert "Город: Пермь" in messages[0].content
 
 
-def test_waiting_короче_полного(script):
-    """Укороченный промпт ожидания не тянет статику и факты."""
+def test_waiting_с_контекстом_короче_полного(script):
+    """Укороченный промпт ожидания тянет контекст, но не факты и шапку."""
     history = [HumanMessage(content=f"реплика {i}") for i in range(6)]
     waiting = build_waiting_messages(
         script,
@@ -107,6 +107,7 @@ def test_waiting_короче_полного(script):
         pending_fields=["branch"],
         step=script.step("branch"),
         history_limit=4,
+        context_text="Статика города: Пермь, филиалы по адресам…",
     )
     full = build_turn_messages(
         script=script,
@@ -118,11 +119,11 @@ def test_waiting_короче_полного(script):
         context_text="Статика города: Пермь, филиалы по адресам…",
         pending_fields=["branch"],
     )
-    assert "Статика города" not in waiting[0].content
+    assert "Статика города" in waiting[0].content
     assert "Стоимость — 10000" not in waiting[0].content
     assert "Шапка скрипта" not in waiting[0].content
     assert len(waiting) - 1 <= 4
-    assert len(waiting[0].content) * 2 < len(full[0].content)
+    assert len(waiting[0].content) < len(full[0].content)
 
 
 async def test_генератор_без_ready_hash_берёт_waiting(
