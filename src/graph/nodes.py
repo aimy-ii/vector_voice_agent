@@ -44,7 +44,9 @@ from graph.facts import needs_of
 from graph.history import (
     last_agent_text,
     last_user_text,
+    normalize,
     strip_system,
+    text_of,
 )
 from graph.log_fmt import (
     format_plan_done,
@@ -421,6 +423,30 @@ def call_summary(state: CallState) -> dict[str, Any]:
     )
 
 
+def _tail_has_agent_reply(messages: Sequence[Any], reply: str) -> bool:
+    """Есть ли в хвосте истории последняя реплика бота.
+
+    Смотрит последнюю AI-реплику (хвостовой human не мешает). Сравнение
+    через ``normalize``: снимок бота и запись мозга могут отличаться
+    пробелами и знаками.
+    """
+    target = normalize(reply)
+    if not target:
+        return True
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            return normalize(text_of(message)) == target
+    return False
+
+
+def _restore_last_agent_reply(messages: list[Any], reply: str) -> list[Any]:
+    """Дописывает реплику бота в хвост, перед хвостовым human если он есть."""
+    agent = AIMessage(content=reply)
+    if messages and getattr(messages[-1], "type", None) == "human":
+        return list(messages[:-1]) + [agent, messages[-1]]
+    return list(messages) + [agent]
+
+
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое."""
     ctx: CallContext = runtime.context or {}
@@ -436,6 +462,11 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch["script_version"] = script.version
 
     messages = strip_system(state.get("messages") or [])
+    # Снимок бота может затереть произнесённое: commit кладёт его в
+    # last_agent_reply, здесь возвращаем в хвост, если пропало.
+    last_reply = ((await _load_context(state)).last_agent_reply or "").strip()
+    if last_reply and not _tail_has_agent_reply(messages, last_reply):
+        messages = _restore_last_agent_reply(messages, last_reply)
     patch["messages"] = messages
     patch["turn"] = int(state.get("turn") or 0) + 1
     patch["facts"] = {}
