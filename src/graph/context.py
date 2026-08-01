@@ -68,6 +68,7 @@ class ConversationContext(BaseModel):
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
+        branch_candidates: слаги филиалов, отобранные инструментом ``branches``.
         city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
         frozen: статика уже зафиксирована и не пересобирается.
     """
@@ -87,6 +88,7 @@ class ConversationContext(BaseModel):
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
+    branch_candidates: list[str] = Field(default_factory=list)
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     frozen: bool = False
 
@@ -408,6 +410,7 @@ class ContextState(BaseModel):
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
+    branch_candidates: list[str] = Field(default_factory=list)
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     frozen: bool = False
 

@@ -281,13 +281,15 @@ def test_v4_сводка_непустая_и_в_скомпилированном
 
 
 def test_messenger_подтверждает_номер_а_не_спрашивает_вслепую(script_v4):
-    """Шаг messenger: подтвердить номер звонка; вслепую номер не просить."""
+    """Шаг messenger: сначала этот номер или другой; номер — только после «на другой»."""
     step = script_v4.step("messenger")
     req = step.requirements.lower()
+    assert "первым делом" in req
     assert "с которого" in req and "звон" in req
-    assert "писать на него или на другой" in req
-    assert "номер спрашивать только" in req
+    assert "на него или на другой" in req
+    assert "только после" in req
     assert "на другой" in req
+    assert "ошибка" in req
     for blind in (
         "назовите номер",
         "продиктуйте номер",

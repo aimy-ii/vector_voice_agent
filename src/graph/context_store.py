@@ -23,7 +23,15 @@ KEY_PREFIX = "vector:context:"
 
 #: Поля статики: пишет прогрев и разбор города/филиала в лайв-канале.
 CONTEXT_FIELDS_STATIC: frozenset[str] = frozenset(
-    {"static_text", "city_slug", "city_name", "branch_slug", "city_faq", "frozen"}
+    {
+        "static_text",
+        "city_slug",
+        "city_name",
+        "branch_slug",
+        "branch_candidates",
+        "city_faq",
+        "frozen",
+    }
 )
 #: Поля динамики: пишет контекстер и лайв-канал.
 CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(

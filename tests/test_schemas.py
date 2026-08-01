@@ -36,10 +36,15 @@ def test_turn_result_принимает_признак_завершения():
 
 
 def test_описание_признака_завершения_требует_прощания():
-    """Признак только после прозвучавшего прощания; встреча — не основание."""
+    """Признак только после прощания собеседника; договорённость и своё — нет."""
     description = TurnResult.model_fields["conversation_ended"].description or ""
     lower = description.lower()
-    assert "прощание уже прозвучало" in lower or "попрощался" in lower
+    assert "последней реплике собеседника" in lower
+    assert "прощание" in lower
+    assert "слова человека" in lower or "именно слова человека" in lower
+    assert "собственная прощальная" in lower or "собственная прощальная фраза" in lower
     assert "договорённость о встрече" in lower or "договоренность о встрече" in lower
+    assert "если появятся вопросы" in lower
     assert "не являются" in lower
-    assert "не ставить" in lower
+    assert "сомневаешься" in lower or "не ставить" in lower
+    assert "лишний ход" in lower or "брошенная трубка" in lower

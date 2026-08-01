@@ -8,7 +8,13 @@ import pytest
 
 from graph.context import ConversationContext
 from graph.resolvers import CityResolution
-from graph.tools_registry import BranchesTool, CityFaqTool, CityTool, FactsTool
+from graph.tools_registry import (
+    BranchDetailsTool,
+    BranchesTool,
+    CityFaqTool,
+    CityTool,
+    FactsTool,
+)
 from script.build import build_script
 from script.source import JsonScriptSource
 
@@ -22,10 +28,14 @@ class _FakeKB:
         branches: list[dict[str, Any]] | None = None,
         cities: list[dict[str, Any]] | None = None,
         city: dict[str, Any] | None = None,
+        branch: dict[str, Any] | None = None,
+        branches_by_slug: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._branches = branches or []
         self._cities = cities or []
         self._city = city
+        self._branch = branch
+        self._branches_by_slug = branches_by_slug or {}
         self.calls: list[str] = []
         self.model_calls = 0
         self.collect_needs: list[str] | None = None
@@ -44,7 +54,9 @@ class _FakeKB:
 
     async def get_branch(self, branch_slug: str) -> dict[str, Any] | None:
         self.calls.append(f"get_branch:{branch_slug}")
-        return None
+        if branch_slug in self._branches_by_slug:
+            return self._branches_by_slug[branch_slug]
+        return self._branch
 
 
 @pytest.fixture()
@@ -325,3 +337,116 @@ async def test_facts_tool_зовёт_collect_facts(monkeypatch, data_dir):
     assert seen["needs"] == ["price", "city_meta"]
     assert seen["city_slug"] == "perm"
     assert "price_line" in text
+
+
+def _branch_meta(slug: str, *, address: str, landmark: str = "") -> dict[str, Any]:
+    """Мета филиала для офлайн-тестов BranchDetailsTool."""
+    return {
+        "slug": slug,
+        "address": address,
+        "landmark": landmark,
+        "working_hours": "10:00-20:00",
+    }
+
+
+async def test_branch_details_пустой_слаг_берёт_первый_кандидат(monkeypatch, caplog):
+    """Без слага в контексте и аргументе — первый из отобранных ранее."""
+    meta = _branch_meta("spb_north", address="пр. Просвещения, 1", landmark="метро")
+    kb = _FakeKB(
+        branches_by_slug={
+            "spb_north": meta,
+            "spb_other": _branch_meta("spb_other", address="ул. Другая"),
+        }
+    )
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    ctx = ConversationContext(
+        city_slug="spb",
+        city_name="Санкт-Петербург",
+        static_text="Статика разговора:\nГород: Санкт-Петербург (слаг spb).",
+        branch_candidates=["spb_north", "spb_other"],
+    )
+    with caplog.at_level("INFO"):
+        text = await BranchDetailsTool().run("Адрес филиала на севере", ctx, slugs=())
+    assert "пр. Просвещения, 1" in text
+    assert ctx.branch_slug == "spb_north"
+    assert kb.calls == ["get_branch:spb_north"]
+    assert any("успех со слагом" in r.message and "spb_north" in r.message for r in caplog.records)
+
+
+async def test_branch_details_явный_слаг_кандидатов_не_подставляет(monkeypatch, caplog):
+    """Явный слаг в аргументе используется; отобранные ранее не берутся."""
+    kb = _FakeKB(
+        branches_by_slug={
+            "spb_explicit": _branch_meta("spb_explicit", address="ул. Явная, 2"),
+            "spb_north": _branch_meta("spb_north", address="пр. Просвещения, 1"),
+        }
+    )
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    ctx = ConversationContext(
+        city_slug="spb",
+        city_name="Санкт-Петербург",
+        static_text="Статика разговора:\nГород: Санкт-Петербург (слаг spb).",
+        branch_candidates=["spb_north"],
+    )
+    with caplog.at_level("INFO"):
+        text = await BranchDetailsTool().run("", ctx, slugs=["spb_explicit"])
+    assert "ул. Явная, 2" in text
+    assert "пр. Просвещения" not in text
+    assert ctx.branch_slug == "spb_explicit"
+    assert kb.calls == ["get_branch:spb_explicit"]
+    assert any(
+        "успех со слагом" in r.message and "spb_explicit" in r.message for r in caplog.records
+    )
+
+
+async def test_branch_details_слагов_нет_нигде(monkeypatch, caplog):
+    """Слагов нет в контексте, аргументе и кандидатах — пустая строка."""
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB())
+    with caplog.at_level("INFO"):
+        empty = await BranchDetailsTool().run("", ConversationContext(), slugs=())
+    assert empty == ""
+    assert any("слага нет нигде" in r.message for r in caplog.records)
+
+
+async def test_branch_details_логирует_причины_отказа(monkeypatch, caplog):
+    """Каждый выход BranchDetailsTool пишет свою причину в INFO-лог."""
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB())
+    with caplog.at_level("INFO"):
+        no_slug = await BranchDetailsTool().run("", ConversationContext(), slugs=())
+    assert no_slug == ""
+    assert any("слага нет нигде" in r.message for r in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB(branch=None))
+    with caplog.at_level("INFO"):
+        missing = await BranchDetailsTool().run(
+            "",
+            ConversationContext(branch_slug="ghost"),
+            slugs=(),
+        )
+    assert missing == ""
+    assert any("справочник не вернул филиал" in r.message for r in caplog.records)
+
+    caplog.clear()
+    meta = _branch_meta("ok", address="ул. Ок, 1")
+    monkeypatch.setattr(
+        "graph.tools_registry.vector_kb",
+        _FakeKB(branches_by_slug={"ok": meta}),
+    )
+    ctx = ConversationContext(
+        city_slug="perm",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        branch_slug="ok",
+    )
+    with caplog.at_level("INFO"):
+        text = await BranchDetailsTool().run("", ctx)
+    assert "ул. Ок, 1" in text
+    assert any("успех со слагом" in r.message and "ok" in r.message for r in caplog.records)
+
+
+async def test_branches_tool_сохраняет_кандидатов(branches_kb: _FakeKB):
+    """Инструмент филиалов кладёт отобранные слаги в контекст."""
+    tool = BranchesTool()
+    ctx = ConversationContext(city_slug="perm")
+    await tool.run("", ctx, slugs=["b", "a"])
+    assert ctx.branch_candidates == ["b", "a"]

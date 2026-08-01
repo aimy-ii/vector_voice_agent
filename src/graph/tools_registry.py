@@ -222,6 +222,8 @@ class BranchesTool:
     ) -> str:
         """Собирает адреса филиалов строго по переданным слагам.
 
+        Успешный отбор сохраняет слаги в ``context.branch_candidates``.
+
         Args:
             query: не используется; отбор уже сделан агентом.
             context: текущий контекст; нужен ``city_slug``.
@@ -248,6 +250,11 @@ class BranchesTool:
                 break
         if not picked:
             return ""
+        context.branch_candidates = [
+            str(branch.get("slug")).strip()
+            for branch in picked
+            if str(branch.get("slug") or "").strip()
+        ]
         parts: list[str] = []
         for branch in picked:
             address = str(branch.get("address") or "").strip()
@@ -314,9 +321,12 @@ class BranchDetailsTool:
     ) -> str:
         """Тянет мету филиала и кладёт её в статику через ``merge_static``.
 
+        Слаг берётся из контекста, иначе из аргумента, иначе — первый из
+        ``branch_candidates``, отобранных инструментом филиалов ранее.
+
         Args:
             query: не используется; оставлен для единого интерфейса.
-            context: контекст с непустым ``branch_slug`` (или ``slugs[0]``).
+            context: контекст с ``branch_slug`` и/или ``branch_candidates``.
             slugs: необязательный слаг, если в контексте ещё не зафиксирован.
 
         Returns:
@@ -327,12 +337,24 @@ class BranchDetailsTool:
         if not branch_slug and slugs:
             branch_slug = str(slugs[0]).strip()
         if not branch_slug:
+            for candidate in context.branch_candidates or []:
+                text = str(candidate).strip()
+                if text:
+                    branch_slug = text
+                    break
+        if not branch_slug:
+            log.info("BranchDetailsTool: слага нет нигде")
             return ""
         branch = await vector_kb.get_branch(branch_slug)
         if not branch:
+            log.info(
+                "BranchDetailsTool: справочник не вернул филиал, slug=%r",
+                branch_slug,
+            )
             return ""
         merged = merge_static(context, branch_slug=branch_slug, branch_meta=branch)
         _apply_merged(context, merged)
+        log.info("BranchDetailsTool: успех со слагом=%r", branch_slug)
         return format_branch_static(branch, branch_slug=branch_slug)
 
 
