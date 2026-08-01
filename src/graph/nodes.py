@@ -943,20 +943,19 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     patch.update(progress_patch)
 
-    # Разговор закончен — по решению модели; один раз выставленный признак не снимаем.
-    turn_result = state.get("turn_result") or {}
-    model_ended = bool(turn_result.get("conversation_ended"))
+    # Разговор закончен — по флагу из кеша контекста (фоновый агент прощания).
+    # На продолжении и молчании флаг не трогаем: реплики человека не было.
     conversation_ended = bool(state.get("conversation_ended"))
-    if model_ended:
-        conversation_ended = True
-        patch["conversation_ended"] = True
-
     conversation_context = state.get("conversation_context") or {}
-    if spoken_text:
+    if not no_client_reply or spoken_text:
         ctx = await _load_context(state)
-        ctx = ctx.model_copy(update={"last_agent_reply": spoken_text})
-        ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
-        conversation_context = ctx_patch["conversation_context"]
+        if not no_client_reply:
+            conversation_ended = bool(ctx.conversation_ended)
+            patch["conversation_ended"] = conversation_ended
+        if spoken_text:
+            ctx = ctx.model_copy(update={"last_agent_reply": spoken_text})
+            ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
+            conversation_context = ctx_patch["conversation_context"]
 
     # Пустой эфир — pending не ставим. Без реплики клиента шаги не трогаем.
     pending_step = step.id if step is not None and spoken_text and not no_client_reply else None

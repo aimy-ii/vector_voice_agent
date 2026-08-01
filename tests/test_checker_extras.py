@@ -171,6 +171,7 @@ async def test_live_check_прогрев_вызывается_и_ошибка_г
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4

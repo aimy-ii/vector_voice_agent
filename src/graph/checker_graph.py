@@ -1,8 +1,9 @@
 r"""Служебный граф чекера в реальном времени.
 
 Лайв-канал: закрывает шаги, зовёт контекстер за данными, разбирает профиль,
-греет контекст под предстоящий шаг. В ``messages`` не пишет, реплик в эфир
-не выдаёт. Ошибка только в лог — ход генератора не роняет.
+решает конец разговора, греет контекст под предстоящий шаг. В ``messages``
+не пишет, реплик в эфир не выдаёт. Ошибка только в лог — ход генератора
+не роняет.
 
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
@@ -30,6 +31,7 @@ from graph.context import DYN_NONE, DYN_SEARCHING, DYN_WORKING, merge_static
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import reply_hash, run_contexter
 from graph.facts import knowledge_of, needs_of
+from graph.farewell_agent import decide_farewell
 from graph.log_fmt import format_check_done, format_live_check_state
 from graph.nodes import (
     _call_id,
@@ -246,7 +248,7 @@ async def _warmup_next_step(
 
 
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Один служебный проход: контекстер → чекер → профиль → прогрев.
+    """Один служебный проход: контекстер → чекер → профиль → прощание → прогрев.
 
     Первым делом ставит статус «в работе» с хешем реплики — ход видит,
     что фон уже взял реплику, ещё до профиля и контекстера. Контекстер
@@ -309,6 +311,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
     await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
 
     patch: dict[str, Any] = {}
+    farewell_note = "не вызывался"
     try:
         progress = await _load_progress(state)
         profile = _merge_profile(state, progress)
@@ -377,6 +380,25 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         patch.update(progress_patch)
         patch["profile"] = profile
 
+        turn_kind = str(state.get("turn_kind") or "client").strip().lower()
+        no_client_reply = turn_kind in {"continuation", "silence"}
+        if no_client_reply:
+            farewell_note = "пропуск: нет реплики человека"
+        elif len(history) < settings.farewell_min_messages:
+            farewell_note = (
+                f"пропуск: реплик {len(history)} < порога {settings.farewell_min_messages}"
+            )
+        elif not reply.strip():
+            farewell_note = "пропуск: пустая реплика"
+        else:
+            decision = await decide_farewell(reply, history=history)
+            if decision is None:
+                farewell_note = "ошибка агента, флаг не тронут"
+            else:
+                ended = bool(decision.conversation_ended)
+                ctx = ctx.model_copy(update={"conversation_ended": ended})
+                farewell_note = f"закончен={ended}"
+
         ctx = await _warmup_next_step(
             state,
             progress=progress,
@@ -397,7 +419,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         stage(
             "live-check",
             f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
-            f"{subject_part}; {elapsed_ms} мс",
+            f"{subject_part}; прощание: {farewell_note}; {elapsed_ms} мс",
             "done",
         )
         return patch

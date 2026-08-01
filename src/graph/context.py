@@ -70,6 +70,8 @@ class ConversationContext(BaseModel):
         branch_slug: слаг выбранного филиала.
         branch_candidates: слаги филиалов, отобранные инструментом ``branches``.
         city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
+        conversation_ended: разговор закончен по решению фонового агента
+            прощания; переставляется на каждом ходу с репликой человека.
         frozen: статика уже зафиксирована и не пересобирается.
     """
 
@@ -90,6 +92,7 @@ class ConversationContext(BaseModel):
     branch_slug: str | None = None
     branch_candidates: list[str] = Field(default_factory=list)
     city_faq: list[dict[str, str]] = Field(default_factory=list)
+    conversation_ended: bool = False
     frozen: bool = False
 
     def render(self) -> str:
@@ -412,6 +415,7 @@ class ContextState(BaseModel):
     branch_slug: str | None = None
     branch_candidates: list[str] = Field(default_factory=list)
     city_faq: list[dict[str, str]] = Field(default_factory=list)
+    conversation_ended: bool = False
     frozen: bool = False
 
     def to_context(self) -> ConversationContext:

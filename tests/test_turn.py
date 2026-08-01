@@ -1860,10 +1860,10 @@ def _all_steps_closed(script) -> dict[str, str]:
     return {step_id: "closed" for step_id in script.step_order}
 
 
-async def test_commit_признак_модели_ставит_conversation_ended(
+async def test_commit_флаг_из_контекста_ставит_conversation_ended(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, script, ctx_store, caplog
 ):
-    """Генератор вернул признак завершения — флаг в состоянии, шаги не важны."""
+    """Флаг в кеше контекста — копируется в состояние треда."""
     import logging
 
     from graph.context import ConversationContext
@@ -1878,7 +1878,7 @@ async def test_commit_признак_модели_ставит_conversation_ende
         "local",
         ScriptProgress(status=status, attempts={}, taken_turn={}),
     )
-    await ctx_store.save("local", ConversationContext())
+    await ctx_store.save("local", ConversationContext(conversation_ended=True))
     spoken_text = "До свидания, хорошего дня."
     state = {
         **new_state_defaults(),
@@ -1886,7 +1886,8 @@ async def test_commit_признак_модели_ставит_conversation_ende
         "script_id": "vector_ru",
         "script_version": "2",
         "spoken": [spoken_text],
-        "turn_result": {"reply": spoken_text, "conversation_ended": True},
+        "turn_result": {"reply": spoken_text},
+        "turn_kind": "client",
         "conversation_context": {},
     }
     with caplog.at_level(logging.INFO):
@@ -1902,10 +1903,10 @@ async def test_commit_признак_модели_ставит_conversation_ende
     assert "разговор закончен=True" in commit_msgs[0]
 
 
-async def test_commit_без_признака_не_ставит_флаг(
+async def test_commit_без_флага_в_контексте_ставит_ложь(
     spoken, store, checker, kb, resolvers, model, use_v2, script, ctx_store
 ):
-    """Генератор признак не вернул — состояние не меняется."""
+    """В контексте False — в состояние уходит False, ответ модели не читаем."""
     from graph.context import ConversationContext
     from graph.state import new_state_defaults
     from script.store import ScriptProgress
@@ -1914,7 +1915,7 @@ async def test_commit_без_признака_не_ставит_флаг(
         "local",
         ScriptProgress(status=_all_steps_closed(script), attempts={}, taken_turn={}),
     )
-    await ctx_store.save("local", ConversationContext())
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
     spoken_text = "Могу ещё чем-то помочь?"
     state = {
         **new_state_defaults(),
@@ -1922,17 +1923,19 @@ async def test_commit_без_признака_не_ставит_флаг(
         "script_id": "vector_ru",
         "script_version": "2",
         "spoken": [spoken_text],
-        "turn_result": {"reply": spoken_text},
+        "turn_result": {"reply": spoken_text, "conversation_ended": True},
+        "turn_kind": "client",
+        "conversation_ended": True,
         "conversation_context": {},
     }
     out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
-    assert "conversation_ended" not in out
+    assert out.get("conversation_ended") is False
 
 
-async def test_commit_признак_сохраняется_на_следующих_ходах(
+async def test_commit_флаг_переставляется_из_контекста(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
 ):
-    """Признак, выставленный раньше, сохраняется и виден в логе."""
+    """Флаг из контекста переставляет состояние, в том числе обратно в False."""
     import logging
 
     from graph.context import ConversationContext
@@ -1940,7 +1943,7 @@ async def test_commit_признак_сохраняется_на_следующ�
     from graph.state import new_state_defaults
 
     monkeypatch.setattr(nodes_module, "stage", real_stage)
-    await ctx_store.save("local", ConversationContext())
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
     spoken_text = "Если что — звоните."
     state = {
         **new_state_defaults(),
@@ -1949,20 +1952,45 @@ async def test_commit_признак_сохраняется_на_следующ�
         "script_version": "2",
         "spoken": [spoken_text],
         "turn_result": {"reply": spoken_text},
+        "turn_kind": "client",
         "conversation_ended": True,
         "conversation_context": {},
     }
     with caplog.at_level(logging.INFO):
         out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
 
-    assert out.get("conversation_ended") is not False
+    assert out.get("conversation_ended") is False
     commit_msgs = [
         r.message
         for r in caplog.records
         if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
     ]
     assert commit_msgs
-    assert "разговор закончен=True" in commit_msgs[0]
+    assert "разговор закончен=False" in commit_msgs[0]
+
+
+async def test_commit_продолжение_не_трогает_флаг(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+):
+    """На continuation флаг из контекста не читаем и в патч не кладём."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
+    spoken_text = "Ещё момент."
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="угу")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "spoken": [spoken_text],
+        "turn_result": {"reply": spoken_text},
+        "turn_kind": "continuation",
+        "conversation_ended": True,
+        "conversation_context": {},
+    }
+    out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+    assert "conversation_ended" not in out
 
 
 async def test_commit_лог_содержит_разговор_закончен_false(
@@ -1976,7 +2004,7 @@ async def test_commit_лог_содержит_разговор_закончен_
     from graph.state import new_state_defaults
 
     monkeypatch.setattr(nodes_module, "stage", real_stage)
-    await ctx_store.save("local", ConversationContext())
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
     spoken_text = "Как вас зовут?"
     state = {
         **new_state_defaults(),
@@ -1986,6 +2014,7 @@ async def test_commit_лог_содержит_разговор_закончен_
         "current_step": "name",
         "spoken": [spoken_text],
         "turn_result": {"reply": spoken_text},
+        "turn_kind": "client",
         "conversation_context": {},
     }
     with caplog.at_level(logging.INFO):

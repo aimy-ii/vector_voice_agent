@@ -28,6 +28,7 @@ def _offline_context(monkeypatch):
     """Офлайн: кеш контекста в памяти, агенты не зовут модель."""
     from graph import contexter as contexter_module
     from graph import nodes as nodes_module
+    from graph.farewell_agent import FarewellDecision
     from graph.profile_agent import ProfileGuess
 
     mem = MemoryContextStore()
@@ -40,8 +41,12 @@ def _offline_context(monkeypatch):
     async def _no_profile(*_a, **_k):
         return ProfileGuess()
 
+    async def _no_farewell(*_a, **_k):
+        return FarewellDecision(conversation_ended=False)
+
     monkeypatch.setattr("graph.contexter.decide_context", _no_need)
     monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
     return mem
 
 
@@ -237,6 +242,7 @@ async def test_служебный_ниже_порога_модель_не_зов
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert patch_out == {}
@@ -278,6 +284,7 @@ async def test_финальная_реплика_при_нулевом_прир�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -402,6 +409,7 @@ async def test_live_check_новая_реплика_сбрасывает_точ�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -451,6 +459,7 @@ async def test_live_check_прирост_внутри_реплики_сравн�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert patch_out == {}
@@ -487,6 +496,7 @@ async def test_live_check_done_содержит_длительность_мс(sc
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -527,6 +537,7 @@ async def test_live_check_с_приростом_зовёт_чекер_и_пиш�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -565,6 +576,7 @@ async def test_логи_не_роняют_ход_при_пустом_прогр�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -672,6 +684,7 @@ async def test_live_check_контекстер_пишет_динамику_в_к
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
@@ -740,6 +753,7 @@ async def test_live_check_не_тянет_филиалы_пока_агент_н�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         await live_check_node(state, runtime=None)  # type: ignore[arg-type]
@@ -799,6 +813,7 @@ async def test_live_check_при_выбранном_филиале_список_
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         await live_check_node(state, runtime=None)  # type: ignore[arg-type]
@@ -850,6 +865,7 @@ async def test_live_contexter_до_check_pass(script, monkeypatch, _offline_cont
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -904,6 +920,7 @@ async def test_live_check_контекстер_не_пишет_город_и_ф�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -954,6 +971,7 @@ async def test_live_без_разбора_статус_не_трогает(scrip
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -1023,6 +1041,7 @@ async def test_live_lookup_ошибка_даёт_missing(script, monkeypatch, _o
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -1063,6 +1082,7 @@ async def test_live_профиль_попадает_в_кеш_чекера(scrip
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -1263,6 +1283,7 @@ async def test_live_ставит_в_работе_первым_действием
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -1307,6 +1328,7 @@ async def test_live_исключение_снимает_в_работе(script, 
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
