@@ -95,6 +95,10 @@ class VectorKBClient:
     ленивая: соединение создаётся при первом обращении, закрывается через
     `close` при остановке воркера.
 
+    HTTP-клиент создаётся с `trust_env=False`: справочник — локальный сервис
+    внутри сети compose, прокси из окружения предназначен только для внешних
+    сервисов (OpenAI, ElevenLabs) и сюда применяться не должен.
+
     Пример:
 
         kb = VectorKBClient()
@@ -128,13 +132,18 @@ class VectorKBClient:
     # --- соединение -----------------------------------------------------------
 
     async def _init_client(self) -> httpx.AsyncClient:
-        """Создаёт HTTP-клиент при первом обращении."""
+        """Создаёт HTTP-клиент при первом обращении.
+
+        `trust_env=False` отключает чтение прокси из переменных окружения:
+        справочник доступен напрямую внутри сети compose.
+        """
         if self._http is None:
             async with self._lock:
                 if self._http is None:
                     self._http = httpx.AsyncClient(
                         base_url=f"{self._base_url}{API_PREFIX}",
                         timeout=self._timeout,
+                        trust_env=False,
                     )
         return self._http
 

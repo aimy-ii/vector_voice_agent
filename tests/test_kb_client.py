@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from kb.client import LOG_PREFIX, PATH_CITIES, REQUEST_RETRIES, VectorKBClient
+from kb.client import API_PREFIX, LOG_PREFIX, PATH_CITIES, REQUEST_RETRIES, VectorKBClient
 
 
 @pytest.fixture
@@ -25,6 +25,26 @@ def _fake_response(status_code: int, content: bytes) -> httpx.Response:
         content=content,
         request=httpx.Request("GET", f"http://kb.test/api{PATH_CITIES}"),
     )
+
+
+async def test_http_клиент_не_доверяет_окружению(kb_client: VectorKBClient) -> None:
+    """Справочник локальный: прокси из переменных окружения не подхватывается."""
+    http = await kb_client._init_client()
+    try:
+        assert http.trust_env is False
+    finally:
+        await kb_client.close()
+
+
+async def test_базовый_адрес_и_префикс_прежние(kb_client: VectorKBClient) -> None:
+    """Адрес сервиса и префикс API не менялись при отключении прокси из env."""
+    assert API_PREFIX == "/api"
+    assert kb_client._base_url == "http://kb.test"
+    http = await kb_client._init_client()
+    try:
+        assert str(http.base_url).rstrip("/") == f"http://kb.test{API_PREFIX}"
+    finally:
+        await kb_client.close()
 
 
 async def test_запрос_пишет_путь_код_и_размер_тела(
