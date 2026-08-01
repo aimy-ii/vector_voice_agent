@@ -261,3 +261,33 @@ def test_реестр_инструментов_всегда_branches_faq_details
             "branch_details",
             "facts",
         ]
+
+
+def test_v4_сводка_непустая_и_в_скомпилированном(raw_script_v4, script_v4):
+    """Скрипт vector_ru v4 читается; поле сводки непустое и доходит до сборки."""
+    assert raw_script_v4.summary.strip()
+    assert "федеральную сеть автошкол" in raw_script_v4.summary
+    assert script_v4.summary == raw_script_v4.summary
+    assert script_v4.summary.strip()
+
+
+def test_скрипт_без_сводки_читается_с_пустым_полем():
+    """Скрипт продаж без поля summary читается без ошибок; сводка пустая."""
+    payload = {
+        "id": "no_summary",
+        "version": "1",
+        "steps": [
+            {
+                "id": "only",
+                "name": "Шаг",
+                "order": 1,
+                "requirements": "Спросить имя.",
+                "examples": ["Как вас зовут?"],
+                "knowledge": [],
+            }
+        ],
+    }
+    raw = RawSalesScript.model_validate(payload)
+    assert raw.summary == ""
+    compiled = build_script(raw)
+    assert compiled.summary == ""

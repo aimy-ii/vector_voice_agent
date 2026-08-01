@@ -34,8 +34,8 @@ from graph.prompts import (
     steps_block,
 )
 
-#: Число правил речи, включая пункт 0 про примеры.
-_SPEECH_RULES_COUNT = 26
+#: Число правил речи, включая пункт 0 про примеры и пункт про опору на диалог.
+_SPEECH_RULES_COUNT = 27
 
 #: Начала девяти правил про ведение разговора — подряд после «одна тема».
 _LEAD_SPEECH_RULE_STARTS: tuple[str, ...] = (
@@ -1202,7 +1202,7 @@ def test_step_block_с_next_step_текущим_ведущий(script):
 
 
 def test_шапка_не_убегать_вперёд_предпочтение(script):
-    """Реплика — по разделу «СЕЙЧАС»; предпочтительного порядка в тексте нет."""
+    """Текущий шаг отрабатывают; предпочтительного порядка в тексте нет."""
     block = steps_block(
         [script.step("city"), script.step("who_studies")],
         {},
@@ -1228,7 +1228,8 @@ def test_шапка_не_убегать_вперёд_предпочтение(sc
     assert "# ещё не закрыто" in content
     assert script.step("city").goal.lower() in content
     assert script.step("who_studies").goal.lower() in content
-    assert "реплика строится по шагу из раздела" in content
+    assert "отработать, а не произнести" in content
+    assert "реплика строится по шагу" not in content
 
 
 def test_ведущий_и_следующий_разные_роли_только_вопрос(script):
@@ -1795,6 +1796,7 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
 #: Заголовки верхнего уровня полной сборки — порядок разделов.
 _TOP_LEVEL_SECTIONS: tuple[str, ...] = (
     "# КАК РАБОТАТЬ",
+    "# КУДА ВЕДЁМ РАЗГОВОР",
     "# ПРАВИЛА РЕЧИ",
     "# КОНТЕКСТ",
     "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ",
@@ -2136,8 +2138,8 @@ def test_что_дальше_из_next_step_после_разделов_шаго
     assert content.index("# ЕЩЁ НЕ ЗАКРЫТО") < content.index("# ЧТО ДАЛЬШЕ")
 
 
-def test_вступление_строит_реплику_по_сейчас(script_v4):
-    """Во вступлении — строить реплику по шагу из «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ»."""
+def test_вступление_требует_отработать_шаг_а_не_произнести(script_v4):
+    """Во вступлении — отработать шаг, а не произнести; способы через разговор."""
     messages = build_turn_messages(
         script=script_v4,
         steps=[script_v4.step("city"), script_v4.step("who_studies")],
@@ -2147,8 +2149,13 @@ def test_вступление_строит_реплику_по_сейчас(scri
         asides_done=[],
     )
     content = messages[0].content.lower()
-    assert "реплика строится по шагу из раздела «сейчас говорим об этом»" in content
-    assert "к незакрытому возвращаются" in content
+    assert "реплика строится по шагу" not in content
+    assert "отработать, а не произнести" in content
+    assert "ответить на сказанное" in content
+    assert "отработать сомнение" in content
+    assert "наводящий вопрос" in content
+    assert "переспросить" in content
+    assert "к незакрытому из раздела «ещё не закрыто» возвращаются" in content
 
 
 def test_системное_без_предпочтительного_порядка_и_пометок_ведущий(script_v4):
@@ -2171,3 +2178,71 @@ def test_системное_без_предпочтительного_поряд
     assert "Ведущий шаг" not in content
     assert "Висящий шаг" not in content
     assert "# ШАГИ В РАБОТЕ" not in content
+
+
+def test_сводка_в_системном_между_как_работать_и_правилами(script_v4):
+    """Раздел «КУДА ВЕДЁМ РАЗГОВОР» есть, стоит после «КАК РАБОТАТЬ» и до «ПРАВИЛА РЕЧИ»."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "# КУДА ВЕДЁМ РАЗГОВОР" in content
+    how_i = content.index("# КАК РАБОТАТЬ")
+    dest_i = content.index("# КУДА ВЕДЁМ РАЗГОВОР")
+    rules_i = content.index("# ПРАВИЛА РЕЧИ")
+    assert how_i < dest_i < rules_i
+    body = _top_section(content, "КУДА ВЕДЁМ РАЗГОВОР")
+    assert script_v4.summary.strip() in body
+    assert "федеральную сеть автошкол" in body
+
+
+def test_пустая_сводка_раздел_не_выводится(script_v4):
+    """Пустая сводка — раздела «КУДА ВЕДЁМ РАЗГОВОР» нет."""
+    from dataclasses import replace
+
+    empty = replace(script_v4, summary="")
+    messages = build_turn_messages(
+        script=empty,
+        steps=[empty.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "# КУДА ВЕДЁМ РАЗГОВОР" not in messages[0].content
+
+
+def test_правило_опоры_на_диалог_сразу_после_примеров():
+    """Правило про опору на диалог стоит сразу после пункта про примеры."""
+    assert SPEECH_RULES[0].startswith("ВНИМАНИЕ: примеры")
+    dialog = SPEECH_RULES[1]
+    lowered = dialog.lower()
+    assert "к чему пришёл разговор" in lowered
+    assert "шаги обязательны" in lowered
+    assert "возражения" in lowered
+    assert "наводящие вопросы" in lowered
+    assert "переспрос" in lowered
+    assert "способ отработать" in lowered
+    assert SPEECH_RULES[2].startswith("К клиенту обращение только на «Вы»")
+
+
+def test_как_работать_описывает_из_чего_строится_реплика(script_v4):
+    """В «КАК РАБОТАТЬ» — реплика строится из разговора, сводки, известного и шагов."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("greeting")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    how = _top_section(messages[0].content, "КАК РАБОТАТЬ").lower()
+    assert "весь разговор целиком" in how
+    assert "куда ведём разговор" in how
+    assert "реплика строится из всего этого разом" in how
+    assert "реплика строится по шагу" not in messages[0].content.lower()

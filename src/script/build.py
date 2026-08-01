@@ -62,6 +62,8 @@ class CompiledScript:
     profile_fields: Mapping[str, ProfileField]
     helps: Mapping[str, Help]
     objections: Mapping[str, Objection]
+    #: Куда ведём разговор целиком; пусто — в промпт не попадает.
+    summary: str = ""
     #: Поле профиля → шаг, который его заполняет. Нужно планировщику, чтобы
     #: понять, кто закроет недостающее требование. В формате продаж пусто.
     filled_by: Mapping[str, str] = field(default_factory=dict)
@@ -271,6 +273,7 @@ def _build_sales(raw: RawSalesScript) -> CompiledScript:
     return CompiledScript(
         id=raw.id,
         version=raw.version,
+        summary=raw.summary,
         opening_line="",
         params=params_from_settings(),
         steps=steps,
