@@ -55,6 +55,7 @@ class ContextAgent(Protocol):
         tools: Sequence[ContextTool],
         faq_questions: Sequence[str],
         branches: Sequence[Mapping[str, Any]],
+        step_needs: Sequence[str] = (),
     ) -> ContextDecision:
         """Решает, нужен ли контекст и каким инструментом его брать."""
 
@@ -76,6 +77,26 @@ def _format_branches(branches: Sequence[Mapping[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _format_step_needs(step_needs: Sequence[str]) -> str:
+    """Раздел системного сообщения с потребностями ведущего шага.
+
+    Пустой список — пустая строка: раздел в промпт не попадает.
+    """
+    items = [str(n).strip() for n in step_needs if str(n).strip()]
+    if not items:
+        return ""
+    lines = "\n".join(f"- {item}" for item in items)
+    return (
+        "Потребности текущего шага (из скрипта):\n"
+        f"{lines}\n"
+        "Если чего-то из этого списка ещё нет в контексте разговора — за этим "
+        "надо идти, даже если клиент об этом не спрашивал.\n"
+        "Если всё нужное уже есть в контексте — за этим идти не надо.\n"
+        "Реплика клиента по-прежнему главный повод: спросил о чём-то — идём "
+        "за этим в первую очередь."
+    )
+
+
 class LlmContextAgent:
     """Агент контекста на быстрой модели."""
 
@@ -86,8 +107,19 @@ class LlmContextAgent:
         tools: Sequence[ContextTool],
         faq_questions: Sequence[str],
         branches: Sequence[Mapping[str, Any]],
+        step_needs: Sequence[str] = (),
     ) -> ContextDecision:
-        """Один вызов быстрой модели; при ошибке — пустое решение."""
+        """Один вызов быстрой модели; при ошибке — пустое решение.
+
+        Args:
+            reply: реплика клиента.
+            context: текущий контекст разговора.
+            tools: реестр доступных инструментов.
+            faq_questions: тексты вопросов FAQ города.
+            branches: филиалы города для отбора слагов.
+            step_needs: потребности ведущего шага (строки ``knowledge``);
+                пустой список — раздел в промпт не попадает.
+        """
         tool_lines = "\n".join(f"- {t.name}: {t.description}" for t in tools)
         faq_block = ""
         if faq_questions:
@@ -110,6 +142,7 @@ class LlmContextAgent:
                     count_line = line.strip()
                     break
             branches_block = count_line or "Список филиалов не передан."
+        needs_block = _format_step_needs(step_needs)
         system = (
             "Ты решаешь, нужен ли дополнительный контекст под реплику клиента.\n"
             "Общая информация по городу уже лежит в статике — повторно её искать не надо.\n"
@@ -127,6 +160,8 @@ class LlmContextAgent:
             "«филиалы», «медкомиссия», «пересдача». Это будет произнесено вслух "
             "в составе фразы."
         )
+        if needs_block:
+            system = f"{system}\n{needs_block}"
         human = (
             f"Реплика клиента: {reply}\n"
             f"Последняя реплика бота: {bot_reply}\n"
@@ -207,6 +242,7 @@ async def decide_context(
     tools: Sequence[ContextTool],
     *,
     branches: Sequence[Mapping[str, Any]] = (),
+    step_needs: Sequence[str] = (),
     agent: ContextAgent | None = None,
 ) -> ContextDecision:
     """Точка входа агента контекста с валидацией решения.
@@ -216,6 +252,8 @@ async def decide_context(
         context: текущий контекст разговора.
         tools: реестр доступных инструментов.
         branches: филиалы города для отбора слагов; пусто — списка нет.
+        step_needs: потребности ведущего шага (строки ``knowledge`` скрипта);
+            по умолчанию пусто — вызов без них работает как раньше.
         agent: подмена для офлайн-тестов.
 
     Returns:
@@ -224,19 +262,29 @@ async def decide_context(
     """
     worker = agent or LlmContextAgent()
     known = {t.name for t in tools}
+    needs_list = [str(n).strip() for n in step_needs if str(n).strip()]
     try:
-        decision = await worker.decide(reply, context, tools, _faq_questions(context), branches)
+        decision = await worker.decide(
+            reply,
+            context,
+            tools,
+            _faq_questions(context),
+            branches,
+            step_needs=needs_list,
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("Агент контекста упал: %s", exc)
         return ContextDecision()
 
     log.info(
-        "Агент контекста: need=%s tool=%r query=%r subject=%r branch_slugs=%r реплика=%r",
+        "Агент контекста: need=%s tool=%r query=%r subject=%r branch_slugs=%r "
+        "step_needs=%r реплика=%r",
         decision.need,
         decision.tool,
         decision.query,
         decision.subject,
         decision.branch_slugs,
+        needs_list,
         (reply or "")[:80],
     )
 

@@ -345,6 +345,7 @@ async def run_contexter(
     reply: str,
     tools: Sequence[ContextTool],
     needs: Sequence[str] = (),
+    step_needs: Sequence[str] = (),
     profile: Mapping[str, str] | None = None,
     objections: Mapping[str, Objection] | None = None,
     agent: ContextAgent | None = None,
@@ -360,6 +361,8 @@ async def run_contexter(
         reply: реплика клиента на этот ход.
         tools: реестр инструментов.
         needs: потребности справочника по шапке хода (``needs_of``).
+        step_needs: потребности ведущего шага — строки ``knowledge`` скрипта
+            для агента; пустой список — раздела в промпте не будет.
         profile: форма разговора; нужна ``missing_needs`` для города/филиала.
         objections: возражения скрипта; при совпадении агента не зовём.
         agent: подмена агента для офлайн-тестов.
@@ -376,6 +379,7 @@ async def run_contexter(
         return updated
 
     need_list = [str(n).strip() for n in needs if str(n).strip()]
+    agent_step_needs = [str(n).strip() for n in step_needs if str(n).strip()]
     missing = missing_needs(updated, need_list, profile)
     marked_searching = False
     got = False
@@ -423,6 +427,7 @@ async def run_contexter(
         tools,
         agent=agent,
         branches=branches_for_agent,
+        step_needs=agent_step_needs,
     )
 
     if not missing and not decision.need:

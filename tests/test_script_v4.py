@@ -7,7 +7,7 @@ import copy
 import pytest
 
 from core.config import settings
-from graph.facts import needs_of
+from graph.facts import knowledge_of, needs_of
 from graph.prompts import _describe_step, build_turn_messages, unknown_block
 from graph.tools_registry import build_context_tools, needs_from_knowledge
 from script.build import ScriptError, build_script, params_from_settings
@@ -213,10 +213,12 @@ def test_прогрев_по_всему_списку_knowledge(script_v4):
     assert city.knowledge == []
     assert needs_of(city) == []
     assert needs_of(city) == needs_from_knowledge(city.knowledge)
+    assert knowledge_of(city) == []
 
     branch = script_v4.step("branch")
     assert branch.knowledge == []
     assert needs_of(branch) == []
+    assert knowledge_of(branch) == []
 
     terms = script_v4.step("terms")
     needs = needs_of(terms)
@@ -225,6 +227,7 @@ def test_прогрев_по_всему_списку_knowledge(script_v4):
     # Факт без маппинга в справочник не даёт потребности — просто не найдётся.
     assert "время до первого занятия по вождению" in terms.knowledge
     assert needs_from_knowledge(["время до первого занятия по вождению"]) == []
+    assert knowledge_of(terms) == list(terms.knowledge)
 
     included = script_v4.step("included")
     assert "city_meta" in needs_of(included)
@@ -232,6 +235,12 @@ def test_прогрев_по_всему_списку_knowledge(script_v4):
     price = script_v4.step("price")
     assert needs_of(price) == ["price"]
     assert price.knowledge
+    assert knowledge_of(price) == ["стоимость обучения в городе"]
+
+
+def test_knowledge_of_без_шага_пустой():
+    """Без шага knowledge_of пуст."""
+    assert knowledge_of(None) == []
 
 
 def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, data_dir, monkeypatch):

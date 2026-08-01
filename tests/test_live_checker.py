@@ -719,7 +719,7 @@ async def test_live_check_не_тянет_филиалы_пока_агент_н�
     fake_kb = FakeKB(cities=[], city=None, branches=branches, branch=None)
     seen: dict[str, Any] = {}
 
-    async def _decide(reply, context, tools, *, branches=(), agent=None):
+    async def _decide(reply, context, tools, *, branches=(), agent=None, step_needs=()):
         seen["branches"] = list(branches)
         return ContextDecision(need=False)
 
@@ -778,7 +778,7 @@ async def test_live_check_при_выбранном_филиале_список_
     )
     seen: dict[str, Any] = {}
 
-    async def _decide(reply, context, tools, *, branches=(), agent=None):
+    async def _decide(reply, context, tools, *, branches=(), agent=None, step_needs=()):
         seen["branches"] = list(branches)
         return ContextDecision(need=False)
 

@@ -29,7 +29,7 @@ from graph.checker import check_pass
 from graph.context import DYN_NONE, DYN_SEARCHING, DYN_WORKING, merge_static
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import reply_hash, run_contexter
-from graph.facts import needs_of
+from graph.facts import knowledge_of, needs_of
 from graph.log_fmt import format_check_done, format_live_check_state
 from graph.nodes import (
     _call_id,
@@ -127,6 +127,30 @@ def _head_needs(
             if need not in needs:
                 needs.append(need)
     return needs
+
+
+def _lead_knowledge(
+    state: CallState,
+    *,
+    progress,
+    profile: dict[str, str],
+) -> list[str]:
+    """Потребности ведущего шага для агента контекста (``knowledge``).
+
+    Тот же разбор ведущего шага, что у прогрева через
+    ``_lead_from_progress``: агенту нужны строки скрипта, а не ключи
+    справочника.
+
+    Args:
+        state: состояние звонка.
+        progress: прогресс из кеша.
+        profile: слитый профиль.
+
+    Returns:
+        Строки ``knowledge`` ведущего шага; пусто — шага нет или список пуст.
+    """
+    _head, lead = _lead_from_progress(state, progress=progress, profile=profile)
+    return knowledge_of(lead)
 
 
 async def _warmup_next_step(
@@ -300,6 +324,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
 
         script = _script_of_state(state)
         needs = _head_needs(state, progress=progress, profile=profile)
+        step_needs = _lead_knowledge(state, progress=progress, profile=profile)
 
         # Контекстер до check_pass: сам выставит статус и сходит за данными.
         ctx = await run_contexter(
@@ -307,6 +332,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             reply=reply,
             tools=build_context_tools(script),
             needs=needs,
+            step_needs=step_needs,
             profile=profile,
             objections=script.objections,
         )

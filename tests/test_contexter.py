@@ -44,10 +44,20 @@ class _FakeAgent:
         self.error = error
         self.calls: list[str] = []
         self.branches: list = []
+        self.step_needs: list[str] = []
 
-    async def decide(self, reply, context, tools, faq_questions, branches=()) -> ContextDecision:
+    async def decide(
+        self,
+        reply,
+        context,
+        tools,
+        faq_questions,
+        branches=(),
+        step_needs=(),
+    ) -> ContextDecision:
         self.calls.append(reply)
         self.branches = list(branches)
+        self.step_needs = list(step_needs)
         if self.error is not None:
             raise self.error
         return self.decision
@@ -87,12 +97,28 @@ class _FakeTool:
 
 
 def test_run_contexter_без_allow_searching():
-    """Аргумента allow_searching больше нет; needs, profile и branches есть."""
+    """Аргумента allow_searching больше нет; needs, step_needs, profile и branches есть."""
     params = inspect.signature(run_contexter).parameters
     assert "allow_searching" not in params
     assert "branches" in params
     assert "needs" in params
+    assert "step_needs" in params
     assert "profile" in params
+
+
+async def test_step_needs_доходят_до_агента_из_контекстера():
+    """Контекстер передаёт потребности шага в агент."""
+    agent = _FakeAgent(ContextDecision(need=False))
+    needs = ["стоимость обучения в городе"]
+    await run_contexter(
+        ConversationContext(city_slug="perm", static_text="Город: Пермь"),
+        reply="хорошо",
+        tools=[_FakeTool("city")],
+        step_needs=needs,
+        agent=agent,
+    )
+    assert agent.step_needs == needs
+    assert agent.calls == ["хорошо"]
 
 
 async def test_need_false_не_требуется():
