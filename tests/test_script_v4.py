@@ -280,6 +280,35 @@ def test_v4_сводка_непустая_и_в_скомпилированном
     assert script_v4.summary.strip()
 
 
+def test_messenger_подтверждает_номер_а_не_спрашивает_вслепую(script_v4):
+    """Шаг messenger: подтвердить номер звонка; вслепую номер не просить."""
+    step = script_v4.step("messenger")
+    req = step.requirements.lower()
+    assert "с которого" in req and "звон" in req
+    assert "писать на него или на другой" in req
+    assert "номер спрашивать только" in req
+    assert "на другой" in req
+    for blind in (
+        "назовите номер",
+        "продиктуйте номер",
+        "какой у вас номер",
+        "подскажите номер",
+        "скажите номер",
+    ):
+        assert blind not in req
+    examples = " ".join(step.examples).lower()
+    for blind in (
+        "назовите номер",
+        "продиктуйте номер",
+        "какой у вас номер",
+        "подскажите номер",
+        "скажите свой номер",
+    ):
+        assert blind not in examples
+    assert any("с которого" in ex.lower() and "звон" in ex.lower() for ex in step.examples)
+    assert len(script_v4.steps) == 26
+
+
 def test_скрипт_без_сводки_читается_с_пустым_полем():
     """Скрипт продаж без поля summary читается без ошибок; сводка пустая."""
     payload = {

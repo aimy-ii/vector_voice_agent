@@ -33,3 +33,13 @@ def test_turn_result_принимает_признак_завершения():
         {"reply": "До свидания, хорошего дня.", "conversation_ended": True}
     )
     assert parsed.conversation_ended is True
+
+
+def test_описание_признака_завершения_требует_прощания():
+    """Признак только после прозвучавшего прощания; встреча — не основание."""
+    description = TurnResult.model_fields["conversation_ended"].description or ""
+    lower = description.lower()
+    assert "прощание уже прозвучало" in lower or "попрощался" in lower
+    assert "договорённость о встрече" in lower or "договоренность о встрече" in lower
+    assert "не являются" in lower
+    assert "не ставить" in lower
