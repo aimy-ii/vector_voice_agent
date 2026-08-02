@@ -1689,6 +1689,83 @@ def test_filler_содержит_запрет_фактов_вне_данных(s
     assert _HARD_FACT_BAN in filler[0].content
 
 
+def test_filler_ограничение_длины_и_запреты_оценки_рассуждений(script):
+    """Заглушка: лимит длины, без оценки, рассуждений, вопросов и фактов."""
+    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+
+    content = build_filler_messages(
+        script,
+        messages=[HumanMessage(content="Санкт-Петербург")],
+        history_limit=2,
+    )[0].content
+    lowered = content.lower()
+    assert "ограничение длины" in lowered
+    assert "два-три слова" in lowered or "два–три слова" in lowered
+    assert "не оценивать" in lowered
+    assert "замечательный выбор" in lowered
+    assert "звучит основательно" in lowered
+    assert "не рассуждать" in lowered
+    assert "чувствах" in lowered
+    assert "не задавать вопросов" in lowered
+    assert "не сообщать фактов" in lowered
+    assert "не повторять" in lowered
+    assert _HARD_FACT_BAN in content
+    assert "не реплика" in lowered
+
+
+def test_сборки_ожидания_молчания_и_основная_не_из_filler(script):
+    """Ожидание, молчание и основная сборка — свои маркеры, не текст заглушки."""
+    from graph.prompts import (
+        build_filler_messages,
+        build_silence_messages,
+        build_waiting_messages,
+    )
+
+    filler = build_filler_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        history_limit=2,
+    )[0].content.lower()
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("price"),
+        history_limit=2,
+    )[0].content
+    silence = build_silence_messages(
+        script,
+        messages=[AIMessage(content="?")],
+        profile={},
+        step=script.step("price"),
+        attempt=1,
+        history_limit=2,
+    )[0].content
+    full = build_turn_messages(
+        script=script,
+        steps=[script.step("price")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )[0].content
+
+    assert "восьми слов" in waiting.lower() or "восемь слов" in waiting.lower()
+    assert "реплика ожидания" in waiting.lower()
+    assert "ограничение длины" not in waiting.lower()
+    assert "не оценивать сказанное" not in waiting.lower()
+
+    assert "молчание не означает" in silence.lower()
+    assert "ограничение длины" not in silence.lower()
+    assert "не оценивать сказанное" not in silence.lower()
+
+    assert "# КАК РАБОТАТЬ" in full
+    assert "# ПРАВИЛА РЕЧИ" in full
+    assert "ограничение длины" not in full.lower()
+    assert filler.count("ограничение длины") == 1
+
+
 def test_waiting_содержит_запрет_фактов_вне_данных(script):
     """Системное сообщение waiting содержит запрет называть факты вне данных."""
     from graph.prompts import _HARD_FACT_BAN, build_waiting_messages

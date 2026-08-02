@@ -367,3 +367,15 @@ async def test_лестница_истёкший_дедлайн_штатная(
     assert spoken.kinds == ["full"]
     assert out.get("expect_continuation") is False
     assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+
+
+def test_условие_входа_в_лестницу_только_нехватка_данных():
+    """Лестница включается только по нехватке данных ведущего шага."""
+    import inspect
+
+    source = inspect.getsource(nodes_module.respond_node)
+    assert (
+        "use_ladder = bool(lead_missing) and not is_continuation and not is_silence"
+        in source
+    )
+    assert "lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []" in source
