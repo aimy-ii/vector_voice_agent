@@ -56,7 +56,6 @@ from graph.log_fmt import (
 from graph.progress import say, stage
 from graph.prompts import (
     build_filler_messages,
-    build_silence_messages,
     build_turn_messages,
     build_waiting_messages,
 )
@@ -150,21 +149,6 @@ def _turn_kind() -> str:
     if kind in {"continuation", "silence"}:
         return kind
     return "client"
-
-
-def _silence_attempt() -> int:
-    """Номер попытки вернуть человека в разговор при молчании.
-
-    Читает ``silence_attempt`` из ``configurable``. Отсутствует или
-    нечисловое — считать первой попыткой.
-    """
-    raw = _configurable().get("silence_attempt")
-    if raw is None or str(raw).strip() == "":
-        return 1
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 1
 
 
 def _no_client_reply(turn_kind: str) -> bool:
@@ -634,15 +618,6 @@ def _build_respond_messages(
     turn_kind: str,
 ) -> list[Any]:
     """Собирает сообщения генератора для одной ступени."""
-    if prompt_kind == "silence":
-        return build_silence_messages(
-            script,
-            messages=history,
-            profile=profile,
-            step=lead,
-            attempt=_silence_attempt(),
-            history_limit=settings.silence_history_limit,
-        )
     if prompt_kind == "waiting":
         return build_waiting_messages(
             script,
@@ -730,7 +705,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     use_ladder = bool(lead_missing) and not is_continuation and not is_silence
 
     if is_silence:
-        prompt_kind = "silence"
+        # Молчание собирается полным промптом, как обычный ход: короткая
+        # сборка предписывала, что говорить, и выдавала «может, что-то
+        # пояснить» по кругу. Факт «реплики не было» подаёт continuation_block.
+        prompt_kind = "full"
         prompt_reason = "молчание"
         expect_continuation = False
     elif is_continuation:

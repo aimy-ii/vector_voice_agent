@@ -1064,103 +1064,60 @@ def test_build_filler_messages_короче_без_статики_и_приме�
     assert filler[-1].content == "Пермь"
 
 
-def test_build_silence_messages_короче_опирается_на_сказанное(script):
-    """Молчание: без статики/фактов/шапки; опора на сказанное; запрет новых фактов."""
-    from langchain_core.messages import AIMessage, HumanMessage
+def test_continuation_block_факт_молчания_без_предписаний():
+    """continuation_block: факт молчания для continuation/silence, пусто для client."""
+    from graph.prompts import continuation_block
 
-    from core.config import settings
-    from graph.prompts import build_silence_messages, build_turn_messages
-
-    history = [
-        AIMessage(content="Как вас зовут?"),
-        HumanMessage(content="Мария"),
-        AIMessage(content="В каком городе будете учиться?"),
-        HumanMessage(content="Пермь"),
-        AIMessage(content="Обучение под ключ, доплат не будет. Теорию удобнее очно?"),
-        HumanMessage(content="очно"),
-    ]
-    silence = build_silence_messages(
-        script,
-        messages=history,
-        profile={"caller_name": "Мария", "city": "Пермь"},
-        step=script.step("theory_format"),
-        attempt=1,
-        history_limit=settings.silence_history_limit,
+    silence_fact = "Реплики человека не было: он молчит, разговор продолжается."
+    forbidden = (
+        "Комендантская",
+        "Просвещения",
+        "Плохо:",
+        "Хорошо:",
+        "не переспрашивать",
+        "Не здороваться",
     )
-    full = build_turn_messages(
+
+    assert continuation_block(turn_kind="client") == ""
+
+    cont = continuation_block(turn_kind="continuation")
+    assert cont == silence_fact
+    for fragment in forbidden:
+        assert fragment not in cont
+
+    silence = continuation_block(turn_kind="silence")
+    assert silence == cont
+    for fragment in forbidden:
+        assert fragment not in silence
+
+
+def test_build_turn_messages_silence_кладёт_факт_молчания(script):
+    """build_turn_messages: silence кладёт continuation_block, client — нет."""
+    from graph.prompts import build_turn_messages, continuation_block
+
+    silence_fact = continuation_block(turn_kind="silence")
+    assert silence_fact
+
+    with_silence = build_turn_messages(
         script=script,
         steps=[script.step("theory_format")],
-        profile={"caller_name": "Мария", "city": "Пермь"},
-        facts={"price_line": "Стоимость — 43900"},
-        history=history,
+        profile={},
+        facts={},
+        history=[],
         asides_done=[],
-        context_text="Статика: Пермь, автопарк Solaris",
+        turn_kind="silence",
     )
-    content = silence[0].content
-    lowered = content.lower()
-    assert "Статика:" not in content
-    assert "43900" not in content
-    assert "В истории — весь разговор" not in content
-    assert "Требования:" not in content
-    assert "Факты этого хода" not in content
-    assert "опираясь" in lowered or "о чём только что говорили" in lowered
-    assert "новыми фактами" in lowered or "новых фактов" in lowered
-    assert "вернуть" in lowered
-    assert "молчание не означает" in lowered
-    assert "бронировать" in lowered
-    assert "решать за человека" in lowered
-    assert "например" not in lowered
-    assert "дежурные оклики" in lowered
-    assert "алло" in lowered
-    assert "вы тут" in lowered
-    assert len(silence) - 1 == len(history)
-    assert len(silence) - 1 > 4
-    assert silence[-1].content == "очно"
-    assert len(content) * 2 < len(full[0].content)
-
-    long_history = [
-        msg
-        for i in range(7)
-        for msg in (
-            AIMessage(content=f"вопрос {i}?"),
-            HumanMessage(content=f"ответ {i}"),
-        )
-    ]
-    silence_long = build_silence_messages(
-        script,
-        messages=long_history,
+    with_client = build_turn_messages(
+        script=script,
+        steps=[script.step("theory_format")],
         profile={},
-        step=None,
-        attempt=1,
-        history_limit=settings.silence_history_limit,
+        facts={},
+        history=[],
+        asides_done=[],
+        turn_kind="client",
     )
-    assert len(silence_long) - 1 == settings.silence_history_limit
-    assert settings.silence_history_limit > 4
-
-    first = build_silence_messages(
-        script,
-        messages=history,
-        profile={},
-        step=None,
-        attempt=1,
-        history_limit=4,
-    )[0].content.lower()
-    second = build_silence_messages(
-        script,
-        messages=history,
-        profile={},
-        step=None,
-        attempt=2,
-        history_limit=4,
-    )[0].content.lower()
-    assert "первая попытка" in first
-    assert "мягко" in first
-    assert "сформулировать иначе" not in first
-    assert "с другой стороны" in second
-    assert "сформулировать иначе" in second
-    assert "повторять" in second
-    assert "первая попытка" not in second
-    assert "мягко верни" not in second
+    assert silence_fact in with_silence[0].content
+    assert silence_fact not in with_client[0].content
 
 
 def test_шапка_текущим_помечен_первый_не_последний(script):
@@ -1643,40 +1600,6 @@ def test_persona_и_naturalness_суммарно_не_больше_7500():
     assert total <= 7500, total
 
 
-def test_сборка_молчания_запрещает_решать_и_бронировать(script):
-    """Сборка молчания: молчание не согласие; нельзя решать и бронировать."""
-    from graph.prompts import build_silence_messages
-
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="Записать вас на ближайший набор?")],
-        profile={},
-        step=script.step("name"),
-        attempt=1,
-        history_limit=4,
-    )
-    content = silence[0].content.lower()
-    assert "молчание не означает" in content
-    assert "решать за человека" in content
-    assert "бронировать" in content
-    assert "возвращает человека в разговор" in content or "вернуть" in content
-
-
-def test_silence_содержит_запрет_фактов_вне_данных(script):
-    """Системное сообщение молчания содержит запрет называть факты вне данных."""
-    from graph.prompts import _HARD_FACT_BAN, build_silence_messages
-
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="Стоимость пока уточняю.")],
-        profile={},
-        step=script.step("price"),
-        attempt=1,
-        history_limit=4,
-    )
-    assert _HARD_FACT_BAN in silence[0].content
-
-
 def test_filler_содержит_запрет_фактов_вне_данных(script):
     """Системное сообщение filler содержит запрет называть факты вне данных."""
     from graph.prompts import _HARD_FACT_BAN, build_filler_messages
@@ -1713,11 +1636,10 @@ def test_filler_ограничение_длины_и_запреты_оценки
     assert "не реплика" in lowered
 
 
-def test_сборки_ожидания_молчания_и_основная_не_из_filler(script):
-    """Ожидание, молчание и основная сборка — свои маркеры, не текст заглушки."""
+def test_сборки_ожидания_и_основная_не_из_filler(script):
+    """Ожидание и основная сборка — свои маркеры, не текст заглушки."""
     from graph.prompts import (
         build_filler_messages,
-        build_silence_messages,
         build_waiting_messages,
     )
 
@@ -1734,14 +1656,6 @@ def test_сборки_ожидания_молчания_и_основная_не
         step=script.step("price"),
         history_limit=2,
     )[0].content
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="?")],
-        profile={},
-        step=script.step("price"),
-        attempt=1,
-        history_limit=2,
-    )[0].content
     full = build_turn_messages(
         script=script,
         steps=[script.step("price")],
@@ -1755,10 +1669,6 @@ def test_сборки_ожидания_молчания_и_основная_не
     assert "реплика ожидания" in waiting.lower()
     assert "ограничение длины" not in waiting.lower()
     assert "не оценивать сказанное" not in waiting.lower()
-
-    assert "молчание не означает" in silence.lower()
-    assert "ограничение длины" not in silence.lower()
-    assert "не оценивать сказанное" not in silence.lower()
 
     assert "# КАК РАБОТАТЬ" in full
     assert "# ПРАВИЛА РЕЧИ" in full
@@ -1792,7 +1702,6 @@ def test_правила_речи_и_короткие_сборки_без_ука�
     """В SPEECH_RULES и коротких сборках указания «не объявлять о пробеле» нет."""
     from graph.prompts import (
         build_filler_messages,
-        build_silence_messages,
         build_waiting_messages,
     )
 
@@ -1801,14 +1710,6 @@ def test_правила_речи_и_короткие_сборки_без_ука�
         for marker in _MISSING_STATUS_MARKERS:
             assert marker not in lowered, marker
 
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="Стоимость пока уточняю.")],
-        profile={},
-        step=script.step("price"),
-        attempt=1,
-        history_limit=4,
-    )[0].content.lower()
     filler = build_filler_messages(
         script,
         messages=[HumanMessage(content="сколько стоит?")],
@@ -1822,7 +1723,7 @@ def test_правила_речи_и_короткие_сборки_без_ука�
         step=script.step("price"),
         history_limit=2,
     )[0].content.lower()
-    for content in (silence, filler, waiting):
+    for content in (filler, waiting):
         for marker in _MISSING_STATUS_MARKERS:
             assert marker not in content, marker
 
@@ -1832,7 +1733,6 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
     from graph.prompts import (
         _HARD_FACT_BAN,
         build_filler_messages,
-        build_silence_messages,
         build_waiting_messages,
     )
 
@@ -1845,14 +1745,6 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         asides_done=[],
     )[0].content
     assert "из переданных данных как есть" in full
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="?")],
-        profile={},
-        step=script.step("price"),
-        attempt=1,
-        history_limit=2,
-    )[0].content
     filler = build_filler_messages(
         script,
         messages=[HumanMessage(content="?")],
@@ -1866,7 +1758,7 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         step=script.step("price"),
         history_limit=2,
     )[0].content
-    for content in (silence, filler, waiting):
+    for content in (filler, waiting):
         assert _HARD_FACT_BAN in content
 
 
@@ -2101,21 +1993,12 @@ def test_короткие_сборки_без_разметки_разделов(
     """Короткие сборки не изменились: без заголовков разделов полной сборки."""
     from graph.prompts import (
         build_filler_messages,
-        build_silence_messages,
         build_waiting_messages,
     )
 
     filler = build_filler_messages(script, messages=[HumanMessage(content="?")], history_limit=2)[
         0
     ].content
-    silence = build_silence_messages(
-        script,
-        messages=[AIMessage(content="?")],
-        profile={},
-        step=script.step("city"),
-        attempt=1,
-        history_limit=2,
-    )[0].content
     waiting = build_waiting_messages(
         script,
         messages=[HumanMessage(content="?")],
@@ -2124,7 +2007,7 @@ def test_короткие_сборки_без_разметки_разделов(
         step=script.step("city"),
         history_limit=2,
     )[0].content
-    for content in (filler, silence, waiting):
+    for content in (filler, waiting):
         assert "# КАК РАБОТАТЬ" not in content
         assert "# ПРАВИЛА РЕЧИ" not in content
         assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" not in content

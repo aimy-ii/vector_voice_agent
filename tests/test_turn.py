@@ -1650,7 +1650,7 @@ async def test_шапка_помечает_шаги_взятыми_в_работ
 async def test_silence_выбирает_сборку_и_не_растит_счётчики(
     spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
 ):
-    """На turn_kind=silence — silence-сборка, счётчики стоят, expect_continuation=False."""
+    """На turn_kind=silence — полная сборка, счётчики стоят, expect_continuation=False."""
     monkeypatch.setattr(
         "graph.nodes.get_config",
         lambda: {
@@ -1698,17 +1698,21 @@ async def test_silence_выбирает_сборку_и_не_растит_счё
         sid for sid, count in before_attempts.items() if count > 0
     }
     assert state["step_status"].get("theory_format") != "closed"
-    system = model["messages"][0].content.lower()
-    assert "шапка скрипта" not in system
-    assert "молчи" in system
-    assert "новыми фактами" in system or "новых фактов" in system
+    system = model["messages"][0].content
+    assert "# КАК РАБОТАТЬ" in system
+    assert "# ПРАВИЛА РЕЧИ" in system
+    assert "Реплики человека не было: он молчит, разговор продолжается." in system
+    assert "сформулировать иначе" not in system.lower()
+    assert "мягко верни" not in system.lower()
 
 
-async def test_silence_respond_короткая_сборка(
+async def test_silence_respond_полная_сборка(
     spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
 ):
-    """respond_node при silence вызывает build_silence_messages, не полную сборку."""
+    """respond_node при silence вызывает полную сборку, не короткую silence-сборку."""
+    from graph.prompts import build_filler_messages, build_turn_messages
     from graph.state import new_state_defaults
+    from script.source import registry
 
     monkeypatch.setattr(
         "graph.nodes.get_config",
@@ -1738,10 +1742,30 @@ async def test_silence_respond_короткая_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    content = model["messages"][0].content.lower()
-    assert "шапка скрипта" not in content
-    assert "сформулировать иначе" in content
-    assert "молчи" in content
+    content = model["messages"][0].content
+    assert "# КАК РАБОТАТЬ" in content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in content
+    assert "Реплики человека не было: он молчит, разговор продолжается." in content
+    assert "сформулировать иначе" not in content.lower()
+
+    script = registry.get("vector_ru", "2")
+    full_ref = build_turn_messages(
+        script=script,
+        steps=[script.step("theory_format")],
+        profile={"city": "Пермь"},
+        facts={},
+        history=state["messages"],
+        asides_done=[],
+        turn_kind="silence",
+    )[0].content
+    short_ref = build_filler_messages(
+        script,
+        messages=state["messages"],
+        history_limit=2,
+    )[0].content
+    # Размер как у полной сборки, не как у короткой.
+    assert abs(len(content) - len(full_ref)) < len(full_ref) * 0.35
+    assert len(content) > len(short_ref) * 2
 
 
 async def test_next_step_в_промпте_первый_незакрытый_после_ведущего(
