@@ -374,8 +374,5 @@ def test_условие_входа_в_лестницу_только_нехват
     import inspect
 
     source = inspect.getsource(nodes_module.respond_node)
-    assert (
-        "use_ladder = bool(lead_missing) and not is_continuation and not is_silence"
-        in source
-    )
+    assert "use_ladder = bool(lead_missing) and not is_continuation and not is_silence" in source
     assert "lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []" in source

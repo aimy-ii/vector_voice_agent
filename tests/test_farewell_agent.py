@@ -14,7 +14,12 @@ from graph.checker_graph import live_check_node
 from graph.context import ConversationContext
 from graph.context_agent import ContextDecision
 from graph.context_store import MemoryContextStore
-from graph.farewell_agent import FarewellDecision, decide_farewell
+from graph.farewell_agent import (
+    FAREWELL_SYSTEM,
+    FarewellDecision,
+    LlmFarewellAgent,
+    decide_farewell,
+)
 from graph.schemas import TurnResult
 from script.store import ScriptProgress, progress_to_state
 
@@ -353,3 +358,88 @@ async def test_ошибка_агента_не_роняет_узел(script, monk
     ]
     assert done_msgs
     assert "прощание: ошибка агента" in done_msgs[0]
+
+
+def test_системное_сообщение_требует_прощания_вслух():
+    """Признак только на прозвучавшее прощание: есть «вслух», нет «не намерен»."""
+    assert "вслух" in FAREWELL_SYSTEM
+    assert "не намерен" not in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_без_дал_понять():
+    """Старая формулировка «дал понять» в промпте недопустима."""
+    assert "дал понять" not in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_отказ_не_конец():
+    """Отказ от предложения явно перечислен среди того, что не конец."""
+    assert "отказ от предложения" in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_сомневаешься_не_конец():
+    """Правило умолчания при сомнении сохранено."""
+    assert "Сомневаешься — не конец" in FAREWELL_SYSTEM
+
+
+def test_описание_поля_согласовано_с_промптом():
+    """Описание conversation_ended: «вслух», без «не намерен»."""
+    description = FarewellDecision.model_fields["conversation_ended"].description
+    assert description is not None
+    assert "вслух" in description
+    assert "не намерен" not in description
+
+
+async def test_decide_передаёт_константу_системного_сообщения():
+    """LlmFarewellAgent.decide отдаёт в модель ровно FAREWELL_SYSTEM."""
+    captured: list = []
+
+    class _FakeLlm:
+        """Заглушка контекстного менеджера get_llm."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    async def fake_astream_structured(llm, messages, **kwargs):
+        captured.extend(messages)
+        return {"conversation_ended": False}
+
+    with (
+        patch("graph.farewell_agent.get_llm", return_value=_FakeLlm()),
+        patch("graph.farewell_agent.astream_structured", side_effect=fake_astream_structured),
+    ):
+        result = await LlmFarewellAgent().decide("до свидания")
+
+    assert result.conversation_ended is False
+    assert len(captured) >= 1
+    assert captured[0].content == FAREWELL_SYSTEM
+
+
+async def test_пустая_реплика_без_вызова_модели():
+    """Пустая реплика → conversation_ended=False, модель не зовётся."""
+    called = False
+
+    class _FakeLlm:
+        async def __aenter__(self):
+            nonlocal called
+            called = True
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    async def fake_astream_structured(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"conversation_ended": True}
+
+    with (
+        patch("graph.farewell_agent.get_llm", return_value=_FakeLlm()),
+        patch("graph.farewell_agent.astream_structured", side_effect=fake_astream_structured),
+    ):
+        result = await LlmFarewellAgent().decide("   ")
+
+    assert result.conversation_ended is False
+    assert called is False
