@@ -1,18 +1,17 @@
-"""Тесты имени, заглушек, контекста и саммари."""
+"""Тесты имени, контекста и саммари."""
 
 from __future__ import annotations
 
 from graph.context import (
     DYN_MISSING,
-    DYN_NEED_CITY,
     DYN_NONE,
     DYN_READY,
     DYN_SEARCHING,
+    DYN_WORKING,
     ConversationContext,
     format_city_static,
     merge_static,
 )
-from graph.fillers import city_filler
 from graph.names import given_name
 from graph.summary import build_summary
 
@@ -20,13 +19,19 @@ from graph.summary import build_summary
 def test_статусы_динамики_константы_и_дефолт():
     assert DYN_NONE == "не требуется"
     assert DYN_READY == "готово"
+    assert DYN_WORKING == "в работе"
     assert DYN_SEARCHING == "в поиске"
     assert DYN_MISSING == "не нашлось"
-    assert DYN_NEED_CITY == "нужен город"
     ctx = ConversationContext()
     assert ctx.dynamic_status == DYN_NONE
     assert ctx.situation_slug is None
     assert ctx.filler_spoken is False
+    assert ctx.dynamic_reply == ""
+    assert ctx.last_agent_reply == ""
+    assert ctx.dynamic_turn == 0
+    assert ctx.last_reply_hash == ""
+    assert ctx.dynamic_reply_hash == ""
+    assert ctx.pending_fields == []
     assert ctx.render() == ""
 
 
@@ -34,28 +39,6 @@ def test_имя_три_случая():
     assert given_name("Андрей Андреевич") == "Андрей"
     assert given_name("Андрей Петров") == "Андрей Петров"
     assert given_name("Мария Ивановна") == "Мария"
-
-
-def test_заглушка_без_вызова_модели():
-    phrase = city_filler(["так, {place}… секунду, открываю по {place}"])
-    assert phrase is not None
-    assert "город" in phrase
-    assert "поищу" not in phrase.lower()
-
-
-def test_в_заглушку_не_попадает_чужой_текст():
-    from graph.fillers import FILLER_SUBJECTS, pick_filler
-
-    phrase = pick_filler(
-        ["так, {place}… открываю по {place}"],
-        subject="город",
-    )
-    assert phrase is not None
-    assert "себя" not in phrase
-    assert "Для" not in phrase
-    assert pick_filler(["так, {place}"], subject="себя") is None
-    assert pick_filler(["так"], subject=None) is None
-    assert FILLER_SUBJECTS == frozenset({"город", "филиал", "стоимость"})
 
 
 def test_контекст_статика_один_раз_цена_фразой(fake_kb):
@@ -78,7 +61,7 @@ def test_контекст_статика_один_раз_цена_фразой(f
     assert "Пермь" in text and "perm" in text
     assert "от 43900" in text
     assert "amount" not in text
-    assert "Список филиалов" in text
+    assert "Список филиалов и адреса в статику не входят" in text
     assert "есть рассрочка" in text.lower() or "рассроч" in text.lower()
 
     ctx = ConversationContext()
@@ -123,7 +106,6 @@ def test_статика_города_в_системном_сообщении_о
         profile={"caller_name": "Андрей", "city": "Пермь"},
         facts={},
         steps=[step],
-        attempts={"city": 1},
         context_text=ctx.render(),
         asides_done=[],
     )
@@ -173,6 +155,28 @@ def test_format_city_static_без_рекламы_словарей_и_ключе
     assert "installment_no_overpay" not in text
     assert "без переплаты" in text.lower()
     assert "от 43900" in text
+
+
+def test_format_city_static_число_филиалов_и_без_адресов():
+    """При branches_count — служебная пометка; списка адресов нет."""
+    with_count = format_city_static(
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta={"branches_count": 4, "categories": []},
+    )
+    assert "Филиалов в городе: 4" in with_count
+    assert "служебно" in with_count
+    assert "Чернышевского" not in with_count
+    assert "ул." not in with_count
+    assert "подбирает контекстер" in with_count
+
+    without = format_city_static(
+        city_slug="perm",
+        city_name="Пермь",
+        city_meta={"categories": []},
+    )
+    assert "Филиалов в городе" not in without
+    assert "подбирает контекстер" in without
 
 
 def test_мета_филиала_после_выбора():

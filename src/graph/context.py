@@ -15,12 +15,12 @@ from pydantic import BaseModel, Field
 DYN_NONE = "не требуется"
 #: Ответ уже в статике или накопленном — можно генерить.
 DYN_READY = "готово"
-#: Идёт поиск; генератор отдаёт заглушку (один заход).
+#: Фон начал разбирать реплику, предмет ещё неизвестен.
+DYN_WORKING = "в работе"
+#: Идёт поиск; генератор отдаёт реплику ожидания.
 DYN_SEARCHING = "в поиске"
 #: Поиск завершился без результата.
 DYN_MISSING = "не нашлось"
-#: Инструмент подошёл, но без города клиента ответить нельзя.
-DYN_NEED_CITY = "нужен город"
 
 #: Условия оплаты: английский ключ → русская формулировка.
 _PAYMENT_LABELS: dict[str, str] = {
@@ -43,13 +43,35 @@ class ConversationContext(BaseModel):
     Attributes:
         static_text: запечённая статика города и филиала.
         dynamic_text: динамическая часть (пока пусто — следующий этап).
-        dynamic_status: статус динамики; ставит контекстер, читает генератор.
-        situation_slug: слаг ситуации для словаря заглушек при «в поиске».
-        filler_spoken: заглушка по этому слагу уже произнесена (один заход).
+        dynamic_status: статус динамики; лайв ставит «в работе», контекстер
+            ведёт поиск и итог, генератор читает.
+        situation_slug: предмет вопроса одним-двумя словами («медкомиссия»,
+            «филиалы», «пересдача»), который контекстер отдаёт вместе со
+            статусом «в поиске».
+        filler_spoken: заглушка по этому предмету уже произнесена (один заход).
+        dynamic_reply: реплика клиента, по которой собрана текущая динамика.
+            Нужна, чтобы основной ход не пересчитывал то, что лайв-канал
+            уже испёк по этой же реплике.
+        last_agent_reply: последняя реплика бота. Пишет основной ход, читает
+            агент контекста в лайв-канале — там истории разговора нет, а без
+            неё «Да.» неотличимо от вопроса.
+        dynamic_turn: номер хода, на котором выставлен статус динамики.
+        last_reply_hash: хеш реплики, по которой контекстер уже отработал.
+        dynamic_reply_hash: хеш реплики, по которой выставлен текущий статус
+            динамики. Ход сравнивает его с текущей репликой: без совпадения
+            статус прошлого хода не подхватывается.
+        pending_fields: ключи полей профиля, которые лайв-канал сейчас
+            разбирает; для формы это состояние «уточняется».
+        empty_needs: потребности, за которыми уже ходили и справочник
+            вернул пусто. Повторно за ними не ходим до конца звонка:
+            данных в справочнике нет, и следующая попытка ничего не изменит.
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
-        city_faq: FAQ меты города (вопрос → ответ) для ``FaqTool``.
+        branch_candidates: слаги филиалов, отобранные инструментом ``branches``.
+        city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
+        conversation_ended: разговор закончен по решению фонового агента
+            прощания; переставляется на каждом ходу с репликой человека.
         frozen: статика уже зафиксирована и не пересобирается.
     """
 
@@ -58,10 +80,19 @@ class ConversationContext(BaseModel):
     dynamic_status: str = DYN_NONE
     situation_slug: str | None = None
     filler_spoken: bool = False
+    dynamic_reply: str = ""
+    last_agent_reply: str = ""
+    dynamic_turn: int = 0
+    last_reply_hash: str = ""
+    dynamic_reply_hash: str = ""
+    pending_fields: list[str] = Field(default_factory=list)
+    empty_needs: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
+    branch_candidates: list[str] = Field(default_factory=list)
     city_faq: list[dict[str, str]] = Field(default_factory=list)
+    conversation_ended: bool = False
     frozen: bool = False
 
     def render(self) -> str:
@@ -284,7 +315,16 @@ def format_city_static(
             lines.append(row + ".")
     if price_line:
         lines.append(f"Цена (готовая фраза, произносить только так): {price_line}")
-    lines.append("Список филиалов города в контекст не входит.")
+    count = city_meta.get("branches_count")
+    if count:
+        lines.append(
+            f"Филиалов в городе: {count} (служебно, вслух не называть само по себе — "
+            "только если речь зашла о филиале, районе или адресе)."
+        )
+    lines.append(
+        "Список филиалов и адреса в статику не входят — их подбирает контекстер "
+        "по району или ориентиру от клиента."
+    )
     return "\n".join(lines)
 
 
@@ -363,10 +403,19 @@ class ContextState(BaseModel):
     dynamic_status: str = DYN_NONE
     situation_slug: str | None = None
     filler_spoken: bool = False
+    dynamic_reply: str = ""
+    last_agent_reply: str = ""
+    dynamic_turn: int = 0
+    last_reply_hash: str = ""
+    dynamic_reply_hash: str = ""
+    pending_fields: list[str] = Field(default_factory=list)
+    empty_needs: list[str] = Field(default_factory=list)
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
+    branch_candidates: list[str] = Field(default_factory=list)
     city_faq: list[dict[str, str]] = Field(default_factory=list)
+    conversation_ended: bool = False
     frozen: bool = False
 
     def to_context(self) -> ConversationContext:
@@ -386,3 +435,119 @@ def context_from_state(data: Mapping[str, Any] | None) -> ConversationContext:
     if not data:
         return ConversationContext()
     return ConversationContext.model_validate(dict(data))
+
+
+def _city_known(
+    context: ConversationContext,
+    profile: Mapping[str, str] | None,
+) -> bool:
+    """Город уже назван: в контексте или в форме разговора."""
+    if (context.city_slug or "").strip() or (context.city_name or "").strip():
+        return True
+    if profile and str(profile.get("city") or "").strip():
+        return True
+    return False
+
+
+def _has_city_static(context: ConversationContext) -> bool:
+    """В контексте уже запечена статика города."""
+    return bool((context.city_slug or "").strip() and (context.static_text or "").strip())
+
+
+def _has_price_static(context: ConversationContext) -> bool:
+    """В статике уже есть готовая фраза о цене."""
+    return "Цена (готовая фраза" in (context.static_text or "")
+
+
+def _has_branch_static(context: ConversationContext) -> bool:
+    """В статике уже есть блок выбранного филиала."""
+    return "Выбранный филиал" in (context.static_text or "")
+
+
+def _has_branches_dynamic(context: ConversationContext) -> bool:
+    """В динамике уже лежит список филиалов."""
+    return "Филиалы" in (context.dynamic_text or "")
+
+
+def missing_needs(
+    context: ConversationContext,
+    needs: Sequence[str],
+    profile: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Оставляет потребности, за которыми действительно надо идти.
+
+    Потребность остаётся, если нужного нет в контексте и есть от чего
+    плясать: городских данных не существует, пока не известен город.
+    Потребности из ``empty_needs`` отбрасываются — справочник уже ответил
+    пусто, повторный поход ничего не даст.
+
+    Args:
+        context: текущий контекст разговора.
+        needs: потребности справочника (``needs_of``).
+        profile: форма разговора; из неё берутся город и филиал.
+
+    Returns:
+        Недостающие потребности в порядке поступления.
+    """
+    city_known = _city_known(context, profile)
+    branch_selected = bool((context.branch_slug or "").strip())
+    if profile and str(profile.get("branch") or "").strip():
+        branch_selected = True
+
+    empty = {str(n).strip() for n in (context.empty_needs or []) if str(n).strip()}
+
+    missing: list[str] = []
+    for raw in needs:
+        need = str(raw).strip()
+        if not need:
+            continue
+        if need in empty:
+            continue
+        if need == "city_choices":
+            if not city_known:
+                missing.append(need)
+        elif need == "city_meta":
+            if city_known and not _has_city_static(context):
+                missing.append(need)
+        elif need == "price":
+            if city_known and not _has_price_static(context):
+                missing.append(need)
+        elif need == "branches":
+            if city_known and not branch_selected and not _has_branches_dynamic(context):
+                missing.append(need)
+        elif need == "branch_meta":
+            if branch_selected and not _has_branch_static(context):
+                missing.append(need)
+        else:
+            missing.append(need)
+    return missing
+
+
+def record_empty_needs(
+    context: ConversationContext,
+    needs: Sequence[str],
+    *,
+    found: bool,
+) -> None:
+    """Обновляет ``empty_needs`` по результату похода в справочник.
+
+    Пустой ответ — потребности запоминаются: за ними больше не ходим.
+    Данные получены — потребности из списка убираются, если были.
+
+    Args:
+        context: контекст разговора; список меняется на месте.
+        needs: потребности этого похода.
+        found: инструмент вернул данные.
+    """
+    cleaned = [str(n).strip() for n in needs if str(n).strip()]
+    if not cleaned:
+        return
+    if found:
+        drop = set(cleaned)
+        context.empty_needs = [n for n in context.empty_needs if n not in drop]
+        return
+    known = set(context.empty_needs)
+    for need in cleaned:
+        if need not in known:
+            context.empty_needs.append(need)
+            known.add(need)

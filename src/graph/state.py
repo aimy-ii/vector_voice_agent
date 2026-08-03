@@ -69,15 +69,25 @@ class CallState(TypedDict, total=False):
         messages: история звонка на этот ход (редьюсер на замену).
         script_id / script_version: закреплённый скрипт звонка.
         step_status: pending / closed по шагам (зеркало Redis).
-        step_attempts: счётчик попыток задать шаг (сколько раз был в шапке).
+        step_attempts: счётчик попаданий в шапку (зеркало; решения не принимает).
         step_taken_turn: ход первого взятия шага.
+        step_in_work: идентификаторы шагов, отданных генератору.
         script_progress: слепок прогресса (на конец звонка — на постоянку).
         profile: собранный профиль.
         city_slug / city_name / branch_slug: фиксации справочника.
         conversation_context: единый документ контекста.
         head_steps: шапка шагов этого хода.
-        spoken_filler: заглушка, ушедшая в эфир до генератора.
-        last_filler_turn: номер хода, на котором звучала заглушка.
+        head_new_step: идентификатор шага, взятого в шапку впервые на этом
+            ходу; ``None`` — новых шагов нет, добор отсечён или все шаги
+            уже в работе. Считать по счётчикам в промпте нельзя: к моменту
+            генерации они уже увеличены.
+        expect_continuation: после реплики бот сам запустит следующий ход
+            без реплики клиента (контекст ещё готовится).
+        conversation_ended: разговор закончен — фоновый агент прощания
+            выставил признак в контексте; основной ход копирует его сюда.
+        turn_kind: ``client`` — обычный ход по реплике клиента;
+            ``continuation`` — продолжение собственной речи бота;
+            ``silence`` — человек молчит, бот мягко возвращает в разговор.
         branch_candidates: отобранные резолвером слаги филиалов.
         partial_reply: накопленный распознанный текст текущей реплики
             клиента; вход служебного графа ``vector_checker``.
@@ -99,6 +109,7 @@ class CallState(TypedDict, total=False):
     step_status: dict[str, str]
     step_attempts: dict[str, int]
     step_taken_turn: dict[str, int]
+    step_in_work: list[str]
     script_progress: dict[str, Any]
 
     profile: Annotated[dict[str, str], merge_dicts]
@@ -113,6 +124,7 @@ class CallState(TypedDict, total=False):
     current_step: str | None
     next_step: str | None
     head_steps: list[str]
+    head_new_step: str | None
     outcome: str | None
 
     tool_log: list[dict[str, Any]]
@@ -126,14 +138,13 @@ class CallState(TypedDict, total=False):
     delivered_step: str | None
 
     facts: dict[str, Any]
-    route: str | None
     spoken: list[str]
-    spoken_filler: str | None
-    fillers_used: list[str]
-    last_filler_turn: int
     branch_candidates: list[str]
     turn_result: dict[str, Any]
     call_finished: bool
+    expect_continuation: bool
+    conversation_ended: bool
+    turn_kind: str
     partial_reply: str
     partial_utterance_id: str
     partial_is_final: bool
@@ -147,6 +158,7 @@ def new_state_defaults() -> dict[str, Any]:
         "step_status": {},
         "step_attempts": {},
         "step_taken_turn": {},
+        "step_in_work": [],
         "script_progress": {},
         "profile": {},
         "client_asks_inform": False,
@@ -159,6 +171,7 @@ def new_state_defaults() -> dict[str, Any]:
         "current_step": None,
         "next_step": None,
         "head_steps": [],
+        "head_new_step": None,
         "outcome": None,
         "tool_log": [],
         "turn": 0,
@@ -169,14 +182,13 @@ def new_state_defaults() -> dict[str, Any]:
         "last_delivered": True,
         "delivered_step": None,
         "facts": {},
-        "route": None,
         "spoken": [],
-        "spoken_filler": None,
-        "fillers_used": [],
-        "last_filler_turn": 0,
         "branch_candidates": [],
         "turn_result": {},
         "call_finished": False,
+        "expect_continuation": False,
+        "conversation_ended": False,
+        "turn_kind": "client",
         "partial_reply": "",
         "partial_utterance_id": "",
         "partial_is_final": False,

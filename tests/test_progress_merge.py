@@ -18,8 +18,11 @@ from script.store import (
 
 @pytest.fixture()
 def memory_store(monkeypatch) -> MemoryScriptStore:
+    from graph.context_store import MemoryContextStore
+
     mem = MemoryScriptStore()
     monkeypatch.setattr(nodes_module, "script_store", mem)
+    monkeypatch.setattr(nodes_module, "context_store", MemoryContextStore())
     return mem
 
 
@@ -28,24 +31,29 @@ def test_merge_progress_fields_накладывает_только_свои():
         status={"name": "closed"},
         attempts={"name": 1, "city": 2},
         taken_turn={"name": 1},
+        in_work=["name", "city"],
         profile={"caller_name": "Андрей"},
     )
     overlay = ScriptProgress(
         status={"city": "closed"},
         attempts={"city": 99},
         taken_turn={"city": 3},
+        in_work=["who_studies"],
         profile={"city": "Пермь"},
     )
     checker = merge_progress_fields(base, overlay, PROGRESS_FIELDS_CHECKER)
     assert checker.status["name"] == "closed"
     assert checker.status["city"] == "closed"
     assert checker.attempts["city"] == 2  # attempts не трогали
+    assert checker.in_work == ["name", "city"]
     assert checker.profile["caller_name"] == "Андрей"
     assert checker.profile["city"] == "Пермь"
 
     generator = merge_progress_fields(base, overlay, PROGRESS_FIELDS_GENERATOR)
     assert generator.attempts["city"] == 99
     assert generator.taken_turn["city"] == 3
+    assert "who_studies" in generator.in_work
+    assert "name" in generator.in_work
     assert generator.status.get("city") != "closed"  # status не трогали
 
 

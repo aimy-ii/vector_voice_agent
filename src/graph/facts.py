@@ -146,6 +146,24 @@ def needs_of(step: AnyStep | None) -> list[str]:
     return list(step.needs)
 
 
+def knowledge_of(step: AnyStep | None) -> list[str]:
+    """Человекочитаемые потребности ведущего шага из ``knowledge``.
+
+    Для агента контекста: строки как в скрипте («стоимость обучения в
+    городе»), без маппинга в ключи справочника. Старый формат шагов
+    поля ``knowledge`` не имеет — пустой список.
+
+    Args:
+        step: ведущий шаг хода или None.
+
+    Returns:
+        Непустые строки ``knowledge`` в порядке скрипта.
+    """
+    if step is None or not isinstance(step, SalesStep):
+        return []
+    return [str(fact).strip() for fact in step.knowledge if str(fact).strip()]
+
+
 async def collect_facts(
     kb: VectorKBClient,
     *,

@@ -7,9 +7,9 @@ import copy
 import pytest
 
 from core.config import settings
-from graph.facts import needs_of
-from graph.prompts import _EXAMPLES_PREFIX, _describe_step, build_turn_messages, unknown_block
-from graph.tools_registry import FaqTool, HelpsTool, build_context_tools, needs_from_knowledge
+from graph.facts import knowledge_of, needs_of
+from graph.prompts import _describe_step, build_turn_messages, unknown_block
+from graph.tools_registry import build_context_tools, needs_from_knowledge
 from script.build import ScriptError, build_script, params_from_settings
 from script.models import RawSalesScript, SalesStep
 from script.planner import script_head
@@ -36,7 +36,7 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
         assert isinstance(dumped["knowledge"], list)
         if not dumped["knowledge"]:
             empty_knowledge += 1
-    assert empty_knowledge == 8
+    assert empty_knowledge == 10
     experience = script_v4.step("experience")
     assert "подбадривать" in experience.requirements
 
@@ -159,14 +159,14 @@ def test_v1_v2_v3_собираются_как_раньше(script, script_v1, sc
 
 
 def test_промпт_v4_название_требования_образцы(script_v4):
-    """Вывод шага: название, требования, образцы с пометкой про дословность."""
+    """Вывод шага: название, требования, примеры."""
     step = script_v4.step("city")
     lines = _describe_step(step, {}, {}, heading="Шаг")
     text = "\n".join(lines)
-    assert "Название: Выявление города" in text
-    assert "Требования:" in text
+    assert "## Выявление города" in text
+    assert "**Требования**" in text
     assert "Записать город в форму как city" in text
-    assert _EXAMPLES_PREFIX in text
+    assert "**Примеры**" in text
     assert "Подскажите, в каком городе планируете обучение?" in text
 
     messages = build_turn_messages(
@@ -179,7 +179,8 @@ def test_промпт_v4_название_требования_образцы(sc
     )
     content = messages[0].content
     assert "Выявление города" in content
-    assert _EXAMPLES_PREFIX in content
+    assert "**Примеры**" in content
+    assert "ВНИМАНИЕ: примеры" in content
 
 
 def test_промпт_v4_нехватка_данных_из_knowledge(script_v4):
@@ -209,8 +210,15 @@ def test_промпт_v4_пустой_knowledge_без_строки_нехват
 def test_прогрев_по_всему_списку_knowledge(script_v4):
     """needs_of / прогрев идут по всему списку knowledge."""
     city = script_v4.step("city")
-    assert needs_of(city) == ["city_choices"]
+    assert city.knowledge == []
+    assert needs_of(city) == []
     assert needs_of(city) == needs_from_knowledge(city.knowledge)
+    assert knowledge_of(city) == []
+
+    branch = script_v4.step("branch")
+    assert branch.knowledge == []
+    assert needs_of(branch) == []
+    assert knowledge_of(branch) == []
 
     terms = script_v4.step("terms")
     needs = needs_of(terms)
@@ -219,12 +227,20 @@ def test_прогрев_по_всему_списку_knowledge(script_v4):
     # Факт без маппинга в справочник не даёт потребности — просто не найдётся.
     assert "время до первого занятия по вождению" in terms.knowledge
     assert needs_from_knowledge(["время до первого занятия по вождению"]) == []
+    assert knowledge_of(terms) == list(terms.knowledge)
+
+    included = script_v4.step("included")
+    assert "city_meta" in needs_of(included)
 
     price = script_v4.step("price")
     assert needs_of(price) == ["price"]
+    assert price.knowledge
+    assert knowledge_of(price) == ["стоимость обучения в городе"]
 
-    branch = script_v4.step("branch")
-    assert "branches" in needs_of(branch)
+
+def test_knowledge_of_без_шага_пустой():
+    """Без шага knowledge_of пуст."""
+    assert knowledge_of(None) == []
 
 
 def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, data_dir, monkeypatch):
@@ -243,13 +259,75 @@ def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, da
     assert "Тестовый unknown из настроек." in block
 
 
-def test_реестр_инструментов_v4_без_helps(script_v4, script):
-    """В формате продаж справки из скрипта не подключаются — только FAQ."""
-    tools_v4 = build_context_tools(script_v4)
-    assert len(tools_v4) == 1
-    assert isinstance(tools_v4[0], FaqTool)
-    assert not any(isinstance(t, HelpsTool) for t in tools_v4)
+def test_реестр_инструментов_всегда_branches_faq_details(script_v4, script):
+    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, факты."""
+    for compiled in (script_v4, script):
+        tools = build_context_tools(compiled)
+        assert [t.name for t in tools] == [
+            "city",
+            "branches",
+            "city_faq",
+            "branch_details",
+            "facts",
+        ]
 
-    tools_legacy = build_context_tools(script)
-    assert isinstance(tools_legacy[0], HelpsTool)
-    assert isinstance(tools_legacy[1], FaqTool)
+
+def test_v4_сводка_непустая_и_в_скомпилированном(raw_script_v4, script_v4):
+    """Скрипт vector_ru v4 читается; поле сводки непустое и доходит до сборки."""
+    assert raw_script_v4.summary.strip()
+    assert "федеральную сеть автошкол" in raw_script_v4.summary
+    assert script_v4.summary == raw_script_v4.summary
+    assert script_v4.summary.strip()
+
+
+def test_messenger_подтверждает_номер_а_не_спрашивает_вслепую(script_v4):
+    """Шаг messenger: сначала этот номер или другой; номер — только после «на другой»."""
+    step = script_v4.step("messenger")
+    req = step.requirements.lower()
+    assert "первым делом" in req
+    assert "с которого" in req and "звон" in req
+    assert "на него или на другой" in req
+    assert "только после" in req
+    assert "на другой" in req
+    assert "ошибка" in req
+    for blind in (
+        "назовите номер",
+        "продиктуйте номер",
+        "какой у вас номер",
+        "подскажите номер",
+        "скажите номер",
+    ):
+        assert blind not in req
+    examples = " ".join(step.examples).lower()
+    for blind in (
+        "назовите номер",
+        "продиктуйте номер",
+        "какой у вас номер",
+        "подскажите номер",
+        "скажите свой номер",
+    ):
+        assert blind not in examples
+    assert any("с которого" in ex.lower() and "звон" in ex.lower() for ex in step.examples)
+    assert len(script_v4.steps) == 26
+
+
+def test_скрипт_без_сводки_читается_с_пустым_полем():
+    """Скрипт продаж без поля summary читается без ошибок; сводка пустая."""
+    payload = {
+        "id": "no_summary",
+        "version": "1",
+        "steps": [
+            {
+                "id": "only",
+                "name": "Шаг",
+                "order": 1,
+                "requirements": "Спросить имя.",
+                "examples": ["Как вас зовут?"],
+                "knowledge": [],
+            }
+        ],
+    }
+    raw = RawSalesScript.model_validate(payload)
+    assert raw.summary == ""
+    compiled = build_script(raw)
+    assert compiled.summary == ""

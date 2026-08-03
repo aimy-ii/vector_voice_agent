@@ -1,8 +1,9 @@
 r"""Служебный граф чекера в реальном времени.
 
-Лайв-канал: закрывает шаги, дозаполняет базовый профиль, греет контекст
-под предстоящий шаг. В ``messages`` не пишет, реплик в эфир не выдаёт.
-Прогрев не на пути хода генератора — ошибка только в лог.
+Лайв-канал: закрывает шаги, зовёт контекстер за данными, разбирает профиль,
+решает конец разговора, греет контекст под предстоящий шаг. В ``messages``
+не пишет, реплик в эфир не выдаёт. Ошибка только в лог — ход генератора
+не роняет.
 
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
@@ -26,18 +27,23 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import check_pass
-from graph.context import context_from_state, merge_static
-from graph.contexter import run_contexter
-from graph.facts import needs_of
-from graph.log_fmt import format_live_check_state
+from graph.context import DYN_NONE, DYN_SEARCHING, DYN_WORKING, merge_static
+from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
+from graph.contexter import reply_hash, run_contexter
+from graph.facts import knowledge_of, needs_of
+from graph.farewell_agent import decide_farewell
+from graph.log_fmt import format_check_done, format_live_check_state
 from graph.nodes import (
     _call_id,
     _checker_client,
+    _lead_from_progress,
+    _load_context,
     _load_progress,
     _merge_profile,
+    _save_context,
     _save_progress,
 )
-from graph.profile_fill import fill_basic_profile
+from graph.profile_agent import guess_profile, profile_fields_of
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
@@ -92,12 +98,61 @@ def is_new_utterance(
     return utterance_id != last_utterance_id
 
 
-def _script_of(state: CallState):
+def _script_of_state(state: CallState):
     """Скомпилированный скрипт из реестра по полям состояния."""
     return registry.get(
         state.get("script_id") or settings.script_id,
         state.get("script_version") or settings.script_version,
     )
+
+
+def _head_needs(
+    state: CallState,
+    *,
+    progress,
+    profile: dict[str, str],
+) -> list[str]:
+    """Потребности справочника по шапке хода (``needs_of``).
+
+    Args:
+        state: состояние звонка.
+        progress: прогресс из кеша.
+        profile: слитый профиль.
+
+    Returns:
+        Уникальный список потребностей в порядке шагов шапки.
+    """
+    head, _step = _lead_from_progress(state, progress=progress, profile=profile)
+    needs: list[str] = []
+    for head_step in head:
+        for need in needs_of(head_step):
+            if need not in needs:
+                needs.append(need)
+    return needs
+
+
+def _lead_knowledge(
+    state: CallState,
+    *,
+    progress,
+    profile: dict[str, str],
+) -> list[str]:
+    """Потребности ведущего шага для агента контекста (``knowledge``).
+
+    Тот же разбор ведущего шага, что у прогрева через
+    ``_lead_from_progress``: агенту нужны строки скрипта, а не ключи
+    справочника.
+
+    Args:
+        state: состояние звонка.
+        progress: прогресс из кеша.
+        profile: слитый профиль.
+
+    Returns:
+        Строки ``knowledge`` ведущего шага; пусто — шага нет или список пуст.
+    """
+    _head, lead = _lead_from_progress(state, progress=progress, profile=profile)
+    return knowledge_of(lead)
 
 
 async def _warmup_next_step(
@@ -110,12 +165,17 @@ async def _warmup_next_step(
 ) -> Any:
     """Прогревает мету города / филиалы / цену под предстоящий шаг.
 
-    Ошибки только в лог — ход лайв-канала не роняют.
+    В лайв-треде ``current_step`` обычно нет — ведущий шаг берём из
+    прогресса через ``_lead_from_progress``, чтобы греть *следующий*
+    шаг, а не тот, что бот уже произносит. Ошибки только в лог —
+    ход лайв-канала не роняют.
     """
-    script = _script_of(state)
+    script = _script_of_state(state)
     current_id = state.get("current_step")
     current = script.steps.get(current_id) if current_id else None
     try:
+        if current is None:
+            _head, current = _lead_from_progress(state, progress=progress, profile=profile)
         if current is None:
             nxt = pick_step(
                 script,
@@ -147,15 +207,12 @@ async def _warmup_next_step(
     try:
         if "city_choices" in needs:
             await vector_kb.list_cities()
-        # Город из профиля ещё без слага — мета не греется, это ок.
         if not city_slug:
             return ctx
 
         want_city = ("city_meta" in needs or "price" in needs) and not ctx.city_slug
         want_price = "price" in needs
         want_branches = "branches" in needs
-        # Статику города подшиваем один раз: повторный merge при уже
-        # зафиксированном city_slug не нужен (merge_static и так no-op).
         if (
             want_city
             or (want_price and not ctx.city_slug)
@@ -191,16 +248,16 @@ async def _warmup_next_step(
 
 
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Один служебный проход чекера и контекстера по ``partial_reply``.
+    """Один служебный проход: контекстер → чекер → профиль → прощание → прогрев.
 
-    Точка отсчёта сбрасывается при смене ``partial_utterance_id`` от бота —
-    не по знаку прироста длины. Порог ``checker_min_growth_chars``
-    применяется только к промежуточным кускам внутри одной реплики
-    относительно ``last_checked_partial``. Финальная реплика
-    (``partial_is_final``) разбирается всегда, в том числе при нулевом
-    приросте. Первый проход новой реплики порогом не режется.
-    Иначе дозаполняет профиль, зовёт ``check_pass``, ``run_contexter``
-    и прогрев под предстоящий шаг.
+    Первым делом ставит статус «в работе» с хешем реплики — ход видит,
+    что фон уже взял реплику, ещё до профиля и контекстера. Контекстер
+    дальше сменит статус на «в поиске» / итог. Любой выход, в том числе
+    по исключению, не оставляет «в работе»: иначе ход тянет заглушки
+    до конца звонка.
+
+    Точка отсчёта сбрасывается при смене ``partial_utterance_id``;
+    порог прироста — только внутри одной реплики.
     """
     started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
@@ -228,7 +285,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             f"звонок {call_id}",
             "start",
         )
-    # Порог только для промежуточных; финал — всегда разбирать.
     if not is_final and growth_below_threshold(reply, previous, min_growth=min_growth):
         stage(
             "live-check",
@@ -237,69 +293,143 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         )
         return {}
 
-    progress = await _load_progress(state)
-    profile = _merge_profile(state, progress)
-    stage(
-        "live-check",
-        format_live_check_state(
-            attempts=progress.attempts,
-            status=progress.status,
+    turn = int(state.get("turn") or 0)
+    digest = reply_hash(reply) if reply else ""
+    ctx = await _load_context(state)
+    prior_status = ctx.dynamic_status or DYN_NONE
+    if prior_status in (DYN_WORKING, DYN_SEARCHING):
+        prior_status = DYN_NONE
+    ctx = ctx.model_copy(
+        update={
+            "dynamic_status": DYN_WORKING,
+            "dynamic_reply_hash": digest,
+            "dynamic_turn": turn,
+            "situation_slug": None,
+            "filler_spoken": False,
+        }
+    )
+    await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+
+    patch: dict[str, Any] = {}
+    farewell_note = "не вызывался"
+    try:
+        progress = await _load_progress(state)
+        profile = _merge_profile(state, progress)
+        stage(
+            "live-check",
+            format_live_check_state(
+                attempts=progress.attempts,
+                status=progress.status,
+                profile=profile,
+            ),
+            "state",
+        )
+
+        script = _script_of_state(state)
+        needs = _head_needs(state, progress=progress, profile=profile)
+        step_needs = _lead_knowledge(state, progress=progress, profile=profile)
+
+        # Контекстер до check_pass: сам выставит статус и сходит за данными.
+        ctx = await run_contexter(
+            ctx,
+            reply=reply,
+            tools=build_context_tools(script),
+            needs=needs,
+            step_needs=step_needs,
             profile=profile,
-        ),
-        "state",
-    )
+            objections=script.objections,
+        )
 
-    # Фон: базовые поля из уже сказанного — до check_pass, чтобы fills закрылись.
-    filled = fill_basic_profile(reply, profile)
-    if filled:
-        profile = {**profile, **filled}
-        progress.profile = {**progress.profile, **filled}
+        state_for_check: dict[str, Any] = {**state, "profile": profile}
+        progress, closures, asks_inform = await check_pass(
+            state_for_check,
+            reply=reply,
+            judge=_checker_client,
+            progress=progress,
+        )
+        patch = {
+            "last_checked_partial": reply,
+            "client_asks_inform": asks_inform,
+        }
+        if utterance_id:
+            patch["last_checked_utterance_id"] = utterance_id
 
-    state_for_check: dict[str, Any] = {**state, "profile": profile}
-    progress, closures, asks_inform = await check_pass(
-        state_for_check,
-        reply=reply,
-        judge=_checker_client,
-        progress=progress,
-    )
-    patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
-    patch["last_checked_partial"] = reply
-    if utterance_id:
-        patch["last_checked_utterance_id"] = utterance_id
-    patch["client_asks_inform"] = asks_inform
-    patch["profile"] = profile
+        # Слаги из статики контекстера — в патч состояния (не в форму профиля).
+        if ctx.city_slug and not state.get("city_slug"):
+            patch["city_slug"] = ctx.city_slug
+            if ctx.city_name:
+                patch["city_name"] = ctx.city_name
+        if ctx.branch_slug and not state.get("branch_slug"):
+            patch["branch_slug"] = ctx.branch_slug
 
-    # Контекстер печёт вперёд, пока клиент говорит: справка/статус к ходу.
-    script = _script_of(state)
-    ctx = context_from_state(state.get("conversation_context"))
-    ctx = await run_contexter(
-        ctx,
-        reply=reply,
-        tools=build_context_tools(script),
-        objections=script.objections,
-    )
+        fields = profile_fields_of(script)
+        history = list(state.get("messages") or [])
+        guess = await guess_profile(
+            reply,
+            history=history,
+            known=profile,
+            fields=fields,
+        )
+        for item in guess.values:
+            key = item.key
+            value = item.value
+            if value and not str(profile.get(key) or "").strip():
+                profile[key] = value
+        progress.profile = dict(profile)
+        progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
+        patch.update(progress_patch)
+        patch["profile"] = profile
 
-    # Прогрев под предстоящий шаг — не на пути хода, ошибки только в лог.
-    ctx = await _warmup_next_step(
-        state,
-        progress=progress,
-        profile=profile,
-        ctx=ctx,
-        asks_inform=asks_inform,
-    )
-    patch["conversation_context"] = ctx.model_dump()
+        turn_kind = str(state.get("turn_kind") or "client").strip().lower()
+        no_client_reply = turn_kind in {"continuation", "silence"}
+        if no_client_reply:
+            farewell_note = "пропуск: нет реплики человека"
+        elif len(history) < settings.farewell_min_messages:
+            farewell_note = (
+                f"пропуск: реплик {len(history)} < порога {settings.farewell_min_messages}"
+            )
+        elif not reply.strip():
+            farewell_note = "пропуск: пустая реплика"
+        else:
+            decision = await decide_farewell(reply, history=history)
+            if decision is None:
+                farewell_note = "ошибка агента, флаг не тронут"
+            else:
+                ended = bool(decision.conversation_ended)
+                ctx = ctx.model_copy(update={"conversation_ended": ended})
+                farewell_note = f"закончен={ended}"
 
-    if closures:
-        checker_text = "закрыл шаги " + ",".join(step_id for step_id, _ in closures)
-    else:
-        checker_text = "ничего"
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    stage(
-        "live-check",
-        f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}; {elapsed_ms} мс",
-        "done",
-    )
-    return patch
+        ctx = await _warmup_next_step(
+            state,
+            progress=progress,
+            profile=profile,
+            ctx=ctx,
+            asks_inform=asks_inform,
+        )
+        ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
+        patch.update(ctx_patch)
+
+        if closures:
+            checker_text = format_check_done(closures)
+        else:
+            checker_text = "ничего"
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        subject = (ctx.situation_slug or "").strip()
+        subject_part = f", предмет «{subject}»" if subject else ""
+        stage(
+            "live-check",
+            f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
+            f"{subject_part}; прощание: {farewell_note}; {elapsed_ms} мс",
+            "done",
+        )
+        return patch
+    finally:
+        final_ctx = await _load_context(state)
+        if final_ctx.dynamic_status == DYN_WORKING:
+            terminal = prior_status if prior_status != DYN_WORKING else DYN_NONE
+            final_ctx = final_ctx.model_copy(update={"dynamic_status": terminal})
+            fixed = await _save_context(final_ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+            patch.update(fixed)
 
 
 def build_checker_graph() -> StateGraph:

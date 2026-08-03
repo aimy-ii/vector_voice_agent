@@ -76,8 +76,27 @@ def use_v2(monkeypatch) -> None:
 
 @pytest.fixture()
 def store(monkeypatch) -> MemoryScriptStore:
+    from graph.context_agent import ContextDecision
+    from graph.context_store import MemoryContextStore
+
     mem = MemoryScriptStore()
     monkeypatch.setattr(nodes_module, "script_store", mem)
+    ctx_mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
+
+    async def _no_context(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _no_context)
+    return mem
+
+
+@pytest.fixture()
+def ctx_store(monkeypatch):
+    from graph.context_store import MemoryContextStore
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", mem)
     return mem
 
 
@@ -90,7 +109,8 @@ def checker(monkeypatch) -> SilentChecker:
 
 @pytest.fixture()
 def kb(monkeypatch, fake_kb):
-    monkeypatch.setattr(nodes_module, "vector_kb", fake_kb)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    monkeypatch.setattr("kb.client.vector_kb", fake_kb)
     return fake_kb
 
 
@@ -111,14 +131,25 @@ def model(monkeypatch):
 
     monkeypatch.setattr(nodes_module, "get_llm", _fake_llm)
 
-    holder: dict[str, Any] = {"result": {"reply": "Хорошо."}, "calls": 0, "messages": None}
+    holder: dict[str, Any] = {
+        "result": {"reply": "Хорошо."},
+        "calls": 0,
+        "messages": None,
+        "all_messages": [],
+    }
 
     async def _fake_stream(
         llm, messages, *, schema, text_field=None, on_delta=None, budget=None, purpose=None
     ):
         holder["calls"] += 1
         holder["messages"] = messages
+        holder["all_messages"].append(messages)
         result = holder["result"]
+        if isinstance(result, list):
+            result = result[holder["calls"] - 1]
+        on_call = holder.get("on_call")
+        if on_call is not None:
+            await on_call(holder["calls"], messages)
         if isinstance(result, Exception):
             raise result
         if text_field and on_delta is not None and result.get(text_field):
@@ -145,31 +176,6 @@ async def test_первый_ход_спрашивает_имя(spoken, store, ch
         or "зовут" in "".join(spoken).lower()
         or model["calls"] == 1
     )
-
-
-async def test_город_фиксируется_резолвером(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Отлично, Пермь. Учиться будете сами?",
-    }
-    # Имя уже закрыто, шаг city уже задавали.
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
-    assert state["city_slug"] == "perm"
-    assert state["city_name"] == "Пермь"
-    prompt = model["messages"][0].content
-    assert "city_choices" not in prompt
-    assert "list_cities" not in prompt
 
 
 async def test_перечень_городов_не_в_промпте_ни_на_одном_ходу(
@@ -223,79 +229,11 @@ async def test_шаг_с_образцом_идёт_через_модель(
         }
     )
     assert state["current_step"] == "practice"
-    assert state["route"] == "respond"
     assert model["calls"] == 1
     prompt = model["messages"][0].content
     assert _SAMPLE_PREFIX in prompt
     assert "Практика по вашему графику" in prompt
     assert "".join(spoken) == model["result"]["reply"]
-
-
-async def test_шаг_price_lookup_затем_respond(spoken, store, checker, kb, resolvers, model, use_v2):
-    """Шаг price нуждается в справочнике — lookup → respond, факт и образец в промпте."""
-    from graph.prompts import _SAMPLE_PREFIX
-
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Стоимость — от 43900 рублей. Оплатить можно частями или целиком.",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Да")],
-            "city_slug": "perm",
-            "city_name": "Пермь",
-            "branch_slug": "perm_chernyshevskogo",
-            "profile": {
-                "city": "Пермь",
-                "caller_name": "Мария",
-                "student_is_caller": "да",
-                "experience": "впервые",
-                "transmission": "механика",
-                "theory_format": "очно",
-                "branch": "perm_chernyshevskogo",
-            },
-            "step_status": {
-                "name": "closed",
-                "city": "closed",
-                "who_studies": "closed",
-                "experience": "closed",
-                "transmission": "closed",
-                "terms": "closed",
-                "theory_format": "closed",
-                "included": "closed",
-                "practice": "closed",
-                "branch": "closed",
-            },
-            "conversation_context": {
-                "static_text": "Город: Пермь\nфилиал",
-                "city_slug": "perm",
-                "city_name": "Пермь",
-                "branch_slug": "perm_chernyshevskogo",
-                "frozen": True,
-            },
-        }
-    )
-    assert state["current_step"] == "price"
-    assert state["route"] == "lookup"
-    assert model["calls"] == 1
-    prompt = model["messages"][0].content
-    assert _SAMPLE_PREFIX in prompt
-    assert "43900" in prompt
-    текст = "".join(spoken)
-    assert "43900" in текст or "стоимость" in текст.lower()
-
-
-async def test_маршрут_respond_без_справочника(
-    spoken, store, checker, kb, resolvers, model, use_v2
-):
-    """Шаг без needs и без сбора city/branch — сразу respond."""
-    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
-    assert state["current_step"] == "name"
-    assert state["route"] == "respond"
-    assert model["calls"] == 1
 
 
 async def test_генератор_плюсует_счётчик_в_момент_взятия(
@@ -309,7 +247,10 @@ async def test_генератор_плюсует_счётчик_в_момент_
     assert loaded.attempts["name"] == 1
 
 
-async def test_возражение_меняет_состояние(spoken, store, checker, kb, resolvers, model, use_v2):
+async def test_возражение_не_пишет_asides_и_resume(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """commit_node не наполняет asides_done и не пишет resume_step из ответа модели."""
     model["result"] = {
         "understood": [],
         "aside_id": "think",
@@ -325,8 +266,9 @@ async def test_возражение_меняет_состояние(spoken, stor
             "step_status": {"name": "closed", "city": "closed"},
         }
     )
-    assert state["profile"]["urgency"] == "думает"
-    assert "think" in state["asides_done"]
+    assert "think" not in state["asides_done"]
+    assert state.get("resume_step") is None
+    assert state["profile"].get("urgency") != "думает"
 
 
 async def test_модель_не_ответила_в_эфир_идёт_заглушка(
@@ -362,20 +304,17 @@ async def test_город_из_контекста_подхватывается(
     assert state["current_step"] != "city"
 
 
-async def test_слаг_в_состоянии_резолвер_не_зовётся(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+async def test_слаг_города_доживает_до_следующего_хода(
+    spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """На шаге с needs при уже известном слаге resolve_city не вызывается."""
-    resolve_calls: list[str] = []
-    real = nodes_module.resolve_city
-
-    async def _spy(text: str, cities: Any, *, resolver: Any = None):
-        resolve_calls.append(text)
-        return await real(text, cities, resolver=resolver)
-
-    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
+    """Слаг города из кеша/состояния сохраняется на следующем ходу без резолвера."""
     model["result"] = {"understood": [], "reply": "Хорошо."}
-    state = await graph.ainvoke(
+    first_ctx = {
+        "static_text": "Город: Пермь",
+        "city_slug": "perm",
+        "city_name": "Пермь",
+    }
+    second = await graph.ainvoke(
         {
             "messages": [HumanMessage(content="У меня проспект Просвещения, адрес")],
             "city_slug": "perm",
@@ -394,209 +333,11 @@ async def test_слаг_в_состоянии_резолвер_не_зовётс
                 "experience": "closed",
                 "transmission": "closed",
             },
-            "conversation_context": {
-                "static_text": "Город: Пермь",
-                "city_slug": "perm",
-                "city_name": "Пермь",
-            },
-        }
-    )
-    assert state["city_slug"] == "perm"
-    assert resolve_calls == []
-    assert resolvers[0].calls == 0
-
-
-async def test_город_из_профиля_точное_совпадение_без_модели(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    """Имя города уже в профиле, слага нет — ищем по профилю, не по реплике."""
-    resolve_calls: list[str] = []
-    real = nodes_module.resolve_city
-
-    async def _spy(text: str, cities: Any, *, resolver: Any = None):
-        resolve_calls.append(text)
-        return await real(text, cities, resolver=resolver)
-
-    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
-    model["result"] = {"understood": [], "reply": "Хорошо."}
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="У меня проспект Просвещения, адрес")],
-            "profile": {
-                "caller_name": "Мария",
-                "city": "Пермь",
-                "student_is_caller": "да",
-                "experience": "впервые",
-                "transmission": "механика",
-            },
-            "step_status": {
-                "name": "closed",
-                "city": "closed",
-                "who_studies": "closed",
-                "experience": "closed",
-                "transmission": "closed",
-            },
-            "step_attempts": {
-                "name": 1,
-                "city": 1,
-                "who_studies": 1,
-                "experience": 1,
-                "transmission": 1,
-            },
-        }
-    )
-    assert state["city_slug"] == "perm"
-    assert state["city_name"] == "Пермь"
-    assert resolve_calls == ["Пермь"]
-    assert resolvers[0].calls == 0
-
-
-async def test_ведущий_шаг_city_ищет_в_реплике(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    """Ведущий шаг заполняет city — текст для резолва берётся из реплики."""
-    resolve_calls: list[str] = []
-    real = nodes_module.resolve_city
-
-    async def _spy(text: str, cities: Any, *, resolver: Any = None):
-        resolve_calls.append(text)
-        return await real(text, cities, resolver=resolver)
-
-    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Отлично, Пермь. Учиться будете сами?",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
-    assert state["city_slug"] == "perm"
-    assert resolve_calls == ["Пермь"]
-    assert resolvers[0].calls == 0
-
-
-async def test_заполнитель_города_не_зовётся_при_нулевых_попытках(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    """Шаг city ещё не задавался — resolve_city не вызывается."""
-    resolve_calls: list[str] = []
-    real = nodes_module.resolve_city
-
-    async def _spy(text: str, cities: Any, *, resolver: Any = None):
-        resolve_calls.append(text)
-        return await real(text, cities, resolver=resolver)
-
-    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Из какого города?",
-    }
-    await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Да, хорошо")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
-    assert resolve_calls == []
-    assert resolvers[0].calls == 0
-
-
-async def test_заполнитель_города_зовётся_когда_шаг_уже_задавали(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    """Счётчик city > 0 и поле пустое — резолвер ищет в реплике."""
-    resolve_calls: list[str] = []
-    real = nodes_module.resolve_city
-
-    async def _spy(text: str, cities: Any, *, resolver: Any = None):
-        resolve_calls.append(text)
-        return await real(text, cities, resolver=resolver)
-
-    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Учиться будете сами?",
-    }
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed", "city": "pending"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
-    assert resolve_calls == ["Пермь"]
-    assert state["city_slug"] == "perm"
-
-
-async def test_слаг_города_доживает_до_следующего_хода(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    """Два хода подряд: после резолва второй lookup не зовёт resolve_city."""
-    resolve_calls: list[str] = []
-    real = nodes_module.resolve_city
-
-    async def _spy(text: str, cities: Any, *, resolver: Any = None):
-        resolve_calls.append(text)
-        return await real(text, cities, resolver=resolver)
-
-    monkeypatch.setattr(nodes_module, "resolve_city", _spy)
-    model["result"] = {
-        "understood": [],
-        "aside_id": None,
-        "resume_step": True,
-        "reply": "Отлично, Пермь. Учиться будете сами?",
-    }
-    first = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
-    assert first["city_slug"] == "perm"
-    assert first.get("conversation_context", {}).get("city_slug") == "perm"
-    assert resolve_calls == ["Пермь"]
-
-    model["result"] = {"understood": [], "reply": "Хорошо."}
-    second = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="У меня проспект Просвещения, адрес")],
-            "city_slug": first["city_slug"],
-            "city_name": first["city_name"],
-            "profile": {
-                **dict(first.get("profile") or {}),
-                "student_is_caller": "да",
-                "experience": "впервые",
-                "transmission": "механика",
-            },
-            "step_status": {
-                "name": "closed",
-                "city": "closed",
-                "who_studies": "closed",
-                "experience": "closed",
-                "transmission": "closed",
-            },
-            "conversation_context": first.get("conversation_context") or {},
-            "turn": first.get("turn") or 1,
+            "conversation_context": first_ctx,
+            "turn": 1,
         }
     )
     assert second["city_slug"] == "perm"
-    assert resolve_calls == ["Пермь"]
     assert resolvers[0].calls == 0
 
 
@@ -649,71 +390,11 @@ async def test_пустая_версия_из_env_берёт_последнюю(
     assert state["script_version"] == "4"
 
 
-async def test_заглушка_города_без_модели_и_видна_генератору(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
-    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
-        }
-    )
-    assert state.get("spoken_filler")
-    filler = state["spoken_filler"] or ""
-    assert "город" in filler
-    assert "Пермь" not in filler
-    assert "перм" not in filler.lower()
-    # Резолвер LLM не звался для точного совпадения.
-    assert resolvers[0].calls == 0
-    prompt = model["messages"][0].content
-    assert "уже ушла фраза" in prompt or filler in prompt
-
-
-async def test_заглушка_не_берёт_текст_клиента(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
-    model["result"] = {"understood": [], "reply": "В каком городе?"}
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Для себя")],
-            "step_status": {"name": "closed", "city": "closed"},
-            "city_slug": "perm",
-            "city_name": "Пермь",
-            "profile": {"caller_name": "Мария", "city": "Пермь"},
-        }
-    )
-    # Ход без похода в справочник за городом/филиалом — заглушки нет.
-    assert not state.get("spoken_filler")
-
-
-async def test_заглушка_не_два_хода_подряд(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
-):
-    monkeypatch.setattr(nodes_module.settings, "lookup_fillers_enabled", True)
-    model["result"] = {"understood": [], "reply": "Учиться будете сами?"}
-    state = await graph.ainvoke(
-        {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
-            "turn": 1,
-            "last_filler_turn": 1,
-        }
-    )
-    # turn станет 2, last_filler_turn=1 → подряд, молчим.
-    assert not state.get("spoken_filler")
-
-
 async def test_образец_в_промпте_склейки_мимо_модели_нет(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
     """Шаг terms: образец в промпте, в эфир только реплика модели."""
+    from graph.contexter import reply_hash
     from graph.prompts import _SAMPLE_PREFIX
 
     model["result"] = {
@@ -745,11 +426,11 @@ async def test_образец_в_промпте_склейки_мимо_моде
                 "static_text": "Город: Пермь",
                 "city_slug": "perm",
                 "city_name": "Пермь",
+                "dynamic_reply_hash": reply_hash("механика"),
             },
         }
     )
     assert state["current_step"] == "terms"
-    assert state["route"] == "lookup"
     assert model["calls"] == 1
     prompt = model["messages"][0].content
     assert _SAMPLE_PREFIX in prompt
@@ -794,7 +475,6 @@ async def test_подтверждение_на_шаге_образца_зовё�
         }
     )
     assert state["current_step"] == "terms"
-    assert state["route"] == "lookup"
     assert model["calls"] == 1
 
 
@@ -836,7 +516,6 @@ async def test_реплика_по_существу_на_шаге_образца
     )
     assert state["current_step"] == "terms"
     assert model["calls"] == 1
-    assert state["route"] in ("lookup", "respond")
 
 
 async def test_счётчик_растёт_у_всех_шагов_шапки(
@@ -864,6 +543,59 @@ async def test_счётчик_растёт_у_всех_шагов_шапки(
     # Свежий who_studies тоже в шапке — счётчик с нуля.
     assert attempts.get("who_studies") == 1
     assert state["head_steps"] == ["name", "city", "who_studies"]
+    # Ведущий уже висящий — new_step не указывает на шаг дальше по шапке.
+    assert state.get("head_new_step") is None
+
+
+async def test_head_new_step_ведущий_если_взят_впервые(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """При шапке из нескольких шагов new_step — ведущий, не шаг дальше."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    # Ведущий name ещё не брали — он и есть новый шаг хода.
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="здравствуйте")],
+            "step_status": {},
+            "step_attempts": {},
+            "step_taken_turn": {},
+            "turn": 1,
+        }
+    )
+    head = state.get("head_steps") or []
+    assert head
+    assert state.get("head_new_step") == head[0]
+    if len(head) > 1:
+        assert state.get("head_new_step") != head[-1] or head[0] == head[-1]
+
+
+async def test_head_new_step_none_когда_все_висящие(
+    spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
+):
+    """Мягкий потолок: шапка из висящих — head_new_step is None."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 2)
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Как я могу к вам обращаться?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="ну не знаю пока")],
+            "step_status": {"name": "pending", "city": "pending"},
+            "step_attempts": {"name": 1, "city": 1},
+            "step_taken_turn": {"name": 1, "city": 1},
+            "turn": 3,
+        }
+    )
+    assert state["head_steps"] == ["name", "city"]
+    assert state.get("head_new_step") is None
 
 
 async def test_taken_turn_всем_шапке_без_перезаписи(
@@ -1071,7 +803,6 @@ async def test_вопрос_на_шаге_образца_зовёт_модель
     )
     assert state["current_step"] == "terms"
     assert model["calls"] == 1
-    assert state["route"] != "verbatim"
 
 
 async def test_просьба_рассказать_на_шаге_образца_зовёт_модель(
@@ -1113,26 +844,26 @@ async def test_просьба_рассказать_на_шаге_образца_
         }
     )
     assert state["current_step"] == "terms"
-    assert state["route"] != "verbatim"
     assert model["calls"] == 1
 
 
-async def test_граф_без_узла_check_порядок_ingest_lookup_plan_respond_commit():
-    """Топология: ingest → lookup → plan → respond → commit; check нет."""
+async def test_граф_без_узла_check_порядок_ingest_plan_respond_commit():
+    """Топология: ingest → plan → respond → commit; check и lookup нет."""
     from graph.graph import build_graph
 
     built = build_graph()
     nodes = set(built.nodes)
     assert "check" not in nodes
+    assert "lookup" not in nodes
     assert "verbatim" not in nodes
-    assert nodes == {"ingest", "lookup", "plan", "respond", "commit"}
+    assert nodes == {"ingest", "plan", "respond", "commit"}
 
     edges = built.edges
-    assert ("ingest", "lookup") in edges
-    assert ("lookup", "plan") in edges
+    assert ("ingest", "plan") in edges
     assert ("plan", "respond") in edges
     assert ("respond", "commit") in edges
     assert not any(src == "check" or tgt == "check" for src, tgt in edges)
+    assert not any(src == "lookup" or tgt == "lookup" for src, tgt in edges)
     assert not built.waiting_edges
 
 
@@ -1283,41 +1014,1040 @@ async def test_основной_ход_не_ждёт_лайв_и_не_падае
     assert checker.calls == 0
 
 
-async def test_plan_получает_результаты_lookup(
+async def test_respond_не_зовёт_контекстер_если_dynamic_reply_совпал(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """Основной ход не зовёт контекстер: читает динамику из кеша при совпадении."""
+    from graph.context import DYN_READY, ConversationContext
+    from graph.context_store import MemoryContextStore
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    reply = "какие филиалы у Ленина?"
+    fact = "Филиалы под запрос: ул. Ленина, 1."
+    digest = reply_hash(reply)
+    ctx_mem = MemoryContextStore()
+    await ctx_mem.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            dynamic_text=fact,
+            dynamic_status=DYN_READY,
+            dynamic_reply=reply,
+            dynamic_reply_hash=digest,
+        ),
+    )
+    monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
+
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться")
+
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+    model["result"] = {"understood": [], "aside_id": None, "reply": "Рядом с Ленина есть филиал."}
+
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "dynamic_text": fact,
+            "dynamic_status": DYN_READY,
+            "dynamic_reply": reply,
+            "dynamic_reply_hash": digest,
+        },
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert fact in out["conversation_context"]["dynamic_text"]
+    assert model["calls"] == 1
+    prompt = model["messages"][0].content
+    assert fact in prompt
+    assert "готово" in prompt.lower() or "Город: Пермь" in prompt
+
+
+async def test_respond_при_чужом_searching_hash_полная_сборка(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+):
+    """SEARCHING с чужим хешем — полная сборка; накопленная динамика остаётся."""
+    from graph.context import DYN_READY, DYN_SEARCHING, ConversationContext
+    from graph.context_store import MemoryContextStore
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    fact = "Секретный факт про филиалы"
+    ctx_mem = MemoryContextStore()
+    await ctx_mem.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            dynamic_text=fact,
+            dynamic_status=DYN_SEARCHING,
+            dynamic_reply_hash=reply_hash("старая реплика"),
+            dynamic_reply="старая реплика",
+        ),
+    )
+    monkeypatch.setattr(nodes_module, "context_store", ctx_mem)
+
+    async def _spy(*args: Any, **kwargs: Any):
+        raise AssertionError("контекстер не должен вызываться")
+
+    monkeypatch.setattr("graph.contexter.run_contexter", _spy)
+
+    model["result"] = {"understood": [], "aside_id": None, "reply": "Хорошо."}
+
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="новая реплика")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "conversation_context": {
+            "static_text": "Город: Пермь",
+            "city_slug": "perm",
+            "dynamic_text": fact,
+            "dynamic_status": DYN_SEARCHING,
+            "dynamic_reply_hash": reply_hash("старая реплика"),
+            "dynamic_reply": "старая реплика",
+        },
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    prompt = model["messages"][0].content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in prompt
+    assert fact in prompt
+    assert "Город: Пермь" in prompt
+    assert model["calls"] == 1
+
+    # DYN_READY — тоже полная, динамика в промпте.
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        dynamic_text=fact,
+        dynamic_status=DYN_READY,
+        dynamic_reply="старая реплика",
+    )
+    await ctx_mem.save("local", ctx)
+    state["conversation_context"] = ctx.model_dump()
+    await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert fact in model["messages"][0].content
+
+
+async def test_commit_кладёт_last_agent_reply_в_кеш(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store
+):
+    """commit_node пишет произнесённую реплику в last_agent_reply."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    await ctx_store.save(
+        "local",
+        ConversationContext(static_text="Город: Пермь", city_slug="perm"),
+    )
+    spoken_text = "Рядом с Ленина есть филиал."
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="какие филиалы?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "spoken": [spoken_text],
+        "turn_result": {"understood": [], "aside_id": None, "reply": spoken_text},
+        "conversation_context": {"static_text": "Город: Пермь", "city_slug": "perm"},
+    }
+    out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+    assert out["conversation_context"]["last_agent_reply"] == spoken_text
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert loaded.last_agent_reply == spoken_text
+    assert loaded.static_text == "Город: Пермь"
+
+
+async def test_commit_логирует_полный_текст_реплики_на_info(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
+):
+    """INFO — превью ``[commit|done]`` и полный текст произнесённого."""
+    import logging
+
+    from graph.context import ConversationContext
+    from graph.log_fmt import SPOKEN_PREVIEW_LEN, format_spoken_preview
+    from graph.progress import stage as real_stage
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", real_stage)
+    await ctx_store.save(
+        "local",
+        ConversationContext(static_text="Город: Пермь", city_slug="perm"),
+    )
+    spoken_text = (
+        "Обучение под ключ — теория, практика, автомобиль, автодром, "
+        "документы и организация экзамена в ГИБДД, доплат не будет."
+    )
+    assert len(spoken_text) > SPOKEN_PREVIEW_LEN
+    preview = format_spoken_preview(spoken_text)
+    state: dict[str, Any] = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="что входит?")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "spoken": [spoken_text],
+        "turn_result": {"understood": [], "aside_id": None, "reply": spoken_text},
+        "conversation_context": {"static_text": "Город: Пермь", "city_slug": "perm"},
+    }
+    with caplog.at_level(logging.INFO):
+        await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+
+    preview_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
+    ]
+    full_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.nodes"
+        and r.levelno == logging.INFO
+        and "полный текст реплики" in r.message
+    ]
+    assert preview_msgs
+    assert preview in preview_msgs[0]
+    assert spoken_text not in preview_msgs[0]
+    assert full_msgs
+    assert spoken_text in full_msgs[0]
+
+
+def _closed_through(script_ids: list[str], *, until: str) -> dict[str, str]:
+    """Статусы closed для всех шагов до ``until`` включительно."""
+    out: dict[str, str] = {}
+    for sid in script_ids:
+        out[sid] = "closed"
+        if sid == until:
+            break
+    return out
+
+
+async def test_ход_не_ходит_в_справочник(
+    spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
+):
+    """За основной ход нет обращений к справочнику и резолверам."""
+    calls: list[str] = []
+
+    class _KB:
+        async def list_cities(self):
+            calls.append("list_cities")
+            return []
+
+        async def get_city(self, *a, **k):
+            calls.append("get_city")
+            return None
+
+        async def list_branches(self, *a, **k):
+            calls.append("list_branches")
+            return []
+
+        async def get_branch(self, *a, **k):
+            calls.append("get_branch")
+            return None
+
+    monkeypatch.setattr("graph.checker_graph.vector_kb", _KB())
+    model["result"] = {"understood": [], "reply": "Слушаю."}
+    await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
+    assert calls == []
+    assert resolvers[0].calls == 0
+    assert resolvers[1].calls == 0
+
+
+async def test_ready_hash_полная_и_короткая_сборка(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """Лестница по недостающим данным; чужой хеш и готовые данные — full."""
+    from graph.context import (
+        DYN_MISSING,
+        DYN_READY,
+        DYN_SEARCHING,
+        DYN_WORKING,
+        ConversationContext,
+    )
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    reply = "какие филиалы у Просвещения?"
+    digest = reply_hash(reply)
+    kinds: list[str] = []
+
+    def _stage(name: str, _msg: str, _status: str = "done", **kwargs):
+        if name == "prompt" and kwargs.get("prompt"):
+            kinds.append(str(kwargs["prompt"]))
+
+    monkeypatch.setattr(nodes_module, "stage", _stage)
+
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        dynamic_status=DYN_WORKING,
+        pending_fields=["branch"],
+        dynamic_reply_hash=digest,
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+
+    async def _ready_after_filler(n: int, _messages):
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "dynamic_text": "Филиалы под запрос: ул. Ленина, 1.",
+                    }
+                ),
+            )
+
+    model["on_call"] = _ready_after_filler
+    model["result"] = [
+        {"reply": "Секунду…"},
+        {"reply": "Ближайшие на Ленина."},
+    ]
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "profile": {"city": "Пермь"},
+        "turn": 2,
+        "conversation_context": ctx.model_dump(),
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert kinds == ["filler", "full"]
+
+    kinds.clear()
+    model["on_call"] = None
+    model["all_messages"] = []
+    model["calls"] = 0
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        dynamic_text="Филиалы под запрос: ул. Ленина, 1.",
+        dynamic_status=DYN_SEARCHING,
+        pending_fields=["branch"],
+        dynamic_reply_hash=reply_hash("другая реплика"),
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    state["conversation_context"] = ctx.model_dump()
+    model["result"] = {"reply": "Ближайшие на Ленина."}
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert kinds == ["full"]
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+
+    for status in (DYN_READY, DYN_MISSING):
+        kinds.clear()
+        model["calls"] = 0
+        ctx = ConversationContext(
+            city_slug="perm",
+            static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+            dynamic_text="Филиалы под запрос: ул. Ленина, 1.",
+            dynamic_status=status,
+            dynamic_reply_hash=digest,
+            dynamic_reply=reply,
+        )
+        await ctx_store.save("local", ctx)
+        state["conversation_context"] = ctx.model_dump()
+        model["result"] = {"reply": "Ок."}
+        out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+        assert out.get("expect_continuation") is False
+        assert kinds == ["full"]
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+
+
+async def test_commit_протаскивает_expect_continuation(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+):
+    """Commit не затирает флаг; лестница сама флаг не ставит."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    reply = "какие филиалы у Просвещения?"
+    ctx_full = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text="Статика разговора:\nГород: Пермь (слаг perm).",
+        dynamic_text="Филиалы под запрос: ул. Ленина, 1.",
+    )
+    await ctx_store.save("local", ctx_full)
+    state_full = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "profile": {"city": "Пермь"},
+        "turn": 3,
+        "conversation_context": ctx_full.model_dump(),
+    }
+    model["result"] = {"reply": "Ближайший на Ленина."}
+    respond_full = await nodes_module.respond_node(state_full, None)  # type: ignore[arg-type]
+    assert respond_full.get("expect_continuation") is False
+    commit_full_state = {
+        **state_full,
+        **respond_full,
+        "spoken": respond_full.get("spoken") or ["Ближайший на Ленина."],
+    }
+    commit_full = await nodes_module.commit_node(commit_full_state, None)  # type: ignore[arg-type]
+    assert commit_full.get("expect_continuation") is False
+
+    commit_true = await nodes_module.commit_node(
+        {**commit_full_state, "expect_continuation": True},
+        None,  # type: ignore[arg-type]
+    )
+    assert commit_true.get("expect_continuation") is True
+
+
+async def test_respond_без_знаний_полная_сборка(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+):
+    """Ведущий шаг без объявленных знаний и без статуса поиска — полная сборка."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    reply = "Меня Андрей зовут"
+    await ctx_store.save("local", ConversationContext())
+    model["result"] = {"reply": "Приятно познакомиться, Андрей."}
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "head_steps": ["name"],
+        "conversation_context": {},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+
+
+async def test_respond_недостающие_факты_живая_реакция(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """Ведущий шаг с недостающими фактами и статусом «в работе» — filler в лестнице."""
+    from graph.context import DYN_READY, DYN_WORKING, ConversationContext
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    reply = "расскажите про сроки"
+    kinds: list[str] = []
+
+    def _stage(name: str, _msg: str, _status: str = "done", **kwargs):
+        if name == "prompt" and kwargs.get("prompt"):
+            kinds.append(str(kwargs["prompt"]))
+
+    monkeypatch.setattr(nodes_module, "stage", _stage)
+    digest = reply_hash(reply)
+    ctx = ConversationContext(
+        city_name="Пермь",
+        city_slug="perm",
+        dynamic_status=DYN_WORKING,
+        dynamic_reply_hash=digest,
+    )
+    await ctx_store.save("local", ctx)
+
+    async def _ready(n: int, _messages):
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "static_text": "Статика разговора:\nГород: Пермь (слаг perm).",
+                    }
+                ),
+            )
+
+    model["on_call"] = _ready
+    model["result"] = [{"reply": "Секунду…"}, {"reply": "Сроки такие."}]
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "terms",
+        "head_steps": ["terms"],
+        "profile": {"city": "Пермь"},
+        "conversation_context": ctx.model_dump(),
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert kinds[0] == "filler"
+    prompt = model["all_messages"][0][0].content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" not in prompt
+    assert "думает вслух" in prompt.lower() or "паузу" in prompt.lower()
+
+
+async def test_respond_searching_даже_если_данные_на_месте(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+):
+    """Данные на месте — лестницы нет, даже при DYN_SEARCHING."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    reply = "ок"
+    digest = reply_hash(reply)
+    ctx = ConversationContext(
+        city_slug="perm",
+        city_name="Пермь",
+        static_text=(
+            "Статика разговора:\nГород: Пермь (слаг perm).\n"
+            "Цена (готовая фраза, произносить только так): от 10000"
+        ),
+        dynamic_status=DYN_SEARCHING,
+        dynamic_reply_hash=digest,
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    model["result"] = {"reply": "Стоимость от десяти тысяч."}
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content=reply)],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "price",
+        "head_steps": ["price"],
+        "profile": {"city": "Пермь"},
+        "conversation_context": ctx.model_dump(),
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert model["calls"] == 1
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+
+
+async def test_continuation_всегда_полная_сборка(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """На turn_kind=continuation всегда полная сборка, даже при SEARCHING."""
+    from graph.context import DYN_SEARCHING, ConversationContext
+    from graph.contexter import reply_hash
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": "continuation", "thread_id": "local"}},
+    )
+    reply = "Просвещения"
+    ctx = ConversationContext(
+        static_text="Город: Пермь",
+        dynamic_text="Филиалы: Ленина",
+        dynamic_status=DYN_SEARCHING,
+        dynamic_reply_hash=reply_hash(reply),
+        dynamic_reply=reply,
+    )
+    await ctx_store.save("local", ctx)
+    model["result"] = {"reply": "Ближайшие — на Ленина."}
+    state = {
+        **new_state_defaults(),
+        "messages": [
+            HumanMessage(content=reply),
+            AIMessage(content="Сейчас уточню филиалы."),
+        ],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "branch",
+        "head_steps": ["branch"],
+        "turn": 3,
+        "turn_kind": "continuation",
+        "conversation_context": ctx.model_dump(),
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+
+
+async def test_continuation_не_растит_счётчики(
+    spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
+):
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": "continuation", "thread_id": "local"}},
+    )
+    model["result"] = {"reply": "Ближайшие — на Ленина."}
+    before_attempts = {"name": 1, "city": 1}
+    state = await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="Пермь"),
+                AIMessage(content="Сейчас уточню филиалы."),
+            ],
+            "step_status": {"name": "closed", "city": "pending"},
+            "step_attempts": dict(before_attempts),
+            "profile": {"caller_name": "Мария", "city": "Пермь"},
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "turn": 2,
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "dynamic_status": "готово",
+                "dynamic_reply": "Пермь",
+                "dynamic_reply_hash": "",
+            },
+        }
+    )
+    assert state["turn_kind"] == "continuation"
+    # Попытки не выросли относительно входа (plan не плюсует на continuation).
+    for sid, count in before_attempts.items():
+        assert int(state["step_attempts"].get(sid, 0)) == count
+    # Новые шаги в работу не берутся.
+    in_work = set(state.get("step_in_work") or [])
+    assert "who_studies" not in in_work
+    assert state["step_status"].get("city") != "closed"
+
+
+async def test_шапка_помечает_шаги_взятыми_в_работу(
     spoken, store, checker, kb, resolvers, model, use_v2
 ):
-    """После lookup plan видит слаг города; закрытия — только из кеша лайва."""
+    """Шаги, отданные в шапку, попадают в ``in_work``."""
     model["result"] = {
         "understood": [],
         "aside_id": None,
         "resume_step": True,
-        "reply": "Отлично, Пермь. Учиться будете сами?",
+        "reply": "Как я могу к вам обращаться?",
     }
     state = await graph.ainvoke(
         {
-            "messages": [HumanMessage(content="Пермь")],
-            "step_status": {"name": "closed"},
-            "step_attempts": {"name": 1, "city": 1},
-            "profile": {"caller_name": "Мария"},
+            "messages": [HumanMessage(content="здравствуйте")],
+            "step_status": {},
+            "step_attempts": {},
+            "step_taken_turn": {},
+            "step_in_work": [],
+            "turn": 1,
         }
     )
-    assert state["city_slug"] == "perm"
-    assert state["current_step"] in ("city", "who_studies")
-    assert state.get("step_status", {}).get("name") == "closed"
-    assert int(state.get("step_attempts", {}).get(state["current_step"], 0)) >= 1
+    head = state.get("head_steps") or []
+    assert head
+    in_work = set(state.get("step_in_work") or [])
+    for step_id in head:
+        assert step_id in in_work
+        assert int(state["step_attempts"].get(step_id, 0)) >= 1
 
 
-async def test_ошибка_lookup_не_роняет_ход(
-    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2
+async def test_silence_выбирает_сборку_и_не_растит_счётчики(
+    spoken, store, checker, kb, resolvers, model, use_v2, monkeypatch
 ):
-    """Исключение в резолвере глотается; генератор отрабатывает."""
+    """На turn_kind=silence — полная сборка, счётчики стоят, expect_continuation=False."""
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {
+            "configurable": {
+                "turn_kind": "silence",
+                "silence_attempt": 1,
+                "thread_id": "local",
+            }
+        },
+    )
+    model["result"] = {"reply": "Всё понятно по срокам, или есть вопрос?"}
+    before_attempts = {"name": 1, "city": 1, "theory_format": 1}
+    state = await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(content="Пермь"),
+                AIMessage(content="Обучение под ключ. Теорию удобнее очно?"),
+            ],
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "theory_format": "pending",
+            },
+            "step_attempts": dict(before_attempts),
+            "profile": {"caller_name": "Мария", "city": "Пермь"},
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "turn": 2,
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "dynamic_status": "готово",
+                "dynamic_reply": "Пермь",
+                "dynamic_reply_hash": "",
+            },
+        }
+    )
+    assert state["turn_kind"] == "silence"
+    assert state.get("expect_continuation") is False
+    for sid, count in before_attempts.items():
+        assert int(state["step_attempts"].get(sid, 0)) == count
+    # На silence новые шаги в работу не берём.
+    assert set(state.get("step_in_work") or []) == {
+        sid for sid, count in before_attempts.items() if count > 0
+    }
+    assert state["step_status"].get("theory_format") != "closed"
+    system = model["messages"][0].content
+    assert "# КАК РАБОТАТЬ" in system
+    assert "# ПРАВИЛА РЕЧИ" in system
+    assert "Реплики человека не было: он молчит, разговор продолжается." in system
+    assert "сформулировать иначе" not in system.lower()
+    assert "мягко верни" not in system.lower()
 
-    async def _boom(*args: Any, **kwargs: Any):
-        raise RuntimeError("справочник недоступен")
 
-    monkeypatch.setattr(nodes_module, "_lookup_body", _boom)
-    model["result"] = {"understood": [], "reply": "Как к вам обращаться?"}
-    state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
-    assert state["current_step"] == "name"
-    assert model["calls"] == 1
-    assert "".join(spoken) == model["result"]["reply"]
+async def test_silence_respond_полная_сборка(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store, monkeypatch
+):
+    """respond_node при silence вызывает полную сборку, не короткую silence-сборку."""
+    from graph.prompts import build_filler_messages, build_turn_messages
+    from graph.state import new_state_defaults
+    from script.source import registry
+
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {
+            "configurable": {
+                "turn_kind": "silence",
+                "silence_attempt": 2,
+                "thread_id": "local",
+            }
+        },
+    )
+    model["result"] = {"reply": "Может, уточню по теории — удобнее очно?"}
+    state = {
+        **new_state_defaults(),
+        "messages": [
+            HumanMessage(content="Пермь"),
+            AIMessage(content="Теорию удобнее очно или в приложении?"),
+        ],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "theory_format",
+        "head_steps": ["theory_format"],
+        "turn": 3,
+        "turn_kind": "silence",
+        "profile": {"city": "Пермь"},
+        "conversation_context": {"static_text": "Город: Пермь", "dynamic_status": "готово"},
+    }
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert out.get("expect_continuation") is False
+    content = model["messages"][0].content
+    assert "# КАК РАБОТАТЬ" in content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in content
+    assert "Реплики человека не было: он молчит, разговор продолжается." in content
+    assert "сформулировать иначе" not in content.lower()
+
+    script = registry.get("vector_ru", "2")
+    full_ref = build_turn_messages(
+        script=script,
+        steps=[script.step("theory_format")],
+        profile={"city": "Пермь"},
+        facts={},
+        history=state["messages"],
+        asides_done=[],
+        turn_kind="silence",
+    )[0].content
+    short_ref = build_filler_messages(
+        script,
+        messages=state["messages"],
+        history_limit=2,
+    )[0].content
+    # Размер как у полной сборки, не как у короткой.
+    assert abs(len(content) - len(full_ref)) < len(full_ref) * 0.35
+    assert len(content) > len(short_ref) * 2
+
+
+async def test_next_step_в_промпте_первый_незакрытый_после_ведущего(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """В промпте next_step — первый незакрытый после ведущего; не висящий."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "Обучение под ключ, доплат не будет. Теорию удобнее очно или в приложении?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="дистанционно")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "дистанционно",
+            },
+            "step_status": {
+                "name": "closed",
+                "city": "closed",
+                "who_studies": "closed",
+                "experience": "closed",
+                "transmission": "closed",
+                "terms": "closed",
+                "theory_format": "closed",
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+            },
+        }
+    )
+    assert state["current_step"] == "included"
+    assert state["next_step"] == "practice"
+    prompt = model["messages"][0].content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in prompt
+    assert "# ЧТО ДАЛЬШЕ" in prompt
+    assert "practice" in prompt.lower() or "практик" in prompt.lower()
+    assert prompt.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ") < prompt.index("# ЧТО ДАЛЬШЕ")
+
+
+async def test_без_следующего_шага_вопрос_ведущего(
+    spoken, store, checker, kb, resolvers, model, use_v2
+):
+    """Ведущий последний — в промпте нет перехода; конец — вопрос ведущего."""
+    model["result"] = {
+        "understood": [],
+        "aside_id": None,
+        "resume_step": True,
+        "reply": "В каком мессенджере удобнее — Telegram или WhatsApp?",
+    }
+    state = await graph.ainvoke(
+        {
+            "messages": [HumanMessage(content="да, напишите")],
+            "city_slug": "perm",
+            "city_name": "Пермь",
+            "branch_slug": "perm_chernyshevskogo",
+            "profile": {
+                "city": "Пермь",
+                "caller_name": "Мария",
+                "student_is_caller": "да",
+                "experience": "впервые",
+                "transmission": "механика",
+                "theory_format": "очно",
+                "branch": "Чернышевского",
+                "outcome": "оформлю дистанционно",
+            },
+            "step_status": {
+                sid: "closed"
+                for sid in (
+                    "name",
+                    "city",
+                    "who_studies",
+                    "experience",
+                    "transmission",
+                    "terms",
+                    "theory_format",
+                    "included",
+                    "practice",
+                    "branch",
+                    "price",
+                    "payment",
+                    "tax_deduction",
+                    "closing",
+                )
+            },
+            "conversation_context": {
+                "static_text": "Город: Пермь",
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "branch_slug": "perm_chernyshevskogo",
+            },
+        }
+    )
+    assert state["current_step"] == "messenger"
+    assert state.get("next_step") in (None, "")
+    prompt = model["messages"][0].content
+    assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in prompt
+    assert "# ЧТО ДАЛЬШЕ" not in prompt
+    assert "Следующий шаг:" not in prompt
+    # Вопрос ведущего шага на месте — правило перехода не подменяет его.
+    assert "канал связи" in prompt.lower() or "продублировать" in prompt.lower()
+
+
+def _all_steps_closed(script) -> dict[str, str]:
+    """Статусы closed по всем шагам скрипта."""
+    return {step_id: "closed" for step_id in script.step_order}
+
+
+async def test_commit_флаг_из_контекста_ставит_conversation_ended(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, script, ctx_store, caplog
+):
+    """Флаг в кеше контекста — копируется в состояние треда."""
+    import logging
+
+    from graph.context import ConversationContext
+    from graph.progress import stage as real_stage
+    from graph.state import new_state_defaults
+    from script.store import ScriptProgress
+
+    monkeypatch.setattr(nodes_module, "stage", real_stage)
+    status = _all_steps_closed(script)
+    status["messenger"] = "pending"
+    await store.save(
+        "local",
+        ScriptProgress(status=status, attempts={}, taken_turn={}),
+    )
+    await ctx_store.save("local", ConversationContext(conversation_ended=True))
+    spoken_text = "До свидания, хорошего дня."
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="всё, спасибо")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "spoken": [spoken_text],
+        "turn_result": {"reply": spoken_text},
+        "turn_kind": "client",
+        "conversation_context": {},
+    }
+    with caplog.at_level(logging.INFO):
+        out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+
+    assert out.get("conversation_ended") is True
+    commit_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
+    ]
+    assert commit_msgs
+    assert "разговор закончен=True" in commit_msgs[0]
+
+
+async def test_commit_без_флага_в_контексте_ставит_ложь(
+    spoken, store, checker, kb, resolvers, model, use_v2, script, ctx_store
+):
+    """В контексте False — в состояние уходит False, ответ модели не читаем."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+    from script.store import ScriptProgress
+
+    await store.save(
+        "local",
+        ScriptProgress(status=_all_steps_closed(script), attempts={}, taken_turn={}),
+    )
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
+    spoken_text = "Могу ещё чем-то помочь?"
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="ага")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "spoken": [spoken_text],
+        "turn_result": {"reply": spoken_text, "conversation_ended": True},
+        "turn_kind": "client",
+        "conversation_ended": True,
+        "conversation_context": {},
+    }
+    out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+    assert out.get("conversation_ended") is False
+
+
+async def test_commit_флаг_переставляется_из_контекста(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
+):
+    """Флаг из контекста переставляет состояние, в том числе обратно в False."""
+    import logging
+
+    from graph.context import ConversationContext
+    from graph.progress import stage as real_stage
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", real_stage)
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
+    spoken_text = "Если что — звоните."
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="угу")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "spoken": [spoken_text],
+        "turn_result": {"reply": spoken_text},
+        "turn_kind": "client",
+        "conversation_ended": True,
+        "conversation_context": {},
+    }
+    with caplog.at_level(logging.INFO):
+        out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+
+    assert out.get("conversation_ended") is False
+    commit_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
+    ]
+    assert commit_msgs
+    assert "разговор закончен=False" in commit_msgs[0]
+
+
+async def test_commit_продолжение_не_трогает_флаг(
+    spoken, store, checker, kb, resolvers, model, use_v2, ctx_store
+):
+    """На continuation флаг из контекста не читаем и в патч не кладём."""
+    from graph.context import ConversationContext
+    from graph.state import new_state_defaults
+
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
+    spoken_text = "Ещё момент."
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="угу")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "spoken": [spoken_text],
+        "turn_result": {"reply": spoken_text},
+        "turn_kind": "continuation",
+        "conversation_ended": True,
+        "conversation_context": {},
+    }
+    out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+    assert "conversation_ended" not in out
+
+
+async def test_commit_лог_содержит_разговор_закончен_false(
+    spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
+):
+    """Признак виден в строке лога ``[commit|done]`` и при False."""
+    import logging
+
+    from graph.context import ConversationContext
+    from graph.progress import stage as real_stage
+    from graph.state import new_state_defaults
+
+    monkeypatch.setattr(nodes_module, "stage", real_stage)
+    await ctx_store.save("local", ConversationContext(conversation_ended=False))
+    spoken_text = "Как вас зовут?"
+    state = {
+        **new_state_defaults(),
+        "messages": [HumanMessage(content="здравствуйте")],
+        "script_id": "vector_ru",
+        "script_version": "2",
+        "current_step": "name",
+        "spoken": [spoken_text],
+        "turn_result": {"reply": spoken_text},
+        "turn_kind": "client",
+        "conversation_context": {},
+    }
+    with caplog.at_level(logging.INFO):
+        await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
+
+    commit_msgs = [
+        r.message
+        for r in caplog.records
+        if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
+    ]
+    assert commit_msgs
+    assert "разговор закончен=False" in commit_msgs[0]

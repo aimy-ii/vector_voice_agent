@@ -2,17 +2,22 @@
 
 ::
 
-    ingest → lookup → plan → respond → commit
+    ingest → plan → respond → commit
 
-Модельный чекер живёт только в лайв-канале. Plan читает закрытия из
-Redis-кеша и не ждёт лайв. Генератор плюсует счётчик всем шагам шапки
-в момент взятия. Прогресс скрипта пишется в Redis; в конце звонка
-слепок — в тред.
+Модельный чекер и разбор справочника живут только в лайв-канале.
+Plan читает закрытия из Redis-кеша и не ждёт лайв. Генератор плюсует
+счётчик всем шагам шапки в момент взятия. Прогресс скрипта пишется
+в Redis; в конце звонка слепок — в тред.
+
+Ход только читает кеш, собирает промпт и генерирует реплику: в справочник
+и к контекстеру не ходит.
 """
 
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -22,35 +27,46 @@ from langgraph.runtime import Runtime
 from core.config import settings
 from graph.checker import CheckerClient, close_delivered_inform
 from graph.context import (
+    DYN_NONE,
     DYN_SEARCHING,
+    DYN_WORKING,
+    ConversationContext,
     context_from_state,
-    merge_static,
+    missing_needs,
 )
-from graph.contexter import run_contexter
-from graph.facts import collect_facts, needs_of
-from graph.fillers import branch_filler, city_filler, cost_filler
+from graph.context_store import (
+    CONTEXT_FIELDS_TURN,
+    context_store,
+    merge_context_fields,
+)
+from graph.contexter import reply_hash
+from graph.facts import needs_of
 from graph.history import (
     last_agent_text,
     last_user_text,
+    normalize,
     strip_system,
+    text_of,
 )
 from graph.log_fmt import (
-    format_lookup_done,
     format_plan_done,
+    format_reply_integrity,
     format_spoken_preview,
 )
-from graph.names import given_name
-from graph.profile_fill import fill_basic_profile
 from graph.progress import say, stage
-from graph.prompts import build_turn_messages
+from graph.prompts import (
+    build_filler_messages,
+    build_turn_messages,
+    build_waiting_messages,
+)
 from graph.reconcile import count_agent_messages, delivery_patch
-from graph.resolvers import BranchResolver, CityResolver, resolve_branch, resolve_city
+from graph.resolvers import (
+    BranchResolver,
+    CityResolver,
+)
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
-from graph.situations import pick_filler
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
-from graph.tools_registry import build_context_tools
-from kb.client import vector_kb
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -78,10 +94,7 @@ from utils.llm_gen import (
 
 log = logging.getLogger(__name__)
 
-ROUTE_LOOKUP = "lookup"
-ROUTE_RESPOND = "respond"
-
-#: Подмены для офлайн-тестов.
+#: Подмены для офлайн-тестов (лайв-канал).
 _checker_client: CheckerClient | None = None
 _city_resolver: CityResolver | None = None
 _branch_resolver: BranchResolver | None = None
@@ -97,6 +110,15 @@ def _thread_id() -> str:
         return "local"
 
 
+def _configurable() -> dict[str, Any]:
+    """Словарь ``configurable`` из конфига LangGraph или пустой."""
+    try:
+        config = get_config()
+        return dict(config.get("configurable") or {})
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _call_id() -> str:
     """Идентификатор звонка для ключа скрипта в кеше.
 
@@ -104,8 +126,7 @@ def _call_id() -> str:
     лайв-треда. Без конфига — ``local``.
     """
     try:
-        config = get_config()
-        configurable = config.get("configurable") or {}
+        configurable = _configurable()
         call_id = configurable.get("call_id")
         if call_id:
             return str(call_id)
@@ -116,6 +137,23 @@ def _call_id() -> str:
         return thread_id
     except Exception:  # noqa: BLE001
         return "local"
+
+
+def _turn_kind() -> str:
+    """Признак запуска хода: ``client``, ``continuation`` или ``silence``.
+
+    Читает ``turn_kind`` из ``configurable`` рядом с ``call_id``.
+    Отсутствует или пусто — считать ``client``.
+    """
+    kind = str(_configurable().get("turn_kind") or "").strip().lower()
+    if kind in {"continuation", "silence"}:
+        return kind
+    return "client"
+
+
+def _no_client_reply(turn_kind: str) -> bool:
+    """Ход без реплики клиента: продолжение или возврат из молчания."""
+    return turn_kind in {"continuation", "silence"}
 
 
 def _script_of(state: CallState) -> CompiledScript:
@@ -165,10 +203,6 @@ def _lead_from_progress(
         pending_soft_cap=settings.pending_steps_soft_cap,
     )
     step = head[0] if head else None
-    if state.get("resume_step") and state["resume_step"] in script.steps:
-        resume = script.step(state["resume_step"])
-        if any(s.id == resume.id for s in head):
-            step = resume
     return head, step
 
 
@@ -227,39 +261,38 @@ def _price_phrase_for(script: CompiledScript, price: Any) -> str | None:
 
 
 def _step_needs_lookup(
-    step: AnyStep | None,
+    steps: Sequence[AnyStep],
     state: CallState,
     *,
     city_asked: bool = True,
     branch_asked: bool = True,
 ) -> bool:
-    """Нужен ли справочник на этом ведущем шаге.
+    """Нужен ли справочник хотя бы одному шагу шапки.
 
     Город и филиал ищем только если шаг, который их заполняет, уже
-    задавался (счётчик попыток > 0).
+    задавался или взят в шапку этого хода.
 
     Args:
-        step: ведущий шаг или None.
+        steps: шапка хода (может быть пустой).
         state: состояние хода (слаги города/филиала).
         city_asked: шаг city уже был в шапке.
         branch_asked: шаг branch уже был в шапке.
 
     Returns:
-        True — резолвер/факты имеют смысл; иначе узел может выйти сразу.
+        True — резолвер/факты имеют смысл; иначе можно выйти сразу.
     """
-    if step is None:
-        return False
-    if needs_of(step):
-        return True
-    if city_asked and _step_fills_city(step) and not state.get("city_slug"):
-        return True
-    if (
-        branch_asked
-        and _step_fills_branch(step)
-        and state.get("city_slug")
-        and not state.get("branch_slug")
-    ):
-        return True
+    for step in steps:
+        if needs_of(step):
+            return True
+        if city_asked and _step_fills_city(step) and not state.get("city_slug"):
+            return True
+        if (
+            branch_asked
+            and _step_fills_branch(step)
+            and state.get("city_slug")
+            and not state.get("branch_slug")
+        ):
+            return True
     return False
 
 
@@ -301,12 +334,46 @@ async def _save_progress(
     to_save = progress
     if fields is not None:
         cached = await script_store.load(_call_id())
-        # Промах кеша: базой берём локальный прогресс (из state), иначе
-        # точечная запись на пустой объект затрёт чужие поля.
         base = cached if cached is not None else progress
         to_save = merge_progress_fields(base, progress, fields)
     await script_store.save(_call_id(), to_save)
     return progress_to_state(to_save) if persist_state else {}
+
+
+async def _load_context(state: CallState) -> ConversationContext:
+    """Читает контекст из кеша; при промахе — из состояния треда.
+
+    Args:
+        state: состояние звонка.
+
+    Returns:
+        Контекст разговора.
+    """
+    stored = await context_store.load(_call_id())
+    if stored is not None:
+        return stored
+    return context_from_state(state.get("conversation_context"))
+
+
+async def _save_context(
+    context: ConversationContext,
+    *,
+    fields: frozenset[str],
+) -> dict[str, Any]:
+    """Сливает выбранные поля в кеш и возвращает зеркало для состояния.
+
+    Args:
+        context: локальный контекст канала.
+        fields: набор полей для точечной записи (статика или динамика).
+
+    Returns:
+        Правки ``{"conversation_context": ...}`` для ``CallState``.
+    """
+    cached = await context_store.load(_call_id())
+    base = cached if cached is not None else context
+    to_save = merge_context_fields(base, context, fields)
+    await context_store.save(_call_id(), to_save)
+    return {"conversation_context": to_save.model_dump()}
 
 
 def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]:
@@ -340,6 +407,30 @@ def call_summary(state: CallState) -> dict[str, Any]:
     )
 
 
+def _tail_has_agent_reply(messages: Sequence[Any], reply: str) -> bool:
+    """Есть ли в хвосте истории последняя реплика бота.
+
+    Смотрит последнюю AI-реплику (хвостовой human не мешает). Сравнение
+    через ``normalize``: снимок бота и запись мозга могут отличаться
+    пробелами и знаками.
+    """
+    target = normalize(reply)
+    if not target:
+        return True
+    for message in reversed(list(messages)):
+        if isinstance(message, AIMessage):
+            return normalize(text_of(message)) == target
+    return False
+
+
+def _restore_last_agent_reply(messages: list[Any], reply: str) -> list[Any]:
+    """Дописывает реплику бота в хвост, перед хвостовым human если он есть."""
+    agent = AIMessage(content=reply)
+    if messages and getattr(messages[-1], "type", None) == "human":
+        return list(messages[:-1]) + [agent, messages[-1]]
+    return list(messages) + [agent]
+
+
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое."""
     ctx: CallContext = runtime.context or {}
@@ -355,14 +446,20 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch["script_version"] = script.version
 
     messages = strip_system(state.get("messages") or [])
+    # Снимок бота может затереть произнесённое: commit кладёт его в
+    # last_agent_reply, здесь возвращаем в хвост, если пропало.
+    last_reply = ((await _load_context(state)).last_agent_reply or "").strip()
+    if last_reply and not _tail_has_agent_reply(messages, last_reply):
+        messages = _restore_last_agent_reply(messages, last_reply)
     patch["messages"] = messages
     patch["turn"] = int(state.get("turn") or 0) + 1
     patch["facts"] = {}
     patch["spoken"] = []
-    patch["spoken_filler"] = None
     patch["turn_result"] = {}
     patch["last_error"] = None
     patch["branch_candidates"] = []
+    patch["expect_continuation"] = False
+    patch["turn_kind"] = _turn_kind()
 
     # Внешний контекст запуска или уже запечённый conversation_context.
     conv = context_from_state(state.get("conversation_context"))
@@ -388,26 +485,32 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
 
 async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Берёт шапку из кеша, плюсует счётчик всем её шагам, выбирает маршрут.
+    """Берёт шапку из кеша и помечает её шаги взятыми в работу.
 
     Закрытия шагов делает только лайв-канал; здесь читаем уже записанный
     прогресс и закрываем ``inform`` по факту доставки прошлой реплики.
     Ждать лайв-канал нельзя: что не успел — увидим следующим ходом.
 
-    Счётчик растёт у каждого шага шапки: генератор мог отработать любой
-    из них, и для чекера шаг считается заданным. Побочный эффект — висящий
-    шаг тратит попытку каждый ход, пока висит; при потолке в две попытки
-    он уходит из шапки быстрее. Если на прогоне шаги вылетают слишком рано,
-    поднимают ``STEP_ATTEMPT_LIMIT`` настройкой, без правки кода.
+    Шаги шапки помечаются ``in_work``; счётчик ``attempts`` растёт для
+    совместимости формата, но решения по нему не принимаются. На ходе без
+    реплики клиента (``continuation`` / ``silence``) пометки и счётчики
+    не трогаем.
+
+    Если на ходе с репликой клиента ведущий снова совпал с шагом прошлого
+    хода — берём следующий открытый из шапки (шапка сама не меняется).
+    Так не ведём повторно шаг, который судья ещё не успел закрыть.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
     profile = _merge_profile(state, progress)
     turn = int(state.get("turn") or 0)
+    turn_kind = str(state.get("turn_kind") or "client")
+    no_client_reply = _no_client_reply(turn_kind)
 
     # Inform закрывается кодом по доставке — это не модельный чекер.
+    # Без реплики клиента закрывать нечего.
     delivered_step = state.get("delivered_step")
-    if delivered_step and state.get("last_delivered", True):
+    if not no_client_reply and delivered_step and state.get("last_delivered", True):
         before = dict(progress.status)
         progress = close_delivered_inform(
             script=script,
@@ -429,20 +532,36 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Шаг попал в шапку — генератор мог его отработать, для чекера задан.
-    for head_step in head:
-        prev = int(progress.attempts.get(head_step.id, 0))
-        progress.attempts[head_step.id] = prev + 1
-        if head_step.id not in progress.taken_turn:
-            progress.taken_turn[head_step.id] = turn
-        progress.status.setdefault(head_step.id, "pending")
+    # Повтор ведущего прошлого хода на реплике клиента — сдвиг по шапке.
+    prev_step_id = state.get("current_step")
+    shifted_from: str | None = None
+    if (
+        not no_client_reply
+        and step is not None
+        and prev_step_id
+        and step.id == prev_step_id
+        and len(head) > 1
+    ):
+        shifted_from = step.id
+        step = head[1]
+
+    # Новый шаг хода — только ведущий шапки, если взят впервые.
+    new_step_id: str | None = None
+    if head and head[0].id not in progress.in_work:
+        new_step_id = head[0].id
+
+    # Без реплики клиента шаги не закрываем и в работу не берём.
+    if not no_client_reply:
+        for head_step in head:
+            prev = int(progress.attempts.get(head_step.id, 0))
+            progress.attempts[head_step.id] = prev + 1
+            if head_step.id not in progress.taken_turn:
+                progress.taken_turn[head_step.id] = turn
+            if head_step.id not in progress.in_work:
+                progress.in_work.append(head_step.id)
+            progress.status.setdefault(head_step.id, "pending")
 
     progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_GENERATOR)
-
-    if _step_needs_lookup(step, state):
-        route = ROUTE_LOOKUP
-    else:
-        route = ROUTE_RESPOND
 
     nxt = (
         peek_next_step(
@@ -461,17 +580,17 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "plan",
         format_plan_done(
             step_id=step.id if step else None,
-            route=route,
+            route="respond",
             head=[(s.id, int(progress.attempts.get(s.id, 0))) for s in head],
             city_slug=state.get("city_slug")
             or context_from_state(state.get("conversation_context")).city_slug,
             branch_slug=state.get("branch_slug")
             or context_from_state(state.get("conversation_context")).branch_slug,
             call_id=_call_id(),
+            shifted_from=shifted_from,
         ),
         "done",
         step=step.id if step else None,
-        route=route,
     )
     return {
         **progress_patch,
@@ -479,338 +598,277 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "current_step": step.id if step is not None else None,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
-        "route": route,
+        "head_new_step": new_step_id if not no_client_reply else None,
     }
 
 
-async def lookup_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Резолверы города/филиала и факты справочника; заглушки без модели.
-
-    Идёт параллельно с чекером: ведущий шаг считает сам по прогрессу.
-    Если искать нечего — сразу пустой патч. Ошибка не роняет ход.
-    """
-    try:
-        return await _lookup_body(state, runtime)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("lookup не удался: %s", exc)
-        stage("lookup", f"ошибка, пропуск: {exc}", "done")
-        return {}
-
-
-async def _lookup_body(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Тело резолвера; исключения ловит ``lookup_node``."""
-    script = _script_of(state)
-    progress = await _load_progress(state)
-    profile = _merge_profile(state, progress)
-    # Фон: базовые поля из реплики — чтобы city из текста резолвился
-    # даже когда ведущий шаг ещё не city (параллельно с чекером).
-    user_text = last_user_text(state.get("messages") or [])
-    filled = fill_basic_profile(user_text, profile)
-    if filled:
-        profile = {**profile, **filled}
-
-    _head, step = _lead_from_progress(state, progress=progress, profile=profile)
-    ctx = context_from_state(state.get("conversation_context"))
-    profile_city = str(profile.get("city") or "").strip()
-    city_asked = _field_step_attempts(script, progress, "city") > 0
-    branch_asked = _field_step_attempts(script, progress, "branch") > 0
-    # Резолвер нужен по шагу либо когда в профиле уже есть город без слага
-    # и шаг city уже задавался (иначе вхолостую не ищем).
-    needs_lookup = _step_needs_lookup(
-        step, state, city_asked=city_asked, branch_asked=branch_asked
-    ) or bool(city_asked and profile_city and not (state.get("city_slug") or ctx.city_slug))
-    if not needs_lookup:
-        # Нечего искать — не ждём справочник и не зовём контекстер.
-        stage("lookup", "нечего искать, пропуск", "done")
-        return {}
-
-    needs = needs_of(step)
-    facts: dict[str, Any] = {}
-    journal: list[dict[str, Any]] = list(state.get("tool_log") or [])
-    turn_calls: list[dict[str, Any]] = []
-    patch: dict[str, Any] = {}
-    fillers_used = list(state.get("fillers_used") or [])
-    spoken_filler: str | None = None
-    turn = int(state.get("turn") or 0)
-    last_filler_turn = int(state.get("last_filler_turn") or 0)
-    # Заглушка не звучит два хода подряд (нулевой ход — «ещё не было»).
-    allow_filler = settings.lookup_fillers_enabled and not (
-        last_filler_turn > 0 and last_filler_turn == turn - 1
+def _build_respond_messages(
+    *,
+    prompt_kind: str,
+    script: CompiledScript,
+    state: CallState,
+    history: Sequence[Any],
+    profile: dict[str, str],
+    facts: dict[str, Any],
+    lead: AnyStep | None,
+    head: Sequence[AnyStep],
+    context_text: str,
+    dynamic_status: str,
+    pending_fields: list[str],
+    turn_kind: str,
+) -> list[Any]:
+    """Собирает сообщения генератора для одной ступени."""
+    if prompt_kind == "waiting":
+        return build_waiting_messages(
+            script,
+            messages=history,
+            profile=profile,
+            pending_fields=pending_fields,
+            step=lead,
+            history_limit=settings.waiting_history_limit,
+            turn_kind=turn_kind,
+            context_text=context_text,
+        )
+    if prompt_kind == "filler":
+        return build_filler_messages(
+            script,
+            messages=history,
+            history_limit=settings.filler_history_limit,
+        )
+    closed_steps = [
+        script.steps[step_id]
+        for step_id, status in (state.get("step_status") or {}).items()
+        if status == "closed" and step_id in script.steps
+    ]
+    next_step_id = state.get("next_step")
+    next_step = (
+        script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
+    )
+    return build_turn_messages(
+        script=script,
+        steps=list(head),
+        profile=profile,
+        facts=facts,
+        history=history,
+        asides_done=list(state.get("asides_done") or []),
+        next_step=next_step,
+        context_text=context_text,
+        dynamic_status=dynamic_status,
+        pending_fields=pending_fields,
+        turn_kind=turn_kind,
+        closed_steps=closed_steps,
     )
 
-    def _speak_filler(phrase: str | None) -> None:
-        nonlocal spoken_filler
-        if not phrase or spoken_filler:
-            return
-        spoken_filler = phrase
-        say(phrase + " ")
-        fillers_used.append(phrase)
 
-    def _note(entry: dict[str, Any]) -> None:
-        journal.append(entry)
-        turn_calls.append(entry)
-
-    # Город: только если шаг city уже задавался и слага ещё нет —
-    # ведущий шаг собирает city (ищем в реплике) либо имя уже в профиле.
-    fills_city = _step_fills_city(step)
-    if city_asked and fills_city and user_text:
-        search_text: str | None = user_text
-    elif city_asked and profile_city:
-        search_text = profile_city
-    else:
-        search_text = None
-
-    existing_slug = state.get("city_slug") or ctx.city_slug
-    if not existing_slug and search_text:
-        if allow_filler:
-            _speak_filler(city_filler(script.params.city_fillers, used=fillers_used))
-
-        cities = await vector_kb.list_cities()
-        _note({"call": "list_cities", "found": len(cities)})
-        resolution = await resolve_city(search_text, cities, resolver=_city_resolver)
-        _note(
-            {
-                "call": "resolve_city",
-                "slug": resolution.slug,
-                "is_district": resolution.is_district,
-            }
-        )
-        if resolution.is_district:
-            facts["city_note"] = (
-                "Клиент назвал район внутри города, а не город сети. "
-                "Уточни город обучения, район городом не записывай."
-            )
-            stage("city", "слаг —, имя —, район=True", "done")
-        elif resolution.slug and resolution.name:
-            patch["city_slug"] = resolution.slug
-            patch["city_name"] = resolution.name
-            profile["city"] = resolution.name
-            city_meta = await vector_kb.get_city(resolution.slug)
-            _note({"call": "get_city", "slug": resolution.slug, "ok": city_meta is not None})
-            price_phrase = None
-            if city_meta and city_meta.get("price") is not None:
-                price_phrase = _price_phrase_for(script, city_meta.get("price"))
-            if city_meta:
-                ctx = merge_static(
-                    ctx,
-                    city_slug=resolution.slug,
-                    city_name=resolution.name,
-                    city_meta=city_meta,
-                    price_line=price_phrase,
-                )
-                if price_phrase:
-                    facts["price_line"] = price_phrase
-            stage(
-                "city",
-                f"слаг {resolution.slug}, имя {resolution.name}, район=False",
-                "done",
-            )
-        else:
-            stage("city", "не распознан", "miss")
-    elif existing_slug and search_text and fills_city:
-        # Ведущий шаг city при уже известном слаге — резолвер не зовём.
-        log.warning(
-            "Резолвер города: слаг уже есть (%s), вызов пропущен — такого быть не должно",
-            existing_slug,
-        )
-
-    city_slug = patch.get("city_slug") or state.get("city_slug") or ctx.city_slug
-
-    # Филиал: только если шаг branch уже задавался; отбор до трёх.
-    if (
-        branch_asked
-        and city_slug
-        and not (state.get("branch_slug") or ctx.branch_slug)
-        and step
-        and _step_fills_branch(step)
-        and user_text
-    ):
-        if allow_filler and not spoken_filler:
-            _speak_filler(branch_filler(script.params.branch_fillers, used=fillers_used))
-
-        branches = await vector_kb.list_branches(city_slug)
-        _note({"call": "list_branches", "slug": city_slug, "found": len(branches)})
-        resolution = await resolve_branch(user_text, branches, resolver=_branch_resolver)
-        _note(
-            {"call": "resolve_branch", "slugs": resolution.slugs, "selected": resolution.selected}
-        )
-        by_slug = {str(b.get("slug")): b for b in branches if b.get("slug")}
-        candidates = [by_slug[s] for s in resolution.slugs if s in by_slug]
-        if candidates:
-            facts["branch_options"] = [
-                {
-                    "slug": c.get("slug"),
-                    "address": c.get("address"),
-                    **({"landmark": c["landmark"]} if c.get("landmark") else {}),
-                }
-                for c in candidates
-            ]
-            patch["branch_candidates"] = [str(c.get("slug")) for c in candidates]
-        if resolution.selected and resolution.selected in by_slug:
-            branch_meta = await vector_kb.get_branch(resolution.selected)
-            _note(
-                {
-                    "call": "get_branch",
-                    "slug": resolution.selected,
-                    "ok": branch_meta is not None,
-                }
-            )
-            if branch_meta:
-                patch["branch_slug"] = resolution.selected
-                profile["branch"] = resolution.selected
-                ctx = merge_static(
-                    ctx,
-                    branch_slug=resolution.selected,
-                    branch_meta=branch_meta,
-                )
-
-    # Прочие needs шага — без city_choices в промпт.
-    extra_needs = [n for n in needs if n != "branches" or "branch_options" not in facts]
-    need_price_lookup = (
-        "price" in extra_needs
-        and city_slug
-        and not (ctx.static_text and "Стоимость" in ctx.static_text)
-        and "price_line" not in facts
-    )
-    if need_price_lookup and allow_filler and not spoken_filler:
-        _speak_filler(cost_filler(script.params.fillers, used=fillers_used))
-
-    if city_slug and extra_needs:
-        more, more_journal = await collect_facts(
-            vector_kb,
-            script=script,
-            needs=extra_needs,
-            city_slug=city_slug,
-            branch_slug=patch.get("branch_slug") or state.get("branch_slug"),
-            want_city_choices=False,
-        )
-        facts.update(more)
-        journal.extend(more_journal)
-        turn_calls.extend(more_journal)
-        # Если статика города ещё пуста, а мета уже есть — запечь.
-        if city_slug and not ctx.city_slug and more.get("city"):
-            city_name = state.get("city_name") or profile.get("city") or city_slug
-            raw_meta = await vector_kb.get_city(city_slug)
-            if raw_meta:
-                ctx = merge_static(
-                    ctx,
-                    city_slug=city_slug,
-                    city_name=str(city_name),
-                    city_meta=raw_meta,
-                    price_line=more.get("price_line"),
-                )
-
-    # Общая заглушка без предмета не звучит: предмет обязателен.
-
-    # Контекстер и на маршруте lookup: справка может прийти вместе с городом.
-    ctx = await run_contexter(
-        ctx,
-        reply=user_text,
-        tools=build_context_tools(script),
-        objections=script.objections,
-    )
-
-    stage("lookup", format_lookup_done(turn_calls), "done", calls=turn_calls)
-    patch.update(
-        {
-            "facts": facts,
-            "tool_log": journal,
-            "profile": profile,
-            "conversation_context": ctx.model_dump(),
-            "spoken_filler": spoken_filler,
-            "fillers_used": fillers_used,
-            "spoken": list(state.get("spoken") or []) + ([spoken_filler] if spoken_filler else []),
-        }
-    )
-    if spoken_filler:
-        patch["last_filler_turn"] = turn
-    return patch
+def _ladder_prompt_kind(
+    *,
+    status: str,
+    same_reply: bool,
+    stubs_spoken: int,
+    force_full: bool,
+) -> str:
+    """Выбирает сборку ступени лестницы по статусу и лимиту заглушек."""
+    if force_full or stubs_spoken >= 2:
+        return "full"
+    if same_reply and status == DYN_WORKING:
+        return "filler"
+    if same_reply and status == DYN_SEARCHING:
+        return "waiting"
+    return "full"
 
 
 async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Единственный вызов генератора за ход."""
+    """Генератор хода: штатная реплика или лестница ожидания данных.
+
+    Лестница включается только когда ведущему шагу нужны данные, которых
+    ещё нет в контексте. Ступени — отдельные генерации (filler → waiting →
+    full) с перечитыванием статуса из кеша; произнесённое дописывается в
+    локальную историю узла. Одна и та же сборка подряд не повторяется:
+    без смены статуса лестница уходит в штатную генерацию. Флаг
+    продолжения на лестнице не ставится.
+    """
     script = _script_of(state)
     head = _head_steps(state)
     facts = dict(state.get("facts") or {})
-    # Перечень городов генератору не отдаём никогда.
     facts.pop("city_choices", None)
     spoken: list[str] = []
-    ctx = context_from_state(state.get("conversation_context"))
+    ctx = await _load_context(state)
     user_text = last_user_text(state.get("messages") or [])
-    # Контекстер в ходу: реестр инструментов → динамика до генерации.
-    ctx = await run_contexter(
-        ctx,
-        reply=user_text,
-        tools=build_context_tools(script),
-        objections=script.objections,
-    )
-    fillers_used = list(state.get("fillers_used") or [])
-    spoken_filler: str | None = state.get("spoken_filler")
-    # Повторный «в поиске» после заглушки — на контекст не опираемся.
-    searching_retry = ctx.dynamic_status == DYN_SEARCHING and ctx.filler_spoken
-    if ctx.dynamic_status == DYN_SEARCHING and not ctx.filler_spoken:
-        phrase = pick_filler(ctx.situation_slug, spoken=fillers_used)
-        say(phrase + " ")
-        spoken.append(phrase)
-        fillers_used.append(phrase)
-        spoken_filler = phrase
-        ctx = ctx.model_copy(update={"filler_spoken": True})
+    turn_kind = str(state.get("turn_kind") or "client")
+    profile = dict(state.get("profile") or {})
+    is_continuation = turn_kind == "continuation"
+    is_silence = turn_kind == "silence"
 
-    messages = build_turn_messages(
-        script=script,
-        steps=head,
-        profile=dict(state.get("profile") or {}),
-        facts=facts,
-        history=state.get("messages") or [],
-        asides_done=list(state.get("asides_done") or []),
-        context_text="" if searching_retry else ctx.render(),
-        spoken_filler=spoken_filler,
-        attempts=state.get("step_attempts") or {},
-        dynamic_status=ctx.dynamic_status,
-        searching_retry=searching_retry,
-    )
-    system_len = len(messages[0].content) if messages else 0
-    stage("prompt", f"системное сообщение {system_len} символов", "done", chars=system_len)
+    digest = reply_hash(user_text) if user_text else ""
+    lead = head[0] if head else None
+    lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
+    use_ladder = bool(lead_missing) and not is_continuation and not is_silence
+
+    if is_silence:
+        # Молчание собирается полным промптом, как обычный ход: короткая
+        # сборка предписывала, что говорить, и выдавала «может, что-то
+        # пояснить» по кругу. Факт «реплики не было» подаёт continuation_block.
+        prompt_kind = "full"
+        prompt_reason = "молчание"
+        expect_continuation = False
+    elif is_continuation:
+        prompt_kind = "full"
+        prompt_reason = "продолжение"
+        expect_continuation = False
+    elif use_ladder:
+        prompt_kind = "ladder"
+        prompt_reason = f"недостающие данные ведущего шага: {', '.join(lead_missing)}"
+        expect_continuation = False
+    else:
+        prompt_kind = "full"
+        prompt_reason = "данных достаточно"
+        expect_continuation = False
+
     schema = response_format_from(TurnResult, name=TURN_SCHEMA_NAME)
+    local_history: list[Any] = list(state.get("messages") or [])
+    last_result: TurnResult = TurnResult(reply="")
+    last_ctx = ctx
+    last_error: str | None = None
 
-    def _on_delta(delta: str) -> None:
-        spoken.append(delta)
-        say(delta)
+    async def _generate(kind: str, reason: str, *, step: int | None = None) -> str:
+        """Одна генерация; дописывает в ``spoken`` и возвращает текст реплики."""
+        nonlocal last_result, last_ctx, last_error
+        context_text = last_ctx.render()
+        dynamic_status = last_ctx.dynamic_status or DYN_NONE
+        pending_fields = list(last_ctx.pending_fields or [])
+        messages = _build_respond_messages(
+            prompt_kind=kind,
+            script=script,
+            state=state,
+            history=local_history,
+            profile=profile,
+            facts=facts,
+            lead=lead,
+            head=head,
+            context_text=context_text,
+            dynamic_status=dynamic_status,
+            pending_fields=pending_fields,
+            turn_kind=turn_kind,
+        )
+        system_len = len(messages[0].content) if messages else 0
+        step_prefix = f"ступень {step}, " if step is not None else ""
+        stage(
+            "prompt",
+            f"{step_prefix}сборка {kind}, {reason}, системное сообщение {system_len} символов",
+            "done",
+            chars=system_len,
+            prompt=kind,
+            reason=reason,
+            step=step,
+        )
+        if messages:
+            log.debug("[prompt|done] %s", messages[0].content)
 
-    try:
-        async with get_llm() as llm:
-            raw = await astream_structured(
-                llm,
-                messages,
-                schema=schema,
-                text_field="reply",
-                on_delta=_on_delta,
-                purpose="генератор",
-            )
-    except LLMTurnFailed as exc:
-        reason = str(exc) or "неизвестная причина"
-        log.warning("Подстановка фолбэка: %s", reason)
-        if not spoken:
-            say(script.params.fallback)
-            spoken.append(script.params.fallback)
-        stage("respond", "модель не ответила, отдана аварийная реплика", "done")
-        return {
-            "turn_result": {},
+        streamed: list[str] = []
+
+        def _on_delta(delta: str) -> None:
+            streamed.append(delta)
+            spoken.append(delta)
+            say(delta)
+
+        try:
+            async with get_llm() as llm:
+                raw = await astream_structured(
+                    llm,
+                    messages,
+                    schema=schema,
+                    text_field="reply",
+                    on_delta=_on_delta,
+                    purpose="генератор",
+                )
+        except LLMTurnFailed as exc:
+            reason_fail = str(exc) or "неизвестная причина"
+            log.warning("Подстановка фолбэка: %s", reason_fail)
+            last_error = str(exc)
+            if not streamed:
+                say(script.params.fallback)
+                spoken.append(script.params.fallback)
+                streamed.append(script.params.fallback)
+            stage("respond", "модель не ответила, отдана аварийная реплика", "done")
+            last_result = TurnResult(reply="".join(streamed))
+            return "".join(streamed)
+
+        last_result = _safe_result(raw)
+        streamed_text = "".join(streamed)
+        integrity = format_reply_integrity(streamed=streamed_text, final=last_result.reply)
+        if integrity:
+            stage("respond", integrity, "done")
+            log.warning("%s", integrity)
+        return streamed_text or (last_result.reply or "")
+
+    if prompt_kind != "ladder":
+        await _generate(prompt_kind, prompt_reason)
+        out: dict[str, Any] = {
+            "turn_result": {} if last_error else last_result.model_dump(),
             "spoken": list(state.get("spoken") or []) + spoken,
-            "last_error": str(exc),
-            "conversation_context": ctx.model_dump(),
-            "spoken_filler": spoken_filler,
-            "fillers_used": fillers_used,
+            "conversation_context": last_ctx.model_dump(),
+            "expect_continuation": expect_continuation,
         }
+        if last_error:
+            out["last_error"] = last_error
+        return out
 
-    result = _safe_result(raw)
-    stage("respond", f"разбор: вопрос {result.aside_id or '—'}", "done", aside_id=result.aside_id)
+    # Лестница: filler / waiting / full, не больше двух заглушек за ход.
+    # Одна и та же сборка дважды подряд не выполняется: статус без смены → full.
+    deadline = time.monotonic() + float(settings.ladder_deadline_seconds)
+    stubs_spoken = 0
+    step_index = 0
+    prev_kind: str | None = None
+    while True:
+        last_ctx = await _load_context(state)
+        if step_index > 0 and digest and last_ctx.dynamic_reply_hash != digest:
+            stage("respond", "хеш реплики сменился, лестница прервана", "done")
+            break
+
+        force_full = time.monotonic() >= deadline
+        status = last_ctx.dynamic_status or DYN_NONE
+        same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
+        if force_full:
+            kind = "full"
+            reason = "дедлайн лестницы"
+        else:
+            kind = _ladder_prompt_kind(
+                status=status,
+                same_reply=same_reply,
+                stubs_spoken=stubs_spoken,
+                force_full=False,
+            )
+            if prev_kind is not None and kind == prev_kind and kind != "full":
+                kind = "full"
+                reason = "сборка не сменилась"
+            elif stubs_spoken >= 2:
+                reason = "лимит заглушек"
+            elif kind == "filler":
+                reason = "статус в работе"
+            elif kind == "waiting":
+                reason = "статус поиска"
+            else:
+                reason = f"статус {status}"
+
+        # Между ступенями — разделитель, чтобы commit не склеил фразы.
+        if step_index > 0 and spoken:
+            spoken.append(" ")
+            say(" ")
+
+        text = await _generate(kind, reason, step=step_index + 1)
+        if text:
+            local_history.append(AIMessage(content=text))
+        step_index += 1
+        if kind == "full":
+            break
+        prev_kind = kind
+        stubs_spoken += 1
+
     return {
-        "turn_result": result.model_dump(),
+        "turn_result": last_result.model_dump(),
         "spoken": list(state.get("spoken") or []) + spoken,
-        "conversation_context": ctx.model_dump(),
-        "spoken_filler": spoken_filler,
-        "fillers_used": fillers_used,
+        "conversation_context": last_ctx.model_dump(),
+        "expect_continuation": False,
     }
 
 
@@ -828,44 +886,15 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     """Раскладывает разобранное по состоянию; в конце звонка — слепок в тред."""
     script = _script_of(state)
     step = _current_step(state)
-    result = dict(state.get("turn_result") or {})
     progress = await _load_progress(state)
+    turn_kind = str(state.get("turn_kind") or "client")
+    no_client_reply = _no_client_reply(turn_kind)
 
     profile = dict(state.get("profile") or {})
     asides_done = list(state.get("asides_done") or [])
     patch: dict[str, Any] = {}
 
-    for item in result.get("understood") or []:
-        key = str(item.get("key", "")).strip()
-        value = str(item.get("value", "")).strip()
-        # В формате продаж форма не объявлена — пишем любые имена полей.
-        allowed = script.is_sales or key in script.profile_fields
-        if allowed and value:
-            if key in {"caller_name", "student_name"}:
-                value = given_name(value) or value
-            profile[key] = value
-
-    # Город/филиал из understood не подтверждаем слагом в обход резолвера:
-    # если фиксации ещё нет — значение профиля без слага не держим как city.
-    if profile.get("city") and not (state.get("city_slug") or patch.get("city_slug")):
-        # Оставляем читаемое имя только если слаг уже есть в состоянии.
-        if not state.get("city_name"):
-            pass
-
-    aside_id = result.get("aside_id")
-    if aside_id and aside_id not in asides_done:
-        record = script.aside(str(aside_id))
-        if record is not None:
-            asides_done.append(str(aside_id))
-            for key, value in getattr(record, "sets", {}).items():
-                if script.is_sales or key in script.profile_fields:
-                    profile[key] = value
-
     spoken_text = "".join(list(state.get("spoken") or [])).strip()
-    resume: str | None = None
-    if step is not None and aside_id and result.get("resume_step", True):
-        if progress.status.get(step.id) != "closed":
-            resume = step.id
 
     messages = list(state.get("messages") or [])
     if spoken_text:
@@ -876,7 +905,6 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         progress.status.get(step_id) == "closed" or step_id not in progress.status
         for step_id in script.step_order
     )
-    # Реалистичнее: нет доступных шагов в шапке.
     remaining = script_head(
         script,
         status=progress.status,
@@ -892,33 +920,60 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         progress_patch["call_finished"] = True
 
     patch.update(progress_patch)
-    # Пустой эфир (например пустая подстановка) — pending не ставим,
-    # иначе was_delivered(planned_len=0) ложно закроет inform.
-    pending_step = step.id if step is not None and spoken_text else None
+
+    # Разговор закончен — по флагу из кеша контекста (фоновый агент прощания).
+    # На продолжении и молчании флаг не трогаем: реплики человека не было.
+    conversation_ended = bool(state.get("conversation_ended"))
+    conversation_context = state.get("conversation_context") or {}
+    if not no_client_reply or spoken_text:
+        ctx = await _load_context(state)
+        if not no_client_reply:
+            conversation_ended = bool(ctx.conversation_ended)
+            patch["conversation_ended"] = conversation_ended
+        if spoken_text:
+            ctx = ctx.model_copy(update={"last_agent_reply": spoken_text})
+            ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
+            conversation_context = ctx_patch["conversation_context"]
+
+    # Пустой эфир — pending не ставим. Без реплики клиента шаги не трогаем.
+    pending_step = step.id if step is not None and spoken_text and not no_client_reply else None
+    # Флаг считает respond_node; сюда доезжает через состояние — не затираем.
+    expect_continuation = bool(state.get("expect_continuation"))
     patch.update(
         {
             "profile": profile,
             "asides_done": asides_done,
-            "resume_step": resume,
+            "resume_step": None,
             "outcome": profile.get("outcome") or state.get("outcome"),
             "messages": messages,
             "pending_step": pending_step,
-            "pending_len": len(spoken_text),
+            "pending_len": len(spoken_text)
+            if not no_client_reply
+            else int(state.get("pending_len") or 0),
             "pending_ai_count": count_agent_messages(state.get("messages") or []),
             "city_slug": state.get("city_slug"),
             "city_name": state.get("city_name"),
             "branch_slug": state.get("branch_slug"),
-            "conversation_context": state.get("conversation_context") or {},
+            "conversation_context": conversation_context,
+            "expect_continuation": expect_continuation,
         }
     )
     stage(
         "commit",
         (
-            f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}»"
+            f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
+            f"ожидание продолжения={expect_continuation}, "
+            f"разговор закончен={conversation_ended}"
             if spoken_text
-            else f"шаг {step.id if step else '—'}, в эфир ничего не ушло"
+            else (
+                f"шаг {step.id if step else '—'}, в эфир ничего не ушло, "
+                f"ожидание продолжения={expect_continuation}, "
+                f"разговор закончен={conversation_ended}"
+            )
         ),
         "done",
         profile_keys=sorted(profile),
     )
+    if spoken_text:
+        log.info("полный текст реплики: %s", spoken_text)
     return patch

@@ -38,7 +38,7 @@ def format_check_done(closures: Sequence[tuple[str, str]]) -> str:
 
     Args:
         closures: пары ``(step_id, основание)``; основание —
-            ``диалог`` / ``счётчик`` / ``доставка``.
+            ``диалог`` / ``бессмысленно`` / ``доставка``.
 
     Returns:
         Строка для ``[check|done]``.
@@ -57,6 +57,7 @@ def format_plan_done(
     city_slug: str | None,
     branch_slug: str | None,
     call_id: str | None = None,
+    shifted_from: str | None = None,
 ) -> str:
     """Итог plan: шаг, маршрут, счётчики шапки, звонок, фиксации.
 
@@ -67,6 +68,7 @@ def format_plan_done(
         city_slug: зафиксированный город.
         branch_slug: зафиксированный филиал.
         call_id: идентификатор звонка для ключа прогресса.
+        shifted_from: шаг, с которого сдвинули ведущего (повтор прошлого хода).
 
     Returns:
         Строка для ``[plan|done]``.
@@ -79,8 +81,9 @@ def format_plan_done(
     city = city_slug or "—"
     branch = branch_slug or "—"
     call = call_id or "—"
+    shift_text = f", сдвиг с {shifted_from}" if shifted_from else ""
     return (
-        f"шаг {step_id or '—'}, маршрут {route}, шапка {head_text}, "
+        f"шаг {step_id or '—'}{shift_text}, маршрут {route}, шапка {head_text}, "
         f"звонок {call}, город={city}, филиал={branch}"
     )
 
@@ -141,6 +144,41 @@ def format_check_pending(
     return text
 
 
+def format_contexter_done(
+    *,
+    tool: str | None,
+    subject: str,
+    status: str,
+    elapsed_ms: int,
+    needed: bool = True,
+    branch_slugs_count: int | None = None,
+) -> str:
+    """Итог контекстера: решение агента и статус динамики.
+
+    Args:
+        tool: имя выбранного инструмента или None.
+        subject: предмет для заглушки.
+        status: итоговый ``dynamic_status``.
+        elapsed_ms: длительность работы в миллисекундах.
+        needed: False — агент решил, что контекст не нужен.
+        branch_slugs_count: число отобранных слагов при инструменте ``branches``.
+
+    Returns:
+        Строка для ``[contexter|done]``.
+    """
+    if not needed:
+        return "решение: контекст не нужен"
+    tool_text = tool or "—"
+    subject_text = (subject or "").strip()
+    slugs_part = ""
+    if branch_slugs_count is not None:
+        slugs_part = f", слагов {branch_slugs_count}"
+    return (
+        f"решение: инструмент {tool_text}, предмет «{subject_text}»{slugs_part}, "
+        f"{elapsed_ms} мс; статус {status}"
+    )
+
+
 def format_spoken_preview(text: str, *, limit: int = SPOKEN_PREVIEW_LEN) -> str:
     """Обрезает произнесённое для лога commit.
 
@@ -155,3 +193,24 @@ def format_spoken_preview(text: str, *, limit: int = SPOKEN_PREVIEW_LEN) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 1].rstrip() + "…"
+
+
+def format_reply_integrity(*, streamed: str, final: str) -> str | None:
+    """Сверяет отданное в поток с финальным текстом модели.
+
+    Args:
+        streamed: склеенные дельты этого хода, ушедшие в эфир.
+        final: поле ``reply`` из ответа модели.
+
+    Returns:
+        Строка для лога, если тексты расходятся; иначе ``None``.
+    """
+    if streamed == final:
+        return None
+    tail = 40
+    stream_tail = streamed[-tail:] if streamed else ""
+    final_tail = final[-tail:] if final else ""
+    return (
+        f"расхождение реплики: поток {len(streamed)} симв. «…{stream_tail}», "
+        f"финал {len(final)} симв. «…{final_tail}»"
+    )

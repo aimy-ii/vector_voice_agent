@@ -8,6 +8,7 @@ from graph.log_fmt import (
     format_live_check_state,
     format_lookup_done,
     format_plan_done,
+    format_reply_integrity,
     format_spoken_preview,
 )
 
@@ -50,6 +51,29 @@ def test_format_plan_done_без_call_id():
     assert "шапка []" in text
 
 
+def test_format_plan_done_со_сдвигом():
+    """При сдвиге ведущего в логе — пометка и прежний шаг."""
+    text = format_plan_done(
+        step_id="city",
+        route="respond",
+        head=[("name", 2), ("city", 1)],
+        city_slug=None,
+        branch_slug=None,
+        call_id="call-1",
+        shifted_from="name",
+    )
+    assert "шаг city, сдвиг с name," in text
+    assert "сдвиг с name" in text
+    plain = format_plan_done(
+        step_id="name",
+        route="respond",
+        head=[("name", 1)],
+        city_slug=None,
+        branch_slug=None,
+    )
+    assert "сдвиг" not in plain
+
+
 def test_format_live_check_state_пустой_прогресс():
     text = format_live_check_state(attempts={}, status={}, profile={})
     assert text == "счётчики {}, статусы {}, профиль: —"
@@ -68,22 +92,26 @@ def test_format_live_check_state_только_ключи_профиля():
     assert "Андрей" not in text
 
 
+def test_format_check_done_бессмысленно():
+    assert format_check_done([("name", "бессмысленно")]) == "закрыт name (бессмысленно)"
+
+
 def test_format_check_pending_с_висящими():
     text = format_check_pending(
         pending=[("city", 1)],
-        rejected=[("greeting", "исчерпан"), ("branch", "счётчик ноль")],
+        rejected=[("greeting", "исчерпан"), ("branch", "не в работе")],
     )
-    assert text == ("на проверку: [city(1)]; отсеяно: greeting — исчерпан, branch — счётчик ноль")
+    assert text == ("на проверку: [city(1)]; отсеяно: greeting — исчерпан, branch — не в работе")
 
 
 def test_format_check_pending_пусто_с_доступными():
     text = format_check_pending(
         pending=[],
-        rejected=[("city", "счётчик ноль")],
+        rejected=[("city", "не в работе")],
         available=[("city", 0), ("branch", 0)],
     )
     assert "на проверку: пусто" in text
-    assert "отсеяно: city — счётчик ноль" in text
+    assert "отсеяно: city — не в работе" in text
     assert "доступны: [city(0), branch(0)]" in text
 
 
@@ -108,3 +136,15 @@ def test_format_lookup_done_за_ход():
         )
         == "2 вызова: list_cities, resolve_city"
     )
+
+
+def test_format_reply_integrity_совпадение_и_расхождение():
+    assert format_reply_integrity(streamed="Привет.", final="Привет.") is None
+    mismatch = format_reply_integrity(streamed="Привет", final="Привет.")
+    assert mismatch is not None
+    assert "6" in mismatch and "7" in mismatch
+    assert "Привет" in mismatch
+    one_char = format_reply_integrity(streamed="abc", final="abd")
+    assert one_char is not None
+    assert "3" in one_char
+    assert "abc" in one_char and "abd" in one_char

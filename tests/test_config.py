@@ -110,8 +110,24 @@ def test_filler_threshold_ms_отсутствует():
     assert "filler_threshold_ms" not in Settings.model_fields
 
 
-def test_lookup_fillers_выключены_по_умолчанию():
-    assert Settings.model_fields["lookup_fillers_enabled"].default is False
+def test_waiting_history_дефолт():
+    """Лимит хвоста для реплики ожидания и живой реакции."""
+    assert Settings.model_fields["waiting_history_limit"].default == 4
+    assert Settings.model_fields["filler_history_limit"].default == 2
+    assert Settings.model_fields["ladder_deadline_seconds"].default == 5.0
+    assert "silence_history_limit" not in Settings.model_fields
+    assert "searching_stale_turns" not in Settings.model_fields
+    assert "status_wait_timeout" not in Settings.model_fields
+    assert "status_poll_interval" not in Settings.model_fields
+
+
+def test_lookup_fillers_удалены():
+    assert "lookup_fillers_enabled" not in Settings.model_fields
+    assert "agent_fillers" not in Settings.model_fields
+    assert "agent_city_fillers" not in Settings.model_fields
+    assert "agent_branch_fillers" not in Settings.model_fields
+    assert "agent_bridge_fillers" not in Settings.model_fields
+    assert "bridge_first_delay" not in Settings.model_fields
 
 
 def test_llm_max_tokens_short_есть():

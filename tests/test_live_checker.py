@@ -10,12 +10,44 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from graph.checker import CheckerVerdict, check_pass, history_slice_for, run_checker
 from graph.checker_graph import (
+    _warmup_next_step,
     growth_below_threshold,
     is_new_utterance,
     live_check_node,
 )
-from script.planner import script_head
+from graph.context import ConversationContext
+from graph.context_agent import ContextDecision
+from graph.context_store import MemoryContextStore
+from graph.facts import needs_of
+from script.planner import peek_next_step, pick_step, script_head
 from script.store import ScriptProgress, progress_to_state
+
+
+@pytest.fixture(autouse=True)
+def _offline_context(monkeypatch):
+    """Офлайн: кеш контекста в памяти, агенты не зовут модель."""
+    from graph import contexter as contexter_module
+    from graph import nodes as nodes_module
+    from graph.farewell_agent import FarewellDecision
+    from graph.profile_agent import ProfileGuess
+
+    mem = MemoryContextStore()
+    monkeypatch.setattr(nodes_module, "context_store", mem)
+    monkeypatch.setattr(contexter_module, "context_store", mem)
+
+    async def _no_need(*_a, **_k):
+        return ContextDecision(need=False)
+
+    async def _no_profile(*_a, **_k):
+        return ProfileGuess()
+
+    async def _no_farewell(*_a, **_k):
+        return FarewellDecision(conversation_ended=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _no_need)
+    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
+    return mem
 
 
 class FakeChecker:
@@ -25,13 +57,26 @@ class FakeChecker:
         self.verdicts = list(verdicts)
         self.calls: list[dict] = []
 
-    async def judge(self, *, history_slice, client_reply, step, step_text):
+    async def judge(
+        self,
+        *,
+        history_slice,
+        client_reply,
+        step,
+        step_text,
+        attempts: int = 0,
+        age: int = 0,
+        in_work: bool = False,
+    ):
         self.calls.append(
             {
                 "history_slice": history_slice,
                 "client_reply": client_reply,
                 "step_id": step.id,
                 "step_text": step_text,
+                "attempts": attempts,
+                "age": age,
+                "in_work": in_work,
             }
         )
         if not self.verdicts:
@@ -197,6 +242,7 @@ async def test_служебный_ниже_порога_модель_не_зов
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert patch_out == {}
@@ -238,6 +284,7 @@ async def test_финальная_реплика_при_нулевом_прир�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -362,6 +409,7 @@ async def test_live_check_новая_реплика_сбрасывает_точ�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -411,6 +459,7 @@ async def test_live_check_прирост_внутри_реплики_сравн�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
     assert patch_out == {}
@@ -447,6 +496,7 @@ async def test_live_check_done_содержит_длительность_мс(sc
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -487,6 +537,7 @@ async def test_live_check_с_приростом_зовёт_чекер_и_пиш�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -525,6 +576,7 @@ async def test_логи_не_роняют_ход_при_пустом_прогр�
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
         mock_settings.pending_steps_soft_cap = 4
@@ -566,11 +618,13 @@ async def test_check_pass_логирует_висящие_перед_модел�
     assert "name — исчерпан" in pending_logs[0]
 
 
-async def test_live_check_контекстер_кладёт_справку_в_контекст(script):
-    """После чекера контекстер печёт справку в conversation_context."""
-    from graph.context import DYN_READY
+async def test_live_check_контекстер_пишет_динамику_в_кеш(script, monkeypatch, _offline_context):
+    """Лайв-канал читает контекст из кеша с городом и пишет только динамику."""
+    from graph.context import DYN_READY, ConversationContext
+    from tests.conftest import FakeKB
 
-    text = "а когда медкомиссию проходить?"
+    text = "какие филиалы у Ленина?"
+    fact = "Филиалы под запрос: ул. Ленина, 1."
     client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
     progress = _name_progress()
     state = _state(
@@ -579,13 +633,118 @@ async def test_live_check_контекстер_кладёт_справку_в_к
         progress=progress,
         last_checked="",
     )
-    state["conversation_context"] = {"static_text": "Город: Пермь"}
+
+    ctx_store = _offline_context
+    seeded = ConversationContext(
+        static_text="Город: Пермь",
+        city_slug="perm",
+        city_name="Пермь",
+        frozen=False,
+    )
+    await ctx_store.save("local", seeded)
+
+    class _Tool:
+        name = "branches"
+        description = "филиалы"
+
+        async def run(self, query: str, context: ConversationContext, *, slugs=()) -> str:
+            assert context.city_slug == "perm"
+            return fact
+
+    async def _decide(*a, **k):
+        return ContextDecision(
+            need=True,
+            tool="branches",
+            query="Ленина",
+            subject="филиалы",
+            branch_slugs=["perm_lenina"],
+        )
 
     async def fake_load(_state):
         return progress
 
     async def fake_save(prog, *, persist_state=True, fields=None):
         return progress_to_state(prog)
+
+    fake_kb = FakeKB(
+        cities=[],
+        city=None,
+        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
+        branch=None,
+    )
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.build_context_tools", lambda script: [_Tool()]),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    ctx = patch_out.get("conversation_context") or {}
+    assert ctx.get("dynamic_status") == DYN_READY
+    assert fact in ctx.get("dynamic_text", "")
+    assert ctx.get("city_slug") == "perm"
+    assert ctx.get("static_text") == "Город: Пермь"
+    assert patch_out.get("last_checked_partial") == text
+
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert fact in loaded.dynamic_text
+    assert loaded.city_slug == "perm"
+    assert loaded.static_text == "Город: Пермь"
+
+
+async def test_live_check_не_тянет_филиалы_пока_агент_не_выбрал(
+    script, monkeypatch, _offline_context
+):
+    """Пока агент не выбрал branches, list_branches не зовём и список агенту пуст."""
+    from graph.context import ConversationContext
+    from tests.conftest import FakeKB
+
+    text = "какие филиалы у Ленина?"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            city_name="Пермь",
+        ),
+    )
+
+    branches = [
+        {"slug": "perm_lenina", "address": "ул. Ленина, 1", "landmark": "центр"},
+        {"slug": "perm_mira", "address": "ул. Мира, 2"},
+    ]
+    fake_kb = FakeKB(cities=[], city=None, branches=branches, branch=None)
+    seen: dict[str, Any] = {}
+
+    async def _decide(reply, context, tools, *, branches=(), agent=None, step_needs=()):
+        seen["branches"] = list(branches)
+        return ContextDecision(need=False)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
 
     with (
         patch("graph.checker_graph._checker_client", client),
@@ -594,11 +753,589 @@ async def test_live_check_контекстер_кладёт_справку_в_к
         patch("graph.checker_graph.settings") as mock_settings,
     ):
         mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
         mock_settings.script_id = script.id
         mock_settings.script_version = script.version
-        patch_out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
 
-    ctx = patch_out.get("conversation_context") or {}
-    assert ctx.get("dynamic_status") == DYN_READY
-    assert script.helps["medcheck"].text in ctx.get("dynamic_text", "")
-    assert patch_out.get("last_checked_partial") == text
+    assert "list_branches" not in fake_kb.calls
+    assert seen["branches"] == []
+
+
+async def test_live_check_при_выбранном_филиале_список_не_тянется(
+    script, monkeypatch, _offline_context
+):
+    """Если филиал уже выбран — list_branches для агента не зовём."""
+    from graph.context import ConversationContext
+    from tests.conftest import FakeKB
+
+    text = "а адрес какой?"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            static_text="Город: Пермь",
+            city_slug="perm",
+            city_name="Пермь",
+            branch_slug="perm_lenina",
+        ),
+    )
+
+    fake_kb = FakeKB(
+        cities=[],
+        city=None,
+        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
+        branch={"slug": "perm_lenina", "address": "ул. Ленина, 1"},
+    )
+    seen: dict[str, Any] = {}
+
+    async def _decide(reply, context, tools, *, branches=(), agent=None, step_needs=()):
+        seen["branches"] = list(branches)
+        return ContextDecision(need=False)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert "list_branches" not in fake_kb.calls
+    assert seen["branches"] == []
+
+
+async def test_live_contexter_до_check_pass(script, monkeypatch, _offline_context):
+    """Контекстер вызывается до check_pass; _lookup_in_live больше нет."""
+    from graph.context import ConversationContext
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    await _offline_context.save("local", ConversationContext())
+
+    order: list[str] = []
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_contexter(ctx, **kwargs):
+        order.append("contexter")
+        assert "check" not in order
+        return ctx
+
+    class _OrderChecker:
+        async def judge(self, **kwargs):
+            order.append("check")
+            return CheckerVerdict(reply_usable=True, step_closed=False)
+
+    async def fake_warmup(*args, **kwargs):
+        order.append("warmup")
+        return kwargs["ctx"]
+
+    assert not hasattr(__import__("graph.checker_graph", fromlist=["x"]), "_lookup_in_live")
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", fake_contexter)
+
+    with (
+        patch("graph.checker_graph._checker_client", _OrderChecker()),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert order == ["contexter", "check", "warmup"]
+
+
+async def test_live_check_контекстер_не_пишет_город_и_филиал_в_профиль(
+    script, monkeypatch, _offline_context
+):
+    """Слаги города и филиала уходят в контекст/состояние, не в форму профиля."""
+    from graph.context import ConversationContext
+    from graph.profile_agent import ProfileGuess
+
+    text = "я из Перми, филиал на Ленина и ещё символов"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="", profile={})
+    await _offline_context.save("local", ConversationContext())
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_contexter(ctx, **kwargs):
+        # Форму контекстер видит аргументом — но сам её не заполняет.
+        assert "profile" in kwargs
+        return ctx.model_copy(
+            update={
+                "city_slug": "perm",
+                "city_name": "Пермь",
+                "branch_slug": "perm_lenina",
+            }
+        )
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    async def fake_guess(*_a, **_k):
+        return ProfileGuess()
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", fake_contexter)
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert out.get("city_slug") == "perm"
+    assert out.get("city_name") == "Пермь"
+    assert out.get("branch_slug") == "perm_lenina"
+    profile = out.get("profile") or {}
+    assert not str(profile.get("city") or "").strip()
+    assert not str(profile.get("branch") or "").strip()
+    ctx = out.get("conversation_context") or {}
+    assert ctx.get("city_slug") == "perm"
+    assert ctx.get("branch_slug") == "perm_lenina"
+
+
+async def test_live_без_разбора_статус_не_трогает(script, monkeypatch, _offline_context):
+    """Ход без потребностей и без похода агента — статус не меняем."""
+    from graph.context import DYN_READY, ConversationContext
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    seeded = ConversationContext(
+        static_text="статика",
+        dynamic_status=DYN_READY,
+        dynamic_text="уже было",
+        dynamic_turn=1,
+        pending_fields=[],
+    )
+    await _offline_context.save("local", seeded)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_text == "уже было"
+    final = out.get("conversation_context") or {}
+    assert final.get("dynamic_status") == DYN_READY
+
+
+async def test_live_lookup_ошибка_даёт_missing(script, monkeypatch, _offline_context):
+    from graph.context import DYN_MISSING, ConversationContext
+    from graph.contexter import reply_hash
+    from tests.conftest import FakeKB
+
+    text = "Пермь"
+    client = FakeChecker([CheckerVerdict(reply_usable=True, step_closed=False)])
+    progress = ScriptProgress(
+        status={"name": "closed", "city": "pending"},
+        attempts={"city": 1},
+        taken_turn={"city": 1},
+        profile={"caller_name": "Мария"},
+    )
+    state = _state(
+        script,
+        partial=text,
+        progress=progress,
+        profile={"caller_name": "Мария"},
+        turn=2,
+    )
+    state["current_step"] = "city"
+    state["head_steps"] = ["city"]
+    await _offline_context.save("local", ConversationContext())
+
+    class BoomKB(FakeKB):
+        async def list_cities(self):
+            raise RuntimeError("kb down")
+
+    fake_kb = BoomKB(cities=[], city=None, branches=[], branch=None)
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def _decide(*_a, **_k):
+        return ContextDecision(need=False)
+
+    monkeypatch.setattr("graph.contexter.decide_context", _decide)
+    monkeypatch.setattr("graph.contexter.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    # v2-шаг city без needs — принудительно даём потребность, как у продаж.
+    monkeypatch.setattr(
+        "graph.checker_graph._head_needs",
+        lambda *a, **k: ["city_choices"],
+    )
+
+    with (
+        patch("graph.checker_graph._checker_client", client),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    ctx = out.get("conversation_context") or {}
+    assert ctx.get("dynamic_status") == DYN_MISSING
+    assert ctx.get("dynamic_reply_hash") == reply_hash(text)
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_reply_hash == reply_hash(text)
+
+
+async def test_live_профиль_попадает_в_кеш_чекера(script, monkeypatch, _offline_context):
+    """Разбор профиля после check_pass пишется набором PROGRESS_FIELDS_CHECKER."""
+    from graph.profile_agent import ProfileGuess, ProfileValue
+    from script.store import MemoryScriptStore
+
+    text = "Меня зовут Андрей Андреевич"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    mem = MemoryScriptStore()
+    await mem.save("local", progress)
+
+    async def fake_guess(reply, *, known, fields, history=(), agent=None):
+        return ProfileGuess(values=[ProfileValue(key="caller_name", value="Андрей")])
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+    monkeypatch.setattr("graph.nodes.script_store", mem)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert out.get("profile", {}).get("caller_name") == "Андрей"
+    stored = await mem.load("local")
+    assert stored is not None
+    assert stored.profile.get("caller_name") == "Андрей"
+
+
+def _branch_pending_progress() -> ScriptProgress:
+    """Прогресс: ведущий шаг ``branch`` уже взят, следующий — ``price``."""
+    closed = [
+        "name",
+        "city",
+        "who_studies",
+        "experience",
+        "transmission",
+        "terms",
+        "theory_format",
+        "included",
+        "practice",
+    ]
+    return ScriptProgress(
+        status={**{c: "closed" for c in closed}, "branch": "pending"},
+        attempts={**{c: 1 for c in closed}, "branch": 1},
+    )
+
+
+def _branch_profile() -> dict[str, str]:
+    """Профиль, при котором ``branch`` доступен."""
+    return {
+        "caller_name": "Андрей",
+        "city": "Пермь",
+        "student_is_caller": "да",
+        "experience": "впервые",
+        "transmission": "механика",
+        "theory_format": "очно",
+    }
+
+
+async def test_warmup_без_current_step_греет_следующий(script, fake_kb, monkeypatch):
+    """Без ``current_step`` прогрев целится в следующий шаг, не в ведущий."""
+    from core.config import settings
+
+    progress = _branch_pending_progress()
+    profile = _branch_profile()
+    soft_cap = settings.pending_steps_soft_cap
+
+    lead = pick_step(
+        script,
+        status=progress.status,
+        profile=profile,
+        attempts=progress.attempts,
+        inform_reason=False,
+        pending_soft_cap=soft_cap,
+    )
+    assert lead is not None and lead.id == "branch"
+    assert needs_of(lead) == ["branches"]
+    nxt = peek_next_step(
+        script,
+        current=lead,
+        status=progress.status,
+        profile=profile,
+        attempts=progress.attempts,
+        inform_reason=False,
+        pending_soft_cap=soft_cap,
+    )
+    assert nxt is not None and nxt.id == "price"
+    assert needs_of(nxt) == ["price"]
+
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": profile,
+    }
+    ctx = ConversationContext()
+    out = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=False,
+    )
+
+    # Ведущий branch → branches; следующий price → get_city. Без current_step
+    # раньше грели бы branch (list_branches); теперь — price.
+    assert "list_branches" not in fake_kb.calls
+    assert "get_city" in fake_kb.calls
+    assert out is not None
+
+
+async def test_warmup_ошибка_справочника_не_роняет(script, monkeypatch):
+    """Исключение справочника глотается: функция возвращает контекст."""
+
+    class BoomKB:
+        """Заглушка, которая всегда бросает."""
+
+        async def list_cities(self):
+            raise RuntimeError("kb down")
+
+        async def get_city(self, city_slug: str):
+            raise RuntimeError("kb down")
+
+        async def list_branches(self, city_slug: str):
+            raise RuntimeError("kb down")
+
+        async def get_branch(self, branch_slug: str):
+            raise RuntimeError("kb down")
+
+    monkeypatch.setattr("graph.checker_graph.vector_kb", BoomKB())
+    progress = _branch_pending_progress()
+    profile = _branch_profile()
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": profile,
+    }
+    ctx = ConversationContext()
+    out = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=False,
+    )
+    assert out is ctx
+
+
+async def test_warmup_ошибка_lead_from_progress_не_роняет(script, monkeypatch):
+    """Исключение ``_lead_from_progress`` глотается: возвращается переданный ctx."""
+
+    def boom(_state, *, progress, profile):
+        raise RuntimeError("lead broken")
+
+    monkeypatch.setattr("graph.checker_graph._lead_from_progress", boom)
+    progress = _branch_pending_progress()
+    profile = _branch_profile()
+    state: dict[str, Any] = {
+        "script_id": script.id,
+        "script_version": script.version,
+        "city_slug": "perm",
+        "city_name": "Пермь",
+        "profile": profile,
+    }
+    ctx = ConversationContext()
+    out = await _warmup_next_step(
+        state,
+        progress=progress,
+        profile=profile,
+        ctx=ctx,
+        asks_inform=False,
+    )
+    assert out is ctx
+
+
+async def test_live_ставит_в_работе_первым_действием(script, monkeypatch, _offline_context):
+    """«в работе» пишется в кеш до контекстера; на выходе — конечный статус."""
+    from graph.context import DYN_READY, DYN_WORKING, ConversationContext
+    from graph.contexter import reply_hash
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    await _offline_context.save("local", ConversationContext(static_text="статика"))
+
+    seen_before_contexter: list[str] = []
+
+    async def spy_contexter(ctx, **kwargs):
+        loaded = await _offline_context.load("local")
+        assert loaded is not None
+        seen_before_contexter.append(loaded.dynamic_status)
+        assert loaded.dynamic_reply_hash == reply_hash(text)
+        return ctx.model_copy(update={"dynamic_status": DYN_READY})
+
+    async def fake_load(_state):
+        return progress
+
+    async def fake_save(prog, *, persist_state=True, fields=None):
+        return progress_to_state(prog)
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", spy_contexter)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph._save_progress", side_effect=fake_save),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert seen_before_contexter == [DYN_WORKING]
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_status != DYN_WORKING
+    assert (out.get("conversation_context") or {}).get("dynamic_status") == DYN_READY
+
+
+async def test_live_исключение_снимает_в_работе(script, monkeypatch, _offline_context):
+    """При исключении после «в работе» статус сменяется на конечный."""
+    from graph.context import DYN_READY, DYN_WORKING, ConversationContext
+    from graph.contexter import reply_hash
+
+    text = "пока ещё думаю над ответом длинный"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+    await _offline_context.save(
+        "local",
+        ConversationContext(static_text="статика", dynamic_status=DYN_READY),
+    )
+
+    async def boom_contexter(ctx, **kwargs):
+        loaded = await _offline_context.load("local")
+        assert loaded is not None
+        assert loaded.dynamic_status == DYN_WORKING
+        assert loaded.dynamic_reply_hash == reply_hash(text)
+        raise RuntimeError("contexter failed")
+
+    async def fake_load(_state):
+        return progress
+
+    monkeypatch.setattr("graph.checker_graph.run_contexter", boom_contexter)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._load_progress", side_effect=fake_load),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        with pytest.raises(RuntimeError, match="contexter failed"):
+            await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.dynamic_status == DYN_READY
+    assert loaded.dynamic_status != DYN_WORKING
