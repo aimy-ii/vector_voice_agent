@@ -19,6 +19,12 @@ from graph.facts import (
 )
 from graph.prompts import (
     _NO_MECHANICS,
+    LEAD_REPEAT_INTRO,
+    LEAD_REPEAT_OVERRIDES,
+    RULE_MOVE_ON,
+    RULE_NO_OPEN_QUESTIONS,
+    RULE_NO_VERBATIM,
+    RULE_QUESTION_MOVES,
     SPEECH_RULES,
     _describe_step,
     aside_block,
@@ -2206,3 +2212,52 @@ def test_как_работать_описывает_из_чего_строитс
     assert "куда ведём разговор" in how
     assert "реплика строится из всего этого разом" in how
     assert "реплика строится по шагу" not in messages[0].content.lower()
+
+
+def test_speech_rules_block_без_флага_и_false_одинаковы():
+    """Без флага и с ``lead_repeat=False`` — один и тот же штатный текст."""
+    assert speech_rules_block() == speech_rules_block(lead_repeat=False)
+
+
+def test_speech_rules_block_lead_repeat_подменяет_четыре_правила():
+    """При ``lead_repeat=True`` число правил то же, четыре текста — другие."""
+    staff = speech_rules_block(lead_repeat=False)
+    repeated = speech_rules_block(lead_repeat=True)
+    staff_lines = staff.splitlines()
+    repeated_lines = repeated.splitlines()
+    assert len(staff_lines) == len(repeated_lines) == len(SPEECH_RULES)
+    changed = sum(
+        1 for left, right in zip(staff_lines, repeated_lines, strict=True) if left != right
+    )
+    assert changed == 4
+    for staff_rule, override in LEAD_REPEAT_OVERRIDES.items():
+        assert staff_rule in staff
+        assert override in repeated
+        assert staff_rule != override
+
+
+def test_speech_rules_block_lead_repeat_без_штатных_подменённых():
+    """При ``lead_repeat=True`` штатные тексты четырёх правил в блоке не встречаются."""
+    text = speech_rules_block(lead_repeat=True)
+    for rule in (
+        RULE_MOVE_ON,
+        RULE_QUESTION_MOVES,
+        RULE_NO_OPEN_QUESTIONS,
+        RULE_NO_VERBATIM,
+    ):
+        assert rule not in text
+        assert LEAD_REPEAT_OVERRIDES[rule] in text
+
+
+def test_steps_block_lead_repeat_врезка_и_примеры(script_v4):
+    """Врезка до «Требования» только при флаге; примеры есть в обоих режимах."""
+    step = script_v4.step("city")
+    assert step.examples
+    with_flag = steps_block([step], {}, {}, lead_repeat=True)
+    without = steps_block([step], {}, {}, lead_repeat=False)
+    assert LEAD_REPEAT_INTRO in with_flag
+    assert with_flag.index(LEAD_REPEAT_INTRO) < with_flag.index("Требования")
+    assert LEAD_REPEAT_INTRO not in without
+    for example in step.examples:
+        assert example in with_flag
+        assert example in without

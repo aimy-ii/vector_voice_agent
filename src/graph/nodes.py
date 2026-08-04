@@ -499,6 +499,9 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     Если на ходе с репликой клиента ведущий снова совпал с шагом прошлого
     хода — берём следующий открытый из шапки (шапка сама не меняется).
     Так не ведём повторно шаг, который судья ещё не успел закрыть.
+
+    Счётчик ``lead_repeat`` считает подряд идущие ходы с одним ведущим
+    шагом; на сдвиге сбрасывается. Сами шаги не закрываются и не открываются.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -535,6 +538,8 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     # Повтор ведущего прошлого хода на реплике клиента — сдвиг по шапке.
     prev_step_id = state.get("current_step")
     shifted_from: str | None = None
+    lead_repeat = int(state.get("lead_repeat") or 0)
+    lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
     if (
         not no_client_reply
         and step is not None
@@ -544,6 +549,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     ):
         shifted_from = step.id
         step = head[1]
+        lead_repeat = 1
 
     # Новый шаг хода — только ведущий шапки, если взят впервые.
     new_step_id: str | None = None
@@ -596,6 +602,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         **progress_patch,
         "profile": profile,
         "current_step": step.id if step is not None else None,
+        "lead_repeat": lead_repeat,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
         "head_new_step": new_step_id if not no_client_reply else None,
@@ -657,6 +664,10 @@ def _build_respond_messages(
         pending_fields=pending_fields,
         turn_kind=turn_kind,
         closed_steps=closed_steps,
+        lead_repeat=(
+            settings.lead_repeat_threshold > 0
+            and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
+        ),
     )
 
 
@@ -752,9 +763,16 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         )
         system_len = len(messages[0].content) if messages else 0
         step_prefix = f"ступень {step}, " if step is not None else ""
+        lead_count = int(state.get("lead_repeat") or 0)
+        lead_hint = ""
+        if settings.lead_repeat_threshold > 0:
+            lead_hint = f", повтор шага {lead_count}"
+            if lead_count >= settings.lead_repeat_threshold:
+                lead_hint += ", характер: вывод на реплику"
         stage(
             "prompt",
-            f"{step_prefix}сборка {kind}, {reason}, системное сообщение {system_len} символов",
+            f"{step_prefix}сборка {kind}{lead_hint}, {reason}, "
+            f"системное сообщение {system_len} символов",
             "done",
             chars=system_len,
             prompt=kind,

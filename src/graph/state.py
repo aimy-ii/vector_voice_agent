@@ -122,6 +122,8 @@ class CallState(TypedDict, total=False):
     resume_step: str | None
     asides_done: list[str]
     current_step: str | None
+    #: Сколько ходов подряд ведущим идёт один и тот же шаг.
+    lead_repeat: int
     next_step: str | None
     head_steps: list[str]
     head_new_step: str | None
@@ -169,6 +171,7 @@ def new_state_defaults() -> dict[str, Any]:
         "resume_step": None,
         "asides_done": [],
         "current_step": None,
+        "lead_repeat": 0,
         "next_step": None,
         "head_steps": [],
         "head_new_step": None,
