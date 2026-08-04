@@ -2277,28 +2277,34 @@ def test_speech_rules_block_pull_подменяет_четыре_правила(
     assert changed == 4
 
 
-def test_steps_block_pull_задача_и_без_требований(script_v4):
-    """При ``mode="pull"`` — задача вытаскивания, без текущего раздела шага."""
+def test_steps_block_pull_задача_перед_шагом(script_v4):
+    """При ``mode="pull"`` — задача вытаскивания перед штатным разделом шага."""
     from graph.prompts import PULL_TASK
 
     step = script_v4.step("city")
+    assert step.examples
     text = steps_block([step], {}, {}, mode="pull")
     assert PULL_TASK in text
     assert "ЗАДАЧА ЭТОГО ХОДА" in text
-    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" not in text
-    assert "Требования" not in text
-    assert "Примеры" not in text
-    assert step.name in text
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
+    assert "Требования" in text
+    assert "Примеры" in text
+    assert text.index("ЗАДАЧА ЭТОГО ХОДА") < text.index("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    for example in step.examples:
+        assert example in text
 
 
 def test_steps_block_repeat_сохраняет_текущий_раздел(script_v4):
     """При ``mode="repeat"`` раздел «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» и врезка на месте."""
+    from graph.prompts import PULL_TASK
+
     step = script_v4.step("city")
     text = steps_block([step], {}, {}, mode="repeat")
     assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
     assert "Требования" in text
     assert "Примеры" in text
     assert LEAD_REPEAT_INTRO in text
+    assert PULL_TASK not in text
 
 
 def test_steps_block_normal_без_врезок(script_v4):
@@ -2309,3 +2315,5 @@ def test_steps_block_normal_без_врезок(script_v4):
     text = steps_block([step], {}, {}, mode="normal")
     assert PULL_TASK not in text
     assert LEAD_REPEAT_INTRO not in text
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
+    assert "Требования" in text
