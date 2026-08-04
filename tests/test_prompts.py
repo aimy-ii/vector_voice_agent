@@ -19,6 +19,12 @@ from graph.facts import (
 )
 from graph.prompts import (
     _NO_MECHANICS,
+    LEAD_REPEAT_INTRO,
+    LEAD_REPEAT_OVERRIDES,
+    RULE_MOVE_ON,
+    RULE_NO_OPEN_QUESTIONS,
+    RULE_NO_VERBATIM,
+    RULE_QUESTION_MOVES,
     SPEECH_RULES,
     _describe_step,
     aside_block,
@@ -2206,3 +2212,108 @@ def test_как_работать_описывает_из_чего_строитс
     assert "куда ведём разговор" in how
     assert "реплика строится из всего этого разом" in how
     assert "реплика строится по шагу" not in messages[0].content.lower()
+
+
+def test_speech_rules_block_без_флага_и_normal_одинаковы():
+    """Без аргумента и с ``mode="normal"`` — один и тот же штатный текст."""
+    assert speech_rules_block() == speech_rules_block(mode="normal")
+
+
+def test_speech_rules_block_repeat_подменяет_четыре_правила():
+    """При ``mode="repeat"`` число правил то же, четыре текста — другие."""
+    staff = speech_rules_block(mode="normal")
+    repeated = speech_rules_block(mode="repeat")
+    staff_lines = staff.splitlines()
+    repeated_lines = repeated.splitlines()
+    assert len(staff_lines) == len(repeated_lines) == len(SPEECH_RULES)
+    changed = sum(
+        1 for left, right in zip(staff_lines, repeated_lines, strict=True) if left != right
+    )
+    assert changed == 4
+    for staff_rule, override in LEAD_REPEAT_OVERRIDES.items():
+        assert staff_rule in staff
+        assert override in repeated
+        assert staff_rule != override
+
+
+def test_speech_rules_block_repeat_без_штатных_подменённых():
+    """При ``mode="repeat"`` штатные тексты четырёх правил в блоке не встречаются."""
+    text = speech_rules_block(mode="repeat")
+    for rule in (
+        RULE_MOVE_ON,
+        RULE_QUESTION_MOVES,
+        RULE_NO_OPEN_QUESTIONS,
+        RULE_NO_VERBATIM,
+    ):
+        assert rule not in text
+        assert LEAD_REPEAT_OVERRIDES[rule] in text
+
+
+def test_steps_block_repeat_врезка_и_примеры(script_v4):
+    """Врезка до «Требования» только при repeat; примеры есть в обоих режимах."""
+    step = script_v4.step("city")
+    assert step.examples
+    with_flag = steps_block([step], {}, {}, mode="repeat")
+    without = steps_block([step], {}, {}, mode="normal")
+    assert LEAD_REPEAT_INTRO in with_flag
+    assert with_flag.index(LEAD_REPEAT_INTRO) < with_flag.index("Требования")
+    assert LEAD_REPEAT_INTRO not in without
+    for example in step.examples:
+        assert example in with_flag
+        assert example in without
+
+
+def test_speech_rules_block_pull_подменяет_четыре_правила():
+    """При ``mode="pull"`` подменённые правила отличаются от штатных, число то же."""
+    staff = speech_rules_block(mode="normal")
+    pulled = speech_rules_block(mode="pull")
+    assert len(staff.splitlines()) == len(pulled.splitlines()) == len(SPEECH_RULES)
+    assert staff != pulled
+    changed = sum(
+        1
+        for left, right in zip(staff.splitlines(), pulled.splitlines(), strict=True)
+        if left != right
+    )
+    assert changed == 4
+
+
+def test_steps_block_pull_задача_перед_шагом(script_v4):
+    """При ``mode="pull"`` — задача вытаскивания перед штатным разделом шага."""
+    from graph.prompts import PULL_TASK
+
+    step = script_v4.step("city")
+    assert step.examples
+    text = steps_block([step], {}, {}, mode="pull")
+    assert PULL_TASK in text
+    assert "ЗАДАЧА ЭТОГО ХОДА" in text
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
+    assert "Требования" in text
+    assert "Примеры" in text
+    assert text.index("ЗАДАЧА ЭТОГО ХОДА") < text.index("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    for example in step.examples:
+        assert example in text
+
+
+def test_steps_block_repeat_сохраняет_текущий_раздел(script_v4):
+    """При ``mode="repeat"`` раздел «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» и врезка на месте."""
+    from graph.prompts import PULL_TASK
+
+    step = script_v4.step("city")
+    text = steps_block([step], {}, {}, mode="repeat")
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
+    assert "Требования" in text
+    assert "Примеры" in text
+    assert LEAD_REPEAT_INTRO in text
+    assert PULL_TASK not in text
+
+
+def test_steps_block_normal_без_врезок(script_v4):
+    """При ``mode="normal"`` нет ни ``PULL_TASK``, ни ``LEAD_REPEAT_INTRO``."""
+    from graph.prompts import PULL_TASK
+
+    step = script_v4.step("city")
+    text = steps_block([step], {}, {}, mode="normal")
+    assert PULL_TASK not in text
+    assert LEAD_REPEAT_INTRO not in text
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
+    assert "Требования" in text

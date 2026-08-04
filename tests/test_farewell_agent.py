@@ -360,9 +360,11 @@ async def test_ошибка_агента_не_роняет_узел(script, monk
     assert "прощание: ошибка агента" in done_msgs[0]
 
 
-def test_системное_сообщение_требует_прощания_вслух():
-    """Признак только на прозвучавшее прощание: есть «вслух», нет «не намерен»."""
-    assert "вслух" in FAREWELL_SYSTEM
+def test_системное_сообщение_прощание_бота_и_ответ_или_молчание():
+    """Прощание бота засчитывается только с ответом или молчанием собеседника."""
+    assert "попрощался бот" in FAREWELL_SYSTEM
+    assert "ответил тем же" in FAREWELL_SYSTEM
+    assert "или молчит" in FAREWELL_SYSTEM
     assert "не намерен" not in FAREWELL_SYSTEM
 
 
@@ -381,11 +383,17 @@ def test_системное_сообщение_сомневаешься_не_к�
     assert "Сомневаешься — не конец" in FAREWELL_SYSTEM
 
 
+def test_системное_сообщение_без_благодарности_в_исключениях():
+    """«благодарность» убрана из исключений — блокировала «спасибо, до свидания»."""
+    assert "благодарность" not in FAREWELL_SYSTEM
+
+
 def test_описание_поля_согласовано_с_промптом():
-    """Описание conversation_ended: «вслух», без «не намерен»."""
+    """Описание conversation_ended согласовано с критерием прощания."""
     description = FarewellDecision.model_fields["conversation_ended"].description
     assert description is not None
-    assert "вслух" in description
+    assert "прощание прозвучало" in description
+    assert "разговор исчерпан" in description
     assert "не намерен" not in description
 
 
@@ -417,8 +425,8 @@ async def test_decide_передаёт_константу_системного_�
     assert captured[0].content == FAREWELL_SYSTEM
 
 
-async def test_пустая_реплика_без_вызова_модели():
-    """Пустая реплика → conversation_ended=False, модель не зовётся."""
+async def test_пустая_реплика_и_пустая_история_без_вызова_модели():
+    """Пустая реплика и пустая история → False, модель не зовётся."""
     called = False
 
     class _FakeLlm:
@@ -443,3 +451,32 @@ async def test_пустая_реплика_без_вызова_модели():
 
     assert result.conversation_ended is False
     assert called is False
+
+
+async def test_пустая_реплика_с_историей_идёт_в_модель():
+    """Пустая реплика при непустой истории — вызов модели состоялся."""
+    called = False
+
+    class _FakeLlm:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+    async def fake_astream_structured(*args, **kwargs):
+        nonlocal called
+        called = True
+        return {"conversation_ended": True}
+
+    with (
+        patch("graph.farewell_agent.get_llm", return_value=_FakeLlm()),
+        patch("graph.farewell_agent.astream_structured", side_effect=fake_astream_structured),
+    ):
+        result = await LlmFarewellAgent().decide(
+            "   ",
+            history=[AIMessage(content="И Вам спасибо! Хорошего дня")],
+        )
+
+    assert called is True
+    assert result.conversation_ended is True

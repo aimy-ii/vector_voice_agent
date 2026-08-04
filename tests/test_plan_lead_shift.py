@@ -136,3 +136,147 @@ async def test_лог_сдвига_содержит_прежний_шаг(store,
     assert plan_logs
     assert "сдвиг с name" in plan_logs[-1]
     assert "шаг city" in plan_logs[-1]
+
+
+async def test_повтор_ведущего_шага_даёт_lead_repeat_два(store, use_v2, monkeypatch):
+    """Один и тот же ведущий на двух ходах подряд — ``lead_repeat`` равен двум."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 1)
+    await store.save(
+        "local",
+        ScriptProgress(
+            status={"name": "pending"},
+            attempts={"name": 1},
+            taken_turn={"name": 1},
+            in_work=["name"],
+        ),
+    )
+    first = await nodes_module.plan_node(_base_state(), None)  # type: ignore[arg-type]
+    assert first["current_step"] == "name"
+    assert first["lead_repeat"] == 1
+
+    second = await nodes_module.plan_node(
+        _base_state(current_step="name", lead_repeat=1),
+        None,  # type: ignore[arg-type]
+    )
+    assert second["current_step"] == "name"
+    assert second["lead_repeat"] == 2
+
+
+async def test_смена_ведущего_шага_сбрасывает_lead_repeat(store, use_v2):
+    """Смена ведущего шага сбрасывает ``lead_repeat`` в единицу."""
+    await store.save(
+        "local",
+        ScriptProgress(
+            status={"name": "closed", "city": "pending"},
+            attempts={"name": 1, "city": 1},
+            taken_turn={"name": 1, "city": 1},
+            in_work=["name", "city"],
+            profile={"caller_name": "Мария"},
+        ),
+    )
+    out = await nodes_module.plan_node(
+        _base_state(
+            current_step="name",
+            lead_repeat=5,
+            profile={"caller_name": "Мария"},
+        ),
+        None,  # type: ignore[arg-type]
+    )
+    assert out["current_step"] == "city"
+    assert out["lead_repeat"] == 1
+
+
+def test_нулевой_порог_не_включает_характер_повтора(script, monkeypatch):
+    """При ``lead_repeat_threshold = 0`` сборка штатная при любом счётчике."""
+    from graph.prompts import LEAD_REPEAT_INTRO, RULE_MOVE_ON
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 0)
+    step = script.step("city")
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 99},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="client",
+    )
+    content = messages[0].content
+    assert LEAD_REPEAT_INTRO not in content
+    assert RULE_MOVE_ON in content
+
+
+def test_no_client_reply_pull_истинно():
+    """Вид хода ``pull`` считается ходом без реплики клиента."""
+    assert nodes_module._no_client_reply("pull") is True
+
+
+def test_pull_имеет_приоритет_над_повтором(script, monkeypatch):
+    """При ``turn_kind="pull"`` в сборку уходит ``mode="pull"`` даже при высоком счётчике."""
+    from graph.prompts import LEAD_REPEAT_INTRO, PULL_TASK
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
+    step = script.step("city")
+    captured: dict[str, Any] = {}
+    original = nodes_module.build_turn_messages
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["mode"] = kwargs.get("mode")
+        return original(**kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _capture)
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 99},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="pull",
+    )
+    assert captured["mode"] == "pull"
+    assert PULL_TASK in messages[0].content
+    assert LEAD_REPEAT_INTRO not in messages[0].content
+
+
+def test_silence_выше_порога_даёт_repeat(script, monkeypatch):
+    """При ``turn_kind="silence"`` и счётчике выше порога уходит ``mode="repeat"``."""
+    from graph.prompts import LEAD_REPEAT_INTRO
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
+    step = script.step("city")
+    captured: dict[str, Any] = {}
+    original = nodes_module.build_turn_messages
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["mode"] = kwargs.get("mode")
+        return original(**kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _capture)
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 3},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="silence",
+    )
+    assert captured["mode"] == "repeat"
+    assert LEAD_REPEAT_INTRO in messages[0].content
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in messages[0].content

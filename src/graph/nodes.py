@@ -55,6 +55,7 @@ from graph.log_fmt import (
 )
 from graph.progress import say, stage
 from graph.prompts import (
+    TurnMode,
     build_filler_messages,
     build_turn_messages,
     build_waiting_messages,
@@ -140,20 +141,20 @@ def _call_id() -> str:
 
 
 def _turn_kind() -> str:
-    """Признак запуска хода: ``client``, ``continuation`` или ``silence``.
+    """Признак запуска хода: ``client``, ``continuation``, ``silence`` или ``pull``.
 
     Читает ``turn_kind`` из ``configurable`` рядом с ``call_id``.
     Отсутствует или пусто — считать ``client``.
     """
     kind = str(_configurable().get("turn_kind") or "").strip().lower()
-    if kind in {"continuation", "silence"}:
+    if kind in {"continuation", "silence", "pull"}:
         return kind
     return "client"
 
 
 def _no_client_reply(turn_kind: str) -> bool:
-    """Ход без реплики клиента: продолжение или возврат из молчания."""
-    return turn_kind in {"continuation", "silence"}
+    """Ход без реплики клиента: продолжение, возврат из молчания или вытаскивание."""
+    return turn_kind in {"continuation", "silence", "pull"}
 
 
 def _script_of(state: CallState) -> CompiledScript:
@@ -499,6 +500,9 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     Если на ходе с репликой клиента ведущий снова совпал с шагом прошлого
     хода — берём следующий открытый из шапки (шапка сама не меняется).
     Так не ведём повторно шаг, который судья ещё не успел закрыть.
+
+    Счётчик ``lead_repeat`` считает подряд идущие ходы с одним ведущим
+    шагом; на сдвиге сбрасывается. Сами шаги не закрываются и не открываются.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -535,6 +539,8 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     # Повтор ведущего прошлого хода на реплике клиента — сдвиг по шапке.
     prev_step_id = state.get("current_step")
     shifted_from: str | None = None
+    lead_repeat = int(state.get("lead_repeat") or 0)
+    lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
     if (
         not no_client_reply
         and step is not None
@@ -544,6 +550,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     ):
         shifted_from = step.id
         step = head[1]
+        lead_repeat = 1
 
     # Новый шаг хода — только ведущий шапки, если взят впервые.
     new_step_id: str | None = None
@@ -596,6 +603,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         **progress_patch,
         "profile": profile,
         "current_step": step.id if step is not None else None,
+        "lead_repeat": lead_repeat,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
         "head_new_step": new_step_id if not no_client_reply else None,
@@ -644,6 +652,14 @@ def _build_respond_messages(
     next_step = (
         script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
     )
+    turn_mode: TurnMode = "normal"
+    if turn_kind == "pull":
+        turn_mode = "pull"
+    elif (
+        settings.lead_repeat_threshold > 0
+        and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
+    ):
+        turn_mode = "repeat"
     return build_turn_messages(
         script=script,
         steps=list(head),
@@ -657,6 +673,7 @@ def _build_respond_messages(
         pending_fields=pending_fields,
         turn_kind=turn_kind,
         closed_steps=closed_steps,
+        mode=turn_mode,
     )
 
 
@@ -752,9 +769,22 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         )
         system_len = len(messages[0].content) if messages else 0
         step_prefix = f"ступень {step}, " if step is not None else ""
+        lead_count = int(state.get("lead_repeat") or 0)
+        turn_mode: TurnMode = "normal"
+        if turn_kind == "pull":
+            turn_mode = "pull"
+        elif settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
+            turn_mode = "repeat"
+        if turn_mode == "pull":
+            lead_hint = ", режим pull, вытаскивание"
+        elif settings.lead_repeat_threshold > 0:
+            lead_hint = f", режим {turn_mode}, повтор шага {lead_count}"
+        else:
+            lead_hint = ""
         stage(
             "prompt",
-            f"{step_prefix}сборка {kind}, {reason}, системное сообщение {system_len} символов",
+            f"{step_prefix}сборка {kind}{lead_hint}, {reason}, "
+            f"системное сообщение {system_len} символов",
             "done",
             chars=system_len,
             prompt=kind,
