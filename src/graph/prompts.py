@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
@@ -215,6 +215,20 @@ LEAD_REPEAT_INTRO: str = (
     "по смыслу всей беседы."
 )
 
+#: Раздел, который заменяет «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» на ходе вытаскивания.
+#: Требования и примеры формулировок сюда не подаются: бот на этом ходе не ведёт
+#: тему, а выводит человека на реплику.
+PULL_TASK: str = (
+    "Человек молчит после двух твоих реплик подряд. Рассказывать дальше "
+    "бессмысленно — сейчас нужно его слово, а не новая порция сведений.\n\n"
+    "Скажи одну короткую реплику и закончи прямым вопросом человеку. Вопрос "
+    "возьми из того, что он сам говорил раньше в этом разговоре: его причина, "
+    "его сомнение, его обстоятельства. Не из темы, которую ты вёл.\n\n"
+    "Пересказывать сказанное, продолжать тему и объяснять что-либо — ошибка. "
+    "Дежурные обороты про то, что его интересует или что ему рассказать, — "
+    "тоже ошибка."
+)
+
 #: Запрет озвучивать служебную механику — ровно одно вхождение в персоне.
 _NO_MECHANICS = (
     "Вслух внутренняя механика не проговаривается: ни упоминаний поиска, "
@@ -372,19 +386,25 @@ def persona_block() -> str:
     )
 
 
-def speech_rules_block(*, lead_repeat: bool = False) -> str:
+#: Режимы сборки хода. ``normal`` — штатный промпт; ``repeat`` — повторный заход
+#: по одной теме; ``pull`` — вытаскивание, когда человек молчит после двух реплик
+#: бота подряд и задача хода — вывести его на слово.
+TurnMode = Literal["normal", "repeat", "pull"]
+
+
+def speech_rules_block(*, mode: TurnMode = "normal") -> str:
     """Собирает нумерованный список правил речи.
 
     Args:
-        lead_repeat: собрать список под повторный заход по одной теме — часть
-            правил берётся из ``LEAD_REPEAT_OVERRIDES``. При ``False`` список
+        mode: режим сборки хода. При ``repeat`` и ``pull`` часть правил
+            берётся из ``LEAD_REPEAT_OVERRIDES``. При ``normal`` список
             штатный, символ в символ.
 
     Returns:
         Правила речи одной строкой, по одному правилу на строку.
     """
     rules = SPEECH_RULES
-    if lead_repeat:
+    if mode in {"repeat", "pull"}:
         rules = tuple(LEAD_REPEAT_OVERRIDES.get(rule, rule) for rule in rules)
     return "\n".join(f"{index}. {rule}" for index, rule in enumerate(rules))
 
@@ -701,13 +721,14 @@ def steps_block(
     *,
     context_text: str = "",
     next_step: AnyStep | None = None,
-    lead_repeat: bool = False,
+    mode: TurnMode = "normal",
 ) -> str:
     """Собирает разделы текущего и незакрытых шагов.
 
     Первый шаг из ``steps`` — раздел «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» целиком
     (требования, примеры, нехватка данных). Остальные — «ЕЩЁ НЕ ЗАКРЫТО»
     только с названием и требованиями. ``next_step`` сюда не входит.
+    При ``mode="pull"`` вместо текущего раздела — «ЗАДАЧА ЭТОГО ХОДА».
 
     Args:
         steps: шаги в работе; первый — тема реплики.
@@ -715,7 +736,8 @@ def steps_block(
         facts: факты хода (без перечня городов).
         context_text: документ контекста для проверки нехватки знаний.
         next_step: игнорируется; ориентир собирается отдельно.
-        lead_repeat: вставить ``LEAD_REPEAT_INTRO`` в начало текущего раздела.
+        mode: режим сборки; ``repeat`` — врезка ``LEAD_REPEAT_INTRO``;
+            ``pull`` — задача вытаскивания вместо описания шага.
 
     Returns:
         Текст с заголовками разделов; пустая строка, если нечего показать.
@@ -729,25 +751,33 @@ def steps_block(
         section = _section("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ", closed)
         return section or ""
 
-    current_body = "\n".join(
-        [
-            _STEPS_FOCUS_INTRO,
-            "",
-            *_describe_step(
-                steps[0],
-                profile,
-                facts,
-                context_text=context_text,
-            ),
-        ]
-    )
-    if lead_repeat and current_body:
-        current_body = f"{LEAD_REPEAT_INTRO}\n\n{current_body}"
-
     parts: list[str] = []
-    now = _section("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ", current_body)
-    if now:
-        parts.append(now)
+    if mode == "pull":
+        lead = steps[0]
+        topic = str(getattr(lead, "name", None) or getattr(lead, "goal", None) or lead.id)
+        pull_body = f"{topic}\n\n{PULL_TASK}"
+        now = _section("ЗАДАЧА ЭТОГО ХОДА", pull_body)
+        if now:
+            parts.append(now)
+    else:
+        current_body = "\n".join(
+            [
+                _STEPS_FOCUS_INTRO,
+                "",
+                *_describe_step(
+                    steps[0],
+                    profile,
+                    facts,
+                    context_text=context_text,
+                ),
+            ]
+        )
+        if mode == "repeat" and current_body:
+            current_body = f"{LEAD_REPEAT_INTRO}\n\n{current_body}"
+
+        now = _section("СЕЙЧАС ГОВОРИМ ОБ ЭТОМ", current_body)
+        if now:
+            parts.append(now)
 
     if len(steps) > 1:
         hang_body = "\n\n".join(next_step_block(step, profile, facts) for step in steps[1:])
@@ -1073,7 +1103,7 @@ def build_turn_messages(
     pending_fields: Sequence[str] = (),
     turn_kind: str = "client",
     closed_steps: Sequence[AnyStep] = (),
-    lead_repeat: bool = False,
+    mode: TurnMode = "normal",
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к генератору.
 
@@ -1095,7 +1125,7 @@ def build_turn_messages(
         pending_fields: поля профиля, которые сейчас разбираются.
         turn_kind: ``client`` или ``continuation``.
         closed_steps: шаги, уже закрытые к этому ходу.
-        lead_repeat: собрать правила и раздел шага под повторный заход.
+        mode: режим сборки правил и раздела шага.
 
     Returns:
         Список сообщений: одно системное и полная история.
@@ -1149,7 +1179,7 @@ def build_turn_messages(
     destination = _section("КУДА ВЕДЁМ РАЗГОВОР", script.summary)
     if destination:
         sections.append(destination)
-    rules = _section("ПРАВИЛА РЕЧИ", speech_rules_block(lead_repeat=lead_repeat))
+    rules = _section("ПРАВИЛА РЕЧИ", speech_rules_block(mode=mode))
     if rules:
         sections.append(rules)
     if context_parts:
@@ -1157,9 +1187,7 @@ def build_turn_messages(
         if ctx_section:
             sections.append(ctx_section)
 
-    steps_text = steps_block(
-        head, profile, facts, context_text=ctx_for_steps, lead_repeat=lead_repeat
-    )
+    steps_text = steps_block(head, profile, facts, context_text=ctx_for_steps, mode=mode)
     if steps_text:
         sections.append(steps_text)
 

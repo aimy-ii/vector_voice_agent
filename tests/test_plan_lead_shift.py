@@ -209,3 +209,74 @@ def test_нулевой_порог_не_включает_характер_пов
     content = messages[0].content
     assert LEAD_REPEAT_INTRO not in content
     assert RULE_MOVE_ON in content
+
+
+def test_no_client_reply_pull_истинно():
+    """Вид хода ``pull`` считается ходом без реплики клиента."""
+    assert nodes_module._no_client_reply("pull") is True
+
+
+def test_pull_имеет_приоритет_над_повтором(script, monkeypatch):
+    """При ``turn_kind="pull"`` в сборку уходит ``mode="pull"`` даже при высоком счётчике."""
+    from graph.prompts import LEAD_REPEAT_INTRO, PULL_TASK
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
+    step = script.step("city")
+    captured: dict[str, Any] = {}
+    original = nodes_module.build_turn_messages
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["mode"] = kwargs.get("mode")
+        return original(**kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _capture)
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 99},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="pull",
+    )
+    assert captured["mode"] == "pull"
+    assert PULL_TASK in messages[0].content
+    assert LEAD_REPEAT_INTRO not in messages[0].content
+
+
+def test_silence_выше_порога_даёт_repeat(script, monkeypatch):
+    """При ``turn_kind="silence"`` и счётчике выше порога уходит ``mode="repeat"``."""
+    from graph.prompts import LEAD_REPEAT_INTRO
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
+    step = script.step("city")
+    captured: dict[str, Any] = {}
+    original = nodes_module.build_turn_messages
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["mode"] = kwargs.get("mode")
+        return original(**kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _capture)
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 3},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="silence",
+    )
+    assert captured["mode"] == "repeat"
+    assert LEAD_REPEAT_INTRO in messages[0].content
+    assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in messages[0].content
