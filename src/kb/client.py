@@ -55,8 +55,10 @@ RETRY_DELAY = 0.2
 #: парсинга, поэтому час — с запасом.
 CACHE_TTL = settings.vector_kb_cache_ttl
 
-#: Максимум городов в кэше меты. Их всего 41, лимит на случай роста сети.
-CACHE_MAX_CITIES = 100
+#: Максимум записей в кэше. Кэш общий на все ручки: три ключа на город плюс
+#: меты филиалов плюс подбор по месту — сотни не хватало, старые записи
+#: вытеснялись раньше, чем протухали.
+CACHE_MAX_CITIES = 512
 
 #: Префикс логов интеграции.
 LOG_PREFIX = "[VECTOR_KB]"
@@ -71,6 +73,8 @@ PATH_CITY = "/cities/{city_slug}"
 PATH_CITY_BRANCHES = "/cities/{city_slug}/branches"
 PATH_CITY_BRANCHES_ENUM = "/cities/{city_slug}/branches/enum"
 PATH_BRANCH = "/branches/{branch_slug}"
+PATH_BRANCHES_NEAREST = "/branches/nearest"
+PATH_GEOCODE = "/geocode"
 PATH_PARSE = "/parse"
 PATH_PARSE_JOB = "/parse/{job_id}"
 PATH_RELOAD = "/reload"
@@ -86,6 +90,24 @@ PRICE_NOTE_KEY = "note"
 PRICE_RELIABLE_KEY = "reliable"
 
 logger = logging.getLogger(__name__)
+
+
+def _place_cache_key(text: str) -> str:
+    """Нормализует произнесённое место для ключа кэша.
+
+    Регистр, лишние пробелы и «ё» на ключ влиять не должны: «Солнечный» и
+    « солнечный » — одна и та же точка и один поход к геокодеру.
+
+    В справочник уходит исходный текст: геокодеру полезна живая формулировка,
+    нормализация нужна только ключу.
+
+    Args:
+        text: место так, как его назвал человек.
+
+    Returns:
+        Нормализованная строка; пустая, если текста нет.
+    """
+    return " ".join((text or "").replace("ё", "е").replace("Ё", "Е").lower().split())
 
 
 class VectorKBClient:
@@ -197,6 +219,8 @@ class VectorKBClient:
         *,
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+        retries: int | None = None,
     ) -> Any | None:
         """Выполняет запрос с повторами и мягкой обработкой ошибок.
 
@@ -205,16 +229,28 @@ class VectorKBClient:
             path: путь относительно префикса API.
             params: параметры строки запроса.
             json_body: тело запроса.
+            timeout: таймаут этого запроса, секунды. None — общий таймаут
+                клиента. Нужен геокодеру: он единственный ходит наружу.
+            retries: сколько попыток делать. None — общее значение
+                ``REQUEST_RETRIES``.
 
         Returns:
             Разобранный JSON или None при ошибке и при ответе 404.
         """
         client = await self._init_client()
         last: Exception | None = None
+        attempts = REQUEST_RETRIES if retries is None else max(1, retries)
+        # httpx понимает timeout=None как «ждать вечно», поэтому параметр
+        # передаём только когда он задан — иначе работает таймаут клиента.
+        extra: dict[str, Any] = {}
+        if timeout is not None:
+            extra["timeout"] = timeout
 
-        for attempt in range(1, REQUEST_RETRIES + 1):
+        for attempt in range(1, attempts + 1):
             try:
-                response = await client.request(method, path, params=params, json=json_body)
+                response = await client.request(
+                    method, path, params=params, json=json_body, **extra
+                )
                 body_size = len(response.content)
                 logger.info(
                     "%s Запрос %s %s → %s, тело %s байт",
@@ -254,7 +290,7 @@ class VectorKBClient:
                     path,
                     exc,
                 )
-                if attempt < REQUEST_RETRIES:
+                if attempt < attempts:
                     await asyncio.sleep(RETRY_DELAY * attempt)
 
         logger.error("%s Сервис недоступен: %s %s (%s)", LOG_PREFIX, method, path, last)
@@ -398,6 +434,107 @@ class VectorKBClient:
         if cached is not None:
             return cached
         data = await self._request("GET", PATH_CITY_BRANCHES_ENUM.format(city_slug=city_slug))
+        result = data if isinstance(data, list) else []
+        if result:
+            self._store(key, result)
+        return result
+
+    # --- подбор по месту ------------------------------------------------------
+
+    async def geocode(
+        self,
+        text: str,
+        *,
+        city_slug: str | None = None,
+    ) -> tuple[float, float] | None:
+        """Переводит произнесённое место в координаты.
+
+        Единственный вызов справочника, который ходит наружу — к геокодеру.
+        Поэтому таймаут короткий и попытка одна: ход столько ждать не должен,
+        а фон переспросит на следующей реплике.
+
+        Отрицательный ответ тоже кэшируется: если место не опознано, второй
+        поход за той же фразой ничего не изменит.
+
+        Args:
+            text: место словами («Солнечный», «у Гражданского проспекта»).
+            city_slug: слаг города; сужает поиск и разводит одноимённые
+                районы в разных городах.
+
+        Returns:
+            Пара «широта, долгота» или None, если место не опознано либо
+            справочник недоступен.
+        """
+        place = _place_cache_key(text)
+        if len(place) < 2:
+            return None
+        key = f"nearby:{city_slug or '-'}:{place}"
+        cached = self._cached(key)
+        if cached is not None:
+            return (cached[0], cached[1]) if cached else None
+
+        params: dict[str, Any] = {"text": (text or "").strip()}
+        if city_slug:
+            params["city_slug"] = city_slug
+        data = await self._request(
+            "GET",
+            PATH_GEOCODE,
+            params=params,
+            timeout=settings.geocode_timeout_seconds,
+            retries=1,
+        )
+        point: list[float] = []
+        if isinstance(data, dict) and data.get("found"):
+            lat = data.get("lat")
+            lon = data.get("lon")
+            if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
+                point = [float(lat), float(lon)]
+        if data is not None:
+            self._store(key, point)
+        return (point[0], point[1]) if point else None
+
+    async def nearest_branches(
+        self,
+        lat: float,
+        lon: float,
+        *,
+        city_slug: str | None = None,
+        limit: int | None = None,
+        radius_km: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Отдаёт ближайшие к точке филиалы, отсортированные по расстоянию.
+
+        Сети на стороне справочника здесь нет — это арифметика по уже
+        проставленным координатам.
+
+        Args:
+            lat: широта точки.
+            lon: долгота точки.
+            city_slug: слаг города; без него подбор идёт по всей сети и может
+                вернуть филиал соседнего города.
+            limit: сколько филиалов вернуть; None — значение из настроек.
+            radius_km: радиус подбора; None — значение из настроек.
+
+        Returns:
+            Список филиалов со слагом, адресом, ориентиром и расстоянием;
+            пустой, если в радиусе никого нет или справочник недоступен.
+        """
+        take = settings.nearest_branches_limit if limit is None else limit
+        radius = settings.nearest_branches_radius_km if radius_km is None else radius_km
+        key = f"nearest:{city_slug or '-'}:{lat:.4f}:{lon:.4f}:{take}:{radius}"
+        cached = self._cached(key)
+        if cached is not None:
+            return cached
+
+        params: dict[str, Any] = {
+            "lat": lat,
+            "lon": lon,
+            "limit": take,
+            "radius_km": radius,
+        }
+        if city_slug:
+            params["city_slug"] = city_slug
+        data = await self._request("GET", PATH_BRANCHES_NEAREST, params=params)
         result = data if isinstance(data, list) else []
         if result:
             self._store(key, result)

@@ -1067,9 +1067,7 @@ async def test_live_профиль_попадает_в_кеш_чекера(scrip
     mem = MemoryScriptStore()
     await mem.save("local", progress)
 
-    async def fake_guess(
-        reply, *, known, fields, history=(), agent=None, rewritable=frozenset()
-    ):
+    async def fake_guess(reply, *, known, fields, history=(), agent=None, rewritable=frozenset()):
         return ProfileGuess(values=[ProfileValue(key="caller_name", value="Андрей")])
 
     async def fake_warmup(*args, **kwargs):
