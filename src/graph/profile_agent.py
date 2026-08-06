@@ -8,21 +8,17 @@
 from __future__ import annotations
 
 import logging
-import re
 from typing import Mapping, Protocol, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from graph.names import given_name
-from script.build import AnyStep, CompiledScript
-from script.models import SalesStep
+from graph.profile_form import REWRITABLE_MARK, field_pairs
+from script.build import CompiledScript
 from utils.llm_gen import astream_structured, get_llm, response_format_from
 
 log = logging.getLogger(__name__)
-
-#: Имена полей в требованиях шагов продаж (латиница + подчёркивания).
-_FIELD_KEY = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 
 #: Поля имени — значение прогоняется через ``given_name``.
 _NAME_KEYS = frozenset({"caller_name", "student_name"})
@@ -60,33 +56,18 @@ class ProfileAgent(Protocol):
 def profile_fields_of(script: CompiledScript) -> list[tuple[str, str]]:
     """Перечень полей профиля: ключ и человеческое название.
 
+    Старые форматы скрипта несут свои поля внутри данных — берём их. Формат
+    продаж полей не несёт: перечень объявлен формой в ``graph.profile_form``.
+
     Args:
         script: скомпилированный скрипт.
 
     Returns:
-        Список пар ``(key, title)``. В формате продаж — имена полей из
-        требований шагов; списков полей в коде нет.
+        Список пар ``(key, title)``.
     """
     if script.profile_fields:
         return [(key, field.title) for key, field in script.profile_fields.items()]
-
-    keys: list[str] = []
-    seen: set[str] = set()
-    for step in script.steps.values():
-        text = _step_requirements(step)
-        for match in _FIELD_KEY.findall(text):
-            if match in seen:
-                continue
-            seen.add(match)
-            keys.append(match)
-    return [(key, key) for key in keys]
-
-
-def _step_requirements(step: AnyStep) -> str:
-    """Текст требований шага; у старого формата — пусто."""
-    if isinstance(step, SalesStep):
-        return step.requirements or ""
-    return ""
+    return field_pairs()
 
 
 def _format_history(history: Sequence[BaseMessage], *, limit: int = _HISTORY_TAIL) -> str:
@@ -131,6 +112,8 @@ class LlmProfileAgent:
             "Ключ поля — строго из перечня. Значение — только то, что "
             "прозвучало в диалоге, без домыслов.\n"
             "Уже заполненные поля не перезаписывай и не дублируй.\n"
+            f"Исключение — поля с пометкой «{REWRITABLE_MARK}»: если человек "
+            "назвал по такому полю другое значение, верни новое.\n"
             "Без вопроса бота короткая реплика клиента («механика») "
             "сама по себе может быть ответом — смотри хвост.\n"
             "В диалоге нет нового про поля из перечня — верни пустой список."
@@ -164,20 +147,24 @@ async def guess_profile(
     fields: Sequence[tuple[str, str]],
     history: Sequence[BaseMessage] = (),
     agent: ProfileAgent | None = None,
+    rewritable: frozenset[str] = frozenset(),
 ) -> ProfileGuess:
     """Точка входа агента профиля с валидацией результата.
 
     Args:
         reply: реплика клиента.
         known: уже заполненный профиль.
-        fields: перечень ``(key, title)`` из скрипта.
+        fields: перечень ``(key, title)``.
         history: хвост истории разговора (без одной реплики смысл теряется).
         agent: подмена для офлайн-тестов.
+        rewritable: ключи, которые разрешено уточнять. Пустое множество —
+            прежнее поведение: заполненное поле не трогаем.
 
     Returns:
-        Угаданные значения: ключи вне перечня и пустые отброшены,
-        заполненные не перезаписываются, имена прогнаны через ``given_name``.
-        Ошибка агента наружу не летит — пустой результат.
+        Угаданные значения: ключи вне перечня и пустые отброшены, заполненные
+        не перезаписываются кроме уточняемых, повтор того же значения отброшен,
+        имена прогнаны через ``given_name``. Ошибка агента наружу не летит —
+        пустой результат.
     """
     worker = agent or LlmProfileAgent()
     allowed = {key for key, _title in fields}
@@ -194,11 +181,12 @@ async def guess_profile(
         value = str(item.value or "").strip()
         if not key or key not in allowed or not value or key in seen:
             continue
-        if str(known.get(key) or "").strip():
+        current = str(known.get(key) or "").strip()
+        if current and key not in rewritable:
             continue
         if key in _NAME_KEYS:
             value = given_name(value) or value
-        if not value:
+        if not value or value == current:
             continue
         seen.add(key)
         out.append(ProfileValue(key=key, value=value))

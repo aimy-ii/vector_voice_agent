@@ -44,6 +44,7 @@ from graph.nodes import (
     _save_progress,
 )
 from graph.profile_agent import guess_profile, profile_fields_of
+from graph.profile_form import rewritable_keys
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
@@ -363,18 +364,24 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             patch["branch_slug"] = ctx.branch_slug
 
         fields = profile_fields_of(script)
+        rewritable = rewritable_keys()
         history = list(state.get("messages") or [])
         guess = await guess_profile(
             reply,
             history=history,
             known=profile,
             fields=fields,
+            rewritable=rewritable,
         )
         for item in guess.values:
             key = item.key
             value = item.value
-            if value and not str(profile.get(key) or "").strip():
-                profile[key] = value
+            if not value:
+                continue
+            current = str(profile.get(key) or "").strip()
+            if current and (key not in rewritable or current == value.strip()):
+                continue
+            profile[key] = value
         progress.profile = dict(profile)
         progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
         patch.update(progress_patch)
