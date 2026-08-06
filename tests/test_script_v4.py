@@ -16,12 +16,12 @@ from script.planner import script_head
 from script.source import JsonScriptSource
 
 
-def test_v4_собирается_26_шагов_по_шесть_полей(script_v4):
+def test_v4_собирается_27_шагов_по_шесть_полей(script_v4):
     """Скрипт v4 собирается; у каждого шага ровно шесть полей."""
     assert script_v4.is_sales
     assert script_v4.version == "4"
-    assert len(script_v4.steps) == 26
-    assert len(script_v4.step_order) == 26
+    assert len(script_v4.steps) == 27
+    assert len(script_v4.step_order) == 27
     empty_knowledge = 0
     for step in script_v4.steps.values():
         dumped = step.model_dump()
@@ -36,9 +36,26 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
         assert isinstance(dumped["knowledge"], list)
         if not dumped["knowledge"]:
             empty_knowledge += 1
-    assert empty_knowledge == 10
+    assert empty_knowledge == 11
     experience = script_v4.step("experience")
     assert "подбадривать" in experience.requirements
+
+
+def test_v4_location_hint_между_who_studies_и_experience(script_v4):
+    """Шаг location_hint: order 45, позиция в step_order, пустой knowledge."""
+    step = script_v4.step("location_hint")
+    assert step.order == 45
+    assert step.knowledge == []
+    order = script_v4.step_order
+    assert order.index("location_hint") == order.index("who_studies") + 1
+    assert order.index("experience") == order.index("location_hint") + 1
+
+
+def test_v4_branch_не_спрашивает_район_заново(script_v4):
+    """В требованиях шага branch есть запрет спрашивать район заново."""
+    req = script_v4.step("branch").requirements
+    assert "заново не спрашивать" in req
+    assert "нет в переданных ближайших" in req
 
 
 def test_v4_порядок_по_order(script_v4):
@@ -134,12 +151,12 @@ def test_шапка_v4_по_order_и_потолок(script_v4):
 
     attempts = {"greeting": 1, "city": 1, "who_studies": 1}
     head = script_head(script_v4, status={}, attempts=attempts, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["greeting", "city", "who_studies", "experience"]
+    assert [s.id for s in head] == ["greeting", "city", "who_studies", "location_hint"]
 
-    attempts = {"greeting": 1, "city": 1, "who_studies": 1, "experience": 1}
+    attempts = {"greeting": 1, "city": 1, "who_studies": 1, "location_hint": 1}
     head = script_head(script_v4, status={}, attempts=attempts, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["greeting", "city", "who_studies", "experience"]
-    assert "transmission" not in {s.id for s in head}
+    assert [s.id for s in head] == ["greeting", "city", "who_studies", "location_hint"]
+    assert "experience" not in {s.id for s in head}
 
     status = {"greeting": "closed", "city": "closed"}
     head = script_head(script_v4, status=status, attempts={}, profile={}, pending_soft_cap=4)
@@ -260,7 +277,7 @@ def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, da
 
 
 def test_реестр_инструментов_всегда_branches_faq_details(script_v4, script):
-    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, факты."""
+    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, ближайшие, факты."""
     for compiled in (script_v4, script):
         tools = build_context_tools(compiled)
         assert [t.name for t in tools] == [
@@ -268,6 +285,7 @@ def test_реестр_инструментов_всегда_branches_faq_details
             "branches",
             "city_faq",
             "branch_details",
+            "nearest_branches",
             "facts",
         ]
 
@@ -308,7 +326,7 @@ def test_messenger_подтверждает_номер_а_не_спрашива�
     ):
         assert blind not in examples
     assert any("с которого" in ex.lower() and "звон" in ex.lower() for ex in step.examples)
-    assert len(script_v4.steps) == 26
+    assert len(script_v4.steps) == 27
 
 
 def test_скрипт_без_сводки_читается_с_пустым_полем():

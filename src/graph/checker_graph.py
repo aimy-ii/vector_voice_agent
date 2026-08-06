@@ -33,6 +33,7 @@ from graph.contexter import reply_hash, run_contexter
 from graph.facts import knowledge_of, needs_of
 from graph.farewell_agent import decide_farewell
 from graph.log_fmt import format_check_done, format_live_check_state
+from graph.nearby import format_searching, is_searching, lookup_nearby, should_refresh
 from graph.nodes import (
     _call_id,
     _checker_client,
@@ -413,6 +414,32 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             ctx=ctx,
             asks_inform=asks_inform,
         )
+
+        # Подбор ближайших филиалов: решение принимает код по изменению поля
+        # формы, а не агент. Модель поставляет только само место словами.
+        nearby_place = str(profile.get("location_hint") or "").strip()
+        nearby_city = (ctx.city_slug or str(state.get("city_slug") or "")).strip()
+        nearby_key_new = should_refresh(
+            city_slug=nearby_city or None,
+            place=nearby_place,
+            current_key=ctx.nearby_key,
+        )
+        if nearby_key_new:
+            ctx.nearby_key = nearby_key_new
+            ctx.nearby_text = format_searching(nearby_place)
+            # Отдельной записью до похода: ход идёт параллельно и должен
+            # увидеть, что подбор начат, а не пустоту.
+            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+            nearby_result = await lookup_nearby(
+                vector_kb,
+                city_slug=nearby_city,
+                place=nearby_place,
+                key=nearby_key_new,
+            )
+            ctx.nearby_text = nearby_result.text
+            if nearby_result.branch_slugs:
+                ctx.branch_candidates = nearby_result.branch_slugs
+
         ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
         patch.update(ctx_patch)
 
@@ -432,9 +459,16 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         return patch
     finally:
         final_ctx = await _load_context(state)
+        updates: dict[str, Any] = {}
         if final_ctx.dynamic_status == DYN_WORKING:
-            terminal = prior_status if prior_status != DYN_WORKING else DYN_NONE
-            final_ctx = final_ctx.model_copy(update={"dynamic_status": terminal})
+            updates["dynamic_status"] = prior_status if prior_status != DYN_WORKING else DYN_NONE
+        # Проход оборвался на исключении посреди подбора: строку о подборе
+        # снимаем, ключ чистим — следующая реплика пересчитает то же место.
+        if is_searching(final_ctx.nearby_text):
+            updates["nearby_text"] = ""
+            updates["nearby_key"] = ""
+        if updates:
+            final_ctx = final_ctx.model_copy(update=updates)
             fixed = await _save_context(final_ctx, fields=CONTEXT_FIELDS_DYNAMIC)
             patch.update(fixed)
 

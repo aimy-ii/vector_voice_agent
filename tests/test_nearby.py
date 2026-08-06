@@ -10,6 +10,7 @@ from graph.nearby import (
     format_found,
     format_missing,
     format_searching,
+    is_searching,
     lookup_nearby,
     nearby_key,
     normalize_place,
@@ -146,6 +147,16 @@ def test_format_missing_и_searching_содержат_место() -> None:
     """Формулировки missing и searching называют место."""
     assert "Солнечный" in format_missing("Солнечный")
     assert "Солнечный" in format_searching("Солнечный")
+
+
+def test_is_searching_только_на_незавершённом_подборе() -> None:
+    """Признак висит только на format_searching, не на итогах и не на пустом."""
+    assert is_searching(format_searching("Солнечный")) is True
+    assert (
+        is_searching(format_found("Солнечный", [{"address": "ул. А", "distance_km": 1}])) is False
+    )
+    assert is_searching(format_missing("Солнечный")) is False
+    assert is_searching("") is False
 
 
 async def test_lookup_nearby_успех() -> None:

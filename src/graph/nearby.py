@@ -19,6 +19,9 @@ from core.config import settings
 
 log = logging.getLogger(__name__)
 
+#: Признак незавершённого подбора внутри блока контекста.
+SEARCHING_MARK = "сейчас подбираются"
+
 
 class NearbyKB(Protocol):
     """Что модулю нужно от справочника."""
@@ -245,3 +248,18 @@ async def lookup_nearby(
         branch_slugs=[slug for slug in slugs if slug],
         found=True,
     )
+
+
+def is_searching(text: str) -> bool:
+    """Стоит ли в блоке ближайших филиалов незавершённый подбор.
+
+    Нужна живому каналу: если проход оборвался на исключении, строка о подборе
+    осталась бы висеть до конца звонка.
+
+    Args:
+        text: текущий блок ближайших филиалов из контекста.
+
+    Returns:
+        True, если подбор был начат и не завершён.
+    """
+    return SEARCHING_MARK in (text or "")

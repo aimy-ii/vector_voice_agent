@@ -46,6 +46,8 @@ CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(
         "dynamic_reply_hash",
         "pending_fields",
         "empty_needs",
+        "nearby_text",
+        "nearby_key",
         "conversation_ended",
     }
 )
