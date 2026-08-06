@@ -58,6 +58,14 @@ def test_v4_branch_не_спрашивает_район_заново(script_v4):
     assert "нет в переданных ближайших" in req
 
 
+def test_v4_branch_examples_не_спрашивают_район(script_v4):
+    """Образцы branch не пересекаются с location_hint и не содержат «район»."""
+    branch = set(script_v4.step("branch").examples)
+    location = set(script_v4.step("location_hint").examples)
+    assert branch.isdisjoint(location)
+    assert all("район" not in example.lower() for example in branch)
+
+
 def test_v4_порядок_по_order(script_v4):
     """Шаги в step_order идут по возрастанию order."""
     orders = [script_v4.step(sid).order for sid in script_v4.step_order]
