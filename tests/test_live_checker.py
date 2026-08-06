@@ -188,11 +188,6 @@ async def test_partial_не_попадает_в_срез_истории(script):
 
 async def test_срез_не_отрезает_чужой_human_при_partial(script):
     """Partial ещё не в messages — прошлый ответ клиента остаётся в срезе."""
-    progress = ScriptProgress(
-        status={"city": "pending"},
-        attempts={"city": 1},
-        taken_turn={"city": 1},
-    )
     messages = [
         AIMessage(content="имя?"),
         HumanMessage(content="Андрей"),
@@ -200,9 +195,6 @@ async def test_срез_не_отрезает_чужой_human_при_partial(sc
     ]
     sliced = history_slice_for(
         messages,
-        steps=[script.step("city")],
-        progress=progress,
-        turn=3,
         reply="я из Пер",
     )
     assert any(m.content == "Андрей" for m in sliced)

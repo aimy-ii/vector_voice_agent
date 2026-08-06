@@ -5,6 +5,7 @@ from __future__ import annotations
 from graph.log_fmt import (
     format_check_done,
     format_check_pending,
+    format_check_verdict,
     format_live_check_state,
     format_lookup_done,
     format_plan_done,
@@ -113,6 +114,26 @@ def test_format_check_pending_пусто_с_доступными():
     assert "на проверку: пусто" in text
     assert "отсеяно: city — не в работе" in text
     assert "доступны: [city(0), branch(0)]" in text
+
+
+def test_format_check_verdict_полный():
+    text = format_check_verdict(
+        step_id="price",
+        age=2,
+        history_len=16,
+        reply_usable=True,
+        step_closed=False,
+        asking_pointless=False,
+    )
+    assert "price: возраст 2, срез 16 сообщ." in text
+    assert "реплика годна: да" in text
+    assert "закрыт: нет" in text
+    assert "бессмысленно: нет" in text
+
+
+def test_format_check_verdict_модель_не_ответила():
+    text = format_check_verdict(step_id="tariff", age=0, history_len=8)
+    assert text == "tariff: возраст 0, срез 8 сообщ. — модель не ответила"
 
 
 def test_format_spoken_preview_обрезка():
