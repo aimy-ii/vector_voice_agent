@@ -44,9 +44,7 @@ from graph.facts import needs_of
 from graph.history import (
     last_agent_text,
     last_user_text,
-    normalize,
     strip_system,
-    text_of,
 )
 from graph.log_fmt import (
     format_plan_done,
@@ -60,7 +58,7 @@ from graph.prompts import (
     build_turn_messages,
     build_waiting_messages,
 )
-from graph.reconcile import count_agent_messages, delivery_patch
+from graph.reconcile import delivery_patch
 from graph.resolvers import (
     BranchResolver,
     CityResolver,
@@ -68,6 +66,7 @@ from graph.resolvers import (
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
+from graph.transcript import append_agent, count_spoken_agent, merge_snapshot, to_messages
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -408,30 +407,6 @@ def call_summary(state: CallState) -> dict[str, Any]:
     )
 
 
-def _tail_has_agent_reply(messages: Sequence[Any], reply: str) -> bool:
-    """Есть ли в хвосте истории последняя реплика бота.
-
-    Смотрит последнюю AI-реплику (хвостовой human не мешает). Сравнение
-    через ``normalize``: снимок бота и запись мозга могут отличаться
-    пробелами и знаками.
-    """
-    target = normalize(reply)
-    if not target:
-        return True
-    for message in reversed(list(messages)):
-        if isinstance(message, AIMessage):
-            return normalize(text_of(message)) == target
-    return False
-
-
-def _restore_last_agent_reply(messages: list[Any], reply: str) -> list[Any]:
-    """Дописывает реплику бота в хвост, перед хвостовым human если он есть."""
-    agent = AIMessage(content=reply)
-    if messages and getattr(messages[-1], "type", None) == "human":
-        return list(messages[:-1]) + [agent, messages[-1]]
-    return list(messages) + [agent]
-
-
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое."""
     ctx: CallContext = runtime.context or {}
@@ -446,12 +421,17 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch["script_id"] = script.id
     patch["script_version"] = script.version
 
-    messages = strip_system(state.get("messages") or [])
-    # Снимок бота может затереть произнесённое: commit кладёт его в
-    # last_agent_reply, здесь возвращаем в хвост, если пропало.
-    last_reply = ((await _load_context(state)).last_agent_reply or "").strip()
-    if last_reply and not _tail_has_agent_reply(messages, last_reply):
-        messages = _restore_last_agent_reply(messages, last_reply)
+    snapshot = strip_system(state.get("messages") or [])
+    # История живёт в кеше: снимок бота отстаёт на неозвученные реплики.
+    ctx_in = await _load_context(state)
+    entries = merge_snapshot(ctx_in.transcript, snapshot, turn=int(state.get("turn") or 0))
+    if entries != ctx_in.transcript:
+        await _save_context(
+            ctx_in.model_copy(update={"transcript": entries}),
+            fields=CONTEXT_FIELDS_TURN,
+        )
+    messages = to_messages(entries)
+    spoken_agent_now = count_spoken_agent(entries)
     patch["messages"] = messages
     patch["turn"] = int(state.get("turn") or 0) + 1
     patch["facts"] = {}
@@ -479,6 +459,7 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
         state=state,
         messages=messages,
         last_spoken=last_agent_text(messages),
+        ai_count_now=spoken_agent_now,
     )
     patch.update(delivery)
     stage("ingest", f"ход {patch['turn']}, скрипт {script.id} v{script.version}", "start")
@@ -961,7 +942,16 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             conversation_ended = bool(ctx.conversation_ended)
             patch["conversation_ended"] = conversation_ended
         if spoken_text:
-            ctx = ctx.model_copy(update={"last_agent_reply": spoken_text})
+            ctx = ctx.model_copy(
+                update={
+                    "last_agent_reply": spoken_text,
+                    "transcript": append_agent(
+                        ctx.transcript,
+                        turn=int(state.get("turn") or 0),
+                        text=spoken_text,
+                    ),
+                }
+            )
             ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
             conversation_context = ctx_patch["conversation_context"]
 
@@ -980,7 +970,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "pending_len": len(spoken_text)
             if not no_client_reply
             else int(state.get("pending_len") or 0),
-            "pending_ai_count": count_agent_messages(state.get("messages") or []),
+            "pending_ai_count": count_spoken_agent((await _load_context(state)).transcript),
             "city_slug": state.get("city_slug"),
             "city_name": state.get("city_name"),
             "branch_slug": state.get("branch_slug"),

@@ -49,6 +49,7 @@ from graph.profile_form import rewritable_keys
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
+from graph.transcript import to_messages
 from kb.client import vector_kb
 from script.planner import peek_next_step, pick_step
 from script.price import price_line, price_line_from_kb
@@ -342,7 +343,15 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             objections=script.objections,
         )
 
-        state_for_check: dict[str, Any] = {**state, "profile": profile}
+        # История из кеша: у фона своего снимка нет. После контекстера
+        # подтягиваем свежую — основной ход мог дописать реплики.
+        ctx = ctx.model_copy(update={"transcript": (await _load_context(state)).transcript})
+        history = to_messages(ctx.transcript) or list(state.get("messages") or [])
+        state_for_check: dict[str, Any] = {
+            **state,
+            "profile": profile,
+            "messages": history,
+        }
         progress, closures, asks_inform = await check_pass(
             state_for_check,
             reply=reply,
@@ -366,7 +375,6 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
 
         fields = profile_fields_of(script)
         rewritable = rewritable_keys()
-        history = list(state.get("messages") or [])
         guess = await guess_profile(
             reply,
             history=history,

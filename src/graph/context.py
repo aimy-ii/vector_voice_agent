@@ -11,6 +11,8 @@ from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, Field
 
+from graph.transcript import TranscriptEntry
+
 #: Динамика не нужна по этой реплике.
 DYN_NONE = "не требуется"
 #: Ответ уже в статике или накопленном — можно генерить.
@@ -80,6 +82,9 @@ class ConversationContext(BaseModel):
         conversation_ended: разговор закончен по решению фонового агента
             прощания; переставляется на каждом ходу с репликой человека.
         frozen: статика уже зафиксирована и не пересобирается.
+        transcript: полная история звонка. Пишет основной ход: свои реплики
+            в момент генерации, чужие — из снимка бота. Читают оба графа,
+            у фонового своего снимка нет.
     """
 
     static_text: str = ""
@@ -103,6 +108,7 @@ class ConversationContext(BaseModel):
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     conversation_ended: bool = False
     frozen: bool = False
+    transcript: list[TranscriptEntry] = Field(default_factory=list)
 
     def render(self) -> str:
         """Собирает документ для промпта: статика, ближайшие филиалы, динамика.
