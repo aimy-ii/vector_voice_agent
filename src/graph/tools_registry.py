@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from graph.context import ConversationContext, format_branch_static, merge_static
-from graph.nearby import apply_result, lookup_nearby, should_refresh
+from graph.nearby import apply_result, lookup_nearby, normalize_place, should_refresh
 from graph.resolvers import CityResolver, resolve_city
 from kb.client import vector_kb
 from script.build import CompiledScript
@@ -205,6 +205,42 @@ class CityTool:
         return f"Город: {resolution.name}."
 
 
+def _pick_by_query(
+    branches: Sequence[Mapping[str, Any]],
+    query: str,
+) -> list[Mapping[str, Any]]:
+    """Отбирает филиалы по названному месту, когда слаги не подошли.
+
+    Модель называет слаги филиалов по памяти и промахивается; адреса при этом
+    лежат в перечне города. Совпадением считаем вхождение запроса в название,
+    адрес или ориентир филиала. Не совпало ничего — отдаём первые три филиала
+    города: это факт из справочника, а разговор идёт о филиалах.
+
+    Args:
+        branches: перечень филиалов города из справочника.
+        query: место словами от агента; может быть пустым.
+
+    Returns:
+        До трёх филиалов; пустой список, если перечень пуст.
+    """
+    needle = normalize_place(query)
+    if needle:
+        hits: list[Mapping[str, Any]] = []
+        for branch in branches:
+            haystack = normalize_place(
+                " ".join(
+                    str(branch.get(key) or "") for key in ("name", "address", "landmark", "slug")
+                )
+            )
+            if needle in haystack:
+                hits.append(branch)
+            if len(hits) >= 3:
+                break
+        if hits:
+            return hits
+    return list(branches)[:3]
+
+
 class BranchesTool:
     """Подтверждение адресов филиалов, отобранных агентом по реплике."""
 
@@ -221,21 +257,21 @@ class BranchesTool:
         *,
         slugs: Sequence[str] = (),
     ) -> str:
-        """Собирает адреса филиалов строго по переданным слагам.
+        """Собирает адреса филиалов по слагам или по запросу.
 
         Успешный отбор сохраняет слаги в ``context.branch_candidates``.
+        Если слаги не совпали с перечнем — отбор по ``query`` / первые три.
 
         Args:
-            query: не используется; отбор уже сделан агентом.
+            query: место словами; запасной отбор, когда слаги не подошли.
             context: текущий контекст; нужен ``city_slug``.
             slugs: слаги филиалов в порядке агента, не больше трёх.
 
         Returns:
-            Строка «Филиалы под запрос: …» или пустая, если города/слагов нет.
+            Строка «Филиалы под запрос: …» или пустая, если города нет / адресов нет.
         """
-        _ = query
         city_slug = (context.city_slug or "").strip()
-        if not city_slug or not slugs:
+        if not city_slug:
             return ""
         branches = await vector_kb.list_branches(city_slug)
         if not branches:
@@ -249,6 +285,8 @@ class BranchesTool:
             picked.append(branch)
             if len(picked) >= 3:
                 break
+        if not picked:
+            picked = _pick_by_query(branches, query)
         if not picked:
             return ""
         context.branch_candidates = [

@@ -463,9 +463,14 @@ async def run_contexter(
                         str(s).strip() for s in decision.branch_slugs if str(s).strip()
                     ][:3]
                 if not branch_slugs:
-                    # Слагов нет — вызова инструмента не было.
-                    agent_tool_name = None
-                    tool = None
+                    # Слаги агента не совпали с перечнем города — инструмент
+                    # отберёт филиалы сам по запросу. Отменять вызов нельзя:
+                    # адреса есть в справочнике, промах модели их не отменяет.
+                    log.info(
+                        "Контекстер: слаги агента не из перечня города, отбор по запросу: %s",
+                        list(decision.branch_slugs),
+                    )
+                    slugs = []
                 else:
                     slugs = branch_slugs
             if tool is not None:

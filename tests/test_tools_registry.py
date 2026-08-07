@@ -98,11 +98,78 @@ async def test_branches_tool_чужие_слаги_игнорирует_лими
     assert "ул. В, 3" not in text  # четвёртый валидный не берём
 
 
-async def test_branches_tool_пустые_слаги_или_город(branches_kb: _FakeKB):
+async def test_branches_tool_пустые_слаги_с_городом_отбирает_сам(branches_kb: _FakeKB):
+    """Пустые слаги при городе — отбор по запросу / первые три, не отмена."""
     tool = BranchesTool()
-    assert await tool.run("x", ConversationContext(city_slug="perm"), slugs=()) == ""
+    text = await tool.run("x", ConversationContext(city_slug="perm"), slugs=())
+    assert "ул. А, 1" in text
+    assert "ул. Б, 2" in text
+    assert "ул. В, 3" in text
+    assert "ул. Г, 4" not in text
+    assert branches_kb.calls == ["list_branches:perm"]
+
+
+async def test_branches_tool_без_города(branches_kb: _FakeKB):
+    """Без города — пустая строка, в справочник не ходим."""
+    tool = BranchesTool()
     assert await tool.run("x", ConversationContext(), slugs=["a"]) == ""
     assert branches_kb.calls == []
+
+
+async def test_branches_tool_чужие_слаги_совпадение_по_запросу(monkeypatch):
+    """Слаги не из перечня, запрос совпал с адресом — адреса совпавших."""
+    kb = _FakeKB(
+        branches=[
+            {
+                "slug": "spb_prosveshcheniya",
+                "address": "Проспект Просвещения, 1",
+                "landmark": "метро",
+            },
+            {"slug": "spb_other", "address": "ул. Другая, 2", "landmark": ""},
+            {"slug": "spb_third", "address": "ул. Третья, 3", "landmark": ""},
+        ]
+    )
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = BranchesTool()
+    text = await tool.run(
+        "Проспект Просвещения",
+        ConversationContext(city_slug="spb"),
+        slugs=["prospekt-prosveshcheniya", "krestovskiy-ostrov"],
+    )
+    assert "Проспект Просвещения, 1" in text
+    assert "ул. Другая" not in text
+    assert "ул. Третья" not in text
+
+
+async def test_branches_tool_чужие_слаги_без_совпадения_первые_три(branches_kb: _FakeKB):
+    """Слаги не из перечня, запрос ни с чем не совпал — первые три города."""
+    tool = BranchesTool()
+    text = await tool.run(
+        "совсем неизвестное место",
+        ConversationContext(city_slug="perm"),
+        slugs=["чужой_а", "чужой_б"],
+    )
+    assert "ул. А, 1" in text
+    assert "ул. Б, 2" in text
+    assert "ул. В, 3" in text
+    assert "ул. Г, 4" not in text
+
+
+async def test_branches_tool_пустые_слаги_пустой_перечень(monkeypatch):
+    """Слаги пустые, перечень города пустой — пустая строка, как раньше."""
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB(branches=[]))
+    tool = BranchesTool()
+    assert await tool.run("x", ConversationContext(city_slug="perm"), slugs=()) == ""
+
+
+async def test_branches_tool_без_поля_адреса(monkeypatch):
+    """У филиалов нет поля адреса — пустая строка, как раньше."""
+    monkeypatch.setattr(
+        "graph.tools_registry.vector_kb",
+        _FakeKB(branches=[{"slug": "a", "landmark": "парк"}, {"slug": "b"}]),
+    )
+    tool = BranchesTool()
+    assert await tool.run("", ConversationContext(city_slug="perm"), slugs=["a", "b"]) == ""
 
 
 async def test_city_faq_игнорирует_slugs():

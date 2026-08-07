@@ -205,9 +205,20 @@ async def test_долгий_инструмент_дожидается_готов
     assert tool.slugs_seen == [["perm_mira"]]
 
 
-async def test_branches_без_валидных_слагов_не_требуется():
-    """Инструмент branches без валидных слагов → need=False, статус не требуется."""
-    tool = _FakeTool("branches", "не должен ответить")
+async def test_branches_чужие_слаги_инструмент_всё_равно_зовётся(monkeypatch, caplog):
+    """Слаги не из перечня — инструмент зовётся без слагов, в решении branches.
+
+    Перечень агенту не передаём (как в бою): фильтрация слагов — в контекстере
+    после подгрузки справочника.
+    """
+    from graph import contexter as contexter_module
+
+    class _KB:
+        async def list_branches(self, city_slug: str):
+            return [{"slug": "perm_lenina", "address": "ул. Ленина, 1"}]
+
+    monkeypatch.setattr(contexter_module, "vector_kb", _KB())
+    tool = _FakeTool("branches", "Филиалы под запрос: ул. Ленина, 1.")
     agent = _FakeAgent(
         ContextDecision(
             need=True,
@@ -217,15 +228,21 @@ async def test_branches_без_валидных_слагов_не_требует
             branch_slugs=["чужой_слаг"],
         )
     )
-    out = await run_contexter(
-        ConversationContext(city_slug="perm"),
-        reply="какие в центре?",
-        tools=[tool],
-        agent=agent,
-        branches=[{"slug": "perm_lenina", "address": "ул. Ленина, 1"}],
+    with caplog.at_level("INFO"):
+        out = await run_contexter(
+            ConversationContext(city_slug="perm"),
+            reply="какие в центре?",
+            tools=[tool],
+            agent=agent,
+        )
+    assert tool.calls == ["центр"]
+    assert tool.slugs_seen == [[]]
+    assert out.dynamic_status == DYN_READY
+    assert "ул. Ленина" in out.dynamic_text
+    assert any("слаги агента не из перечня города" in rec.message for rec in caplog.records)
+    assert any(
+        "инструмент branches" in rec.message and "филиалы" in rec.message for rec in caplog.records
     )
-    assert out.dynamic_status == DYN_NONE
-    assert tool.calls == []
 
 
 async def test_возражение_не_требуется_без_вызова_агента():
