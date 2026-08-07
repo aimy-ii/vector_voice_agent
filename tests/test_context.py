@@ -128,7 +128,9 @@ def test_context_state_nearby_поля_переживают_to_context() -> None
     state = ContextState(
         nearby_text="Ближайшие филиалы…",
         nearby_key="perm:солнечный",
+        nearby_found=True,
     )
     ctx = state.to_context()
     assert ctx.nearby_text == "Ближайшие филиалы…"
     assert ctx.nearby_key == "perm:солнечный"
+    assert ctx.nearby_found is True

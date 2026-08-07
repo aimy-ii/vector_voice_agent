@@ -33,7 +33,13 @@ from graph.contexter import reply_hash, run_contexter
 from graph.facts import knowledge_of, needs_of
 from graph.farewell_agent import decide_farewell
 from graph.log_fmt import format_check_done, format_live_check_state
-from graph.nearby import format_searching, is_searching, lookup_nearby, should_refresh
+from graph.nearby import (
+    apply_result,
+    format_searching,
+    is_searching,
+    lookup_nearby,
+    should_refresh,
+)
 from graph.nodes import (
     _call_id,
     _checker_client,
@@ -433,6 +439,8 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             current_key=ctx.nearby_key,
         )
         if nearby_key_new:
+            previous_nearby_text = ctx.nearby_text
+            previous_nearby_found = ctx.nearby_found
             ctx.nearby_key = nearby_key_new
             ctx.nearby_text = format_searching(nearby_place)
             # Отдельной записью до похода: ход идёт параллельно и должен
@@ -444,7 +452,11 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
                 place=nearby_place,
                 key=nearby_key_new,
             )
-            ctx.nearby_text = nearby_result.text
+            ctx.nearby_text, ctx.nearby_found = apply_result(
+                previous_text=previous_nearby_text,
+                previous_found=previous_nearby_found,
+                result=nearby_result,
+            )
             if nearby_result.branch_slugs:
                 ctx.branch_candidates = nearby_result.branch_slugs
 

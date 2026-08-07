@@ -48,6 +48,7 @@ CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(
         "empty_needs",
         "nearby_text",
         "nearby_key",
+        "nearby_found",
         "conversation_ended",
     }
 )

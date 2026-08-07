@@ -78,6 +78,9 @@ class ConversationContext(BaseModel):
             заменяться целиком, когда человек назвал другое место.
         nearby_key: ключ, по которому подбор уже сделан («город: место»).
             Совпал с текущим — пересчитывать нечего.
+        nearby_found: по этому звонку уже был удачный подбор филиалов.
+            Нужен, чтобы неудачная попытка по другой формулировке места не
+            затирала найденные адреса.
         city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
         conversation_ended: разговор закончен по решению фонового агента
             прощания; переставляется на каждом ходу с репликой человека.
@@ -105,6 +108,7 @@ class ConversationContext(BaseModel):
     branch_candidates: list[str] = Field(default_factory=list)
     nearby_text: str = ""
     nearby_key: str = ""
+    nearby_found: bool = False
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     conversation_ended: bool = False
     frozen: bool = False
@@ -436,6 +440,7 @@ class ContextState(BaseModel):
     branch_candidates: list[str] = Field(default_factory=list)
     nearby_text: str = ""
     nearby_key: str = ""
+    nearby_found: bool = False
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     conversation_ended: bool = False
     frozen: bool = False

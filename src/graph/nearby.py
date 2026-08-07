@@ -60,11 +60,31 @@ class NearbyResult(BaseModel):
     found: bool = False
 
 
+#: Ведущие слова, которые не меняют место: «у метро N» и «метро N» — одно и то же.
+_PLACE_PREFIXES: tuple[str, ...] = (
+    "рядом со",
+    "рядом с",
+    "недалеко от",
+    "неподалеку от",
+    "в районе",
+    "около",
+    "возле",
+    "рядом",
+    "близко к",
+    "у",
+    "на",
+    "от",
+)
+
+
 def normalize_place(text: str) -> str:
     """Нормализует произнесённое место.
 
     Регистр, лишние пробелы и «ё» на смысл не влияют: «Солнечный» и
-    « солнечный » — одно и то же место и один подбор.
+    « солнечный » — одно и то же место и один подбор. Ведущие предлоги тоже
+    не влияют: агент профиля пишет в форму «у метро Проспект Просвещения», а
+    модель в запросе — «метро Проспект Просвещения». Без снятия предлога это
+    два разных ключа, второй подбор идёт заново и затирает первый.
 
     Args:
         text: место так, как его назвал человек.
@@ -72,7 +92,21 @@ def normalize_place(text: str) -> str:
     Returns:
         Нормализованная строка; пустая, если текста нет.
     """
-    return " ".join((text or "").replace("ё", "е").replace("Ё", "Е").lower().split())
+    body = " ".join((text or "").replace("ё", "е").replace("Ё", "Е").lower().split())
+    changed = True
+    while changed and body:
+        changed = False
+        for prefix in _PLACE_PREFIXES:
+            head = f"{prefix} "
+            if body.startswith(head):
+                body = body[len(head) :].strip()
+                changed = True
+                break
+            if body == prefix:
+                body = ""
+                changed = True
+                break
+    return body
 
 
 def nearby_key(city_slug: str | None, place: str) -> str:
@@ -193,6 +227,35 @@ def format_missing(place: str) -> str:
         "Спросить ориентир иначе — улицей, станцией метро или известным зданием — и "
         "вести разговор дальше."
     )
+
+
+def apply_result(
+    *,
+    previous_text: str,
+    previous_found: bool,
+    result: NearbyResult,
+) -> tuple[str, bool]:
+    """Решает, что положить в блок ближайших филиалов после подбора.
+
+    Удачный подбор всегда вытесняет прежний блок. Неудачный — только если
+    удачного ещё не было: адреса, добытые по прошлому ориентиру, полезнее
+    строки о том, что место не опознано. На боевом звонке фон перезаписал
+    три найденных филиала неудачей по той же самой фразе с предлогом, и бот
+    не назвал ни одного адреса.
+
+    Args:
+        previous_text: блок ближайших филиалов до подбора.
+        previous_found: лежал ли в нём удачный подбор.
+        result: итог текущего подбора.
+
+    Returns:
+        Пара «текст блока, признак удачного подбора».
+    """
+    if result.found:
+        return result.text, True
+    if previous_found and previous_text.strip():
+        return previous_text, True
+    return result.text, False
 
 
 async def lookup_nearby(

@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 from graph.nearby import (
+    NearbyResult,
+    apply_result,
     format_found,
     format_missing,
     format_searching,
@@ -72,9 +74,70 @@ class FakeNearbyKB:
 def test_normalize_place_регистр_пробелы_и_ё() -> None:
     """Регистр, пробелы и «ё» на нормализацию не влияют."""
     assert normalize_place("  Солнечный  ") == "солнечный"
-    assert normalize_place("у  Гражданского   проспекта") == "у гражданского проспекта"
+    assert normalize_place("у  Гражданского   проспекта") == "гражданского проспекта"
     assert normalize_place("Зелёный") == "зеленый"
     assert normalize_place("Ёлки") == "елки"
+
+
+def test_normalize_place_ведущие_предлоги_один_ключ() -> None:
+    """Ведущие предлоги не меняют ключ: «у метро N» и «метро N» — одно место."""
+    assert nearby_key("spb", "у метро Проспект Просвещения") == nearby_key(
+        "spb", "метро Проспект Просвещения"
+    )
+    assert nearby_key("spb", "около Славы") == nearby_key("spb", "Славы")
+    assert nearby_key("spb", "рядом с Ушинского") == nearby_key("spb", "Ушинского")
+    assert nearby_key("spb", "в районе Солнечного") == nearby_key("spb", "Солнечного")
+
+
+def test_normalize_place_только_предлог_пустой_ключ() -> None:
+    """Место из одного предлога после нормализации пустое — ключа нет."""
+    assert normalize_place("у") == ""
+    assert nearby_key("spb", "у") == ""
+    assert nearby_key("spb", "около") == ""
+
+
+def test_normalize_place_на_не_съедает_весь_адрес() -> None:
+    """«на Чернышевского» и «Чернышевского» — один ключ; адрес не обнуляется."""
+    assert nearby_key("spb", "на Чернышевского") == nearby_key("spb", "Чернышевского")
+    assert nearby_key("spb", "Чернышевского") == "spb:чернышевского"
+    assert normalize_place("Чернышевского") == "чернышевского"
+
+
+def test_apply_result_удача_вытесняет_прежнее() -> None:
+    """Удачный подбор всегда кладёт свой текст и признак."""
+    result = NearbyResult(key="k", text="найдено", found=True)
+    text, found = apply_result(
+        previous_text="старое",
+        previous_found=False,
+        result=result,
+    )
+    assert text == "найдено"
+    assert found is True
+
+
+def test_apply_result_неудача_не_затирает_удачу() -> None:
+    """Неудачный подбор при уже найденных адресах оставляет прежний блок."""
+    result = NearbyResult(key="k", text=format_missing("X"), found=False)
+    text, found = apply_result(
+        previous_text="три филиала",
+        previous_found=True,
+        result=result,
+    )
+    assert text == "три филиала"
+    assert found is True
+
+
+def test_apply_result_неудача_без_прежней_удачи() -> None:
+    """Неудачный подбор без прежнего успеха кладёт текст неудачи."""
+    missing = format_missing("X")
+    result = NearbyResult(key="k", text=missing, found=False)
+    text, found = apply_result(
+        previous_text="",
+        previous_found=False,
+        result=result,
+    )
+    assert text == missing
+    assert found is False
 
 
 def test_nearby_key_разные_города_и_пустое_место() -> None:

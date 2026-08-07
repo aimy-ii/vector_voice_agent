@@ -13,7 +13,7 @@ import logging
 from typing import Any, Protocol, Sequence
 
 from graph.context import ConversationContext, format_branch_static, merge_static
-from graph.nearby import lookup_nearby, should_refresh
+from graph.nearby import apply_result, lookup_nearby, should_refresh
 from graph.resolvers import CityResolver, resolve_city
 from kb.client import vector_kb
 from script.build import CompiledScript
@@ -488,9 +488,15 @@ class NearestBranchesTool:
             if context.nearby_text.strip():
                 return "Подбор по этому месту уже сделан — смотри блок ближайших филиалов."
             return ""
+        previous_text = context.nearby_text
+        previous_found = context.nearby_found
         context.nearby_key = key
         result = await lookup_nearby(vector_kb, city_slug=city_slug, place=place, key=key)
-        context.nearby_text = result.text
+        context.nearby_text, context.nearby_found = apply_result(
+            previous_text=previous_text,
+            previous_found=previous_found,
+            result=result,
+        )
         if result.branch_slugs:
             context.branch_candidates = result.branch_slugs
         if not result.found:

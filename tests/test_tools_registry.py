@@ -517,6 +517,7 @@ async def test_nearest_branches_новое_место(monkeypatch) -> None:
     assert "ул. А, 1" in ctx.nearby_text
     assert "ул. Б, 2" in ctx.nearby_text
     assert ctx.nearby_key == "perm:солнечный"
+    assert ctx.nearby_found is True
     assert ctx.branch_candidates == ["perm_a", "perm_b"]
     assert len(kb.geocode_calls) == 1
 
@@ -532,13 +533,18 @@ async def test_nearest_branches_повтор_того_же_места(monkeypatc
     ctx = ConversationContext(city_slug="perm")
     first = await tool.run("Солнечный", ctx)
     assert first
-    snapshot = (ctx.nearby_text, ctx.nearby_key, list(ctx.branch_candidates))
+    snapshot = (ctx.nearby_text, ctx.nearby_key, ctx.nearby_found, list(ctx.branch_candidates))
     calls_after_first = len(kb.geocode_calls)
     second = await tool.run("Солнечный", ctx)
     assert second
     assert "уже сделан" in second
     assert len(kb.geocode_calls) == calls_after_first
-    assert (ctx.nearby_text, ctx.nearby_key, list(ctx.branch_candidates)) == snapshot
+    assert (
+        ctx.nearby_text,
+        ctx.nearby_key,
+        ctx.nearby_found,
+        list(ctx.branch_candidates),
+    ) == snapshot
 
 
 async def test_nearest_branches_без_города(monkeypatch) -> None:
@@ -551,6 +557,7 @@ async def test_nearest_branches_без_города(monkeypatch) -> None:
     assert text == ""
     assert ctx.nearby_text == ""
     assert ctx.nearby_key == ""
+    assert ctx.nearby_found is False
     assert kb.geocode_calls == []
 
 
@@ -563,6 +570,28 @@ async def test_nearest_branches_место_не_опознано(monkeypatch) ->
     text = await tool.run("Неизвестно", ctx)
     assert text == ""
     assert "не удалось" in ctx.nearby_text
+    assert ctx.nearby_found is False
     assert ctx.branch_candidates == ["keep_me"]
     assert len(kb.geocode_calls) == 1
     assert kb.nearest_calls == []
+
+
+async def test_nearest_branches_неудача_не_затирает_удачу(monkeypatch) -> None:
+    """Неудачный подбор по новому месту не затирает уже найденные адреса."""
+    items = [
+        {"slug": "perm_a", "address": "ул. А, 1", "landmark": "", "distance_km": 0.4},
+    ]
+    kb = _FakeNearbyKB(items=items)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = NearestBranchesTool()
+    ctx = ConversationContext(city_slug="perm")
+    first = await tool.run("Солнечный", ctx)
+    assert first
+    kept = ctx.nearby_text
+    kb.point = None
+    text = await tool.run("Неизвестно", ctx)
+    assert text == ""
+    assert ctx.nearby_text == kept
+    assert ctx.nearby_found is True
+    assert ctx.branch_candidates == ["perm_a"]
+    assert ctx.nearby_key == "perm:неизвестно"
