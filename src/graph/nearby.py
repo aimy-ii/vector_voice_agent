@@ -109,6 +109,58 @@ def normalize_place(text: str) -> str:
     return body
 
 
+#: Слова, которые сами по себе местом не являются: без названия искать нечего.
+_GENERIC_PLACE_WORDS: frozenset[str] = frozenset(
+    {
+        "метро",
+        "станция",
+        "станции",
+        "улица",
+        "улице",
+        "проспект",
+        "проспекте",
+        "район",
+        "районе",
+        "город",
+        "города",
+        "городе",
+        "центр",
+        "центре",
+        "север",
+        "юг",
+        "запад",
+        "восток",
+        "севере",
+        "юге",
+        "западе",
+        "востоке",
+        "дом",
+        "дома",
+        "рядом",
+        "около",
+        "возле",
+        "в",
+    }
+)
+
+
+def has_place_name(place: str) -> bool:
+    """Есть ли в месте хоть одно слово-название.
+
+    «Метро» и «север города» — не ориентир: геокодер по ним ничего не найдёт,
+    а поход стоит секунды на ходу. Названием считаем любое слово, которого нет
+    в списке общих; «проспект Просвещения» проходит за счёт второго слова.
+
+    Args:
+        place: место словами.
+
+    Returns:
+        True, если искать есть что.
+    """
+    words = normalize_place(place).split()
+    return any(word not in _GENERIC_PLACE_WORDS for word in words)
+
+
 def nearby_key(city_slug: str | None, place: str) -> str:
     """Ключ пересчёта: город плюс нормализованное место.
 
@@ -280,6 +332,10 @@ async def lookup_nearby(
     Returns:
         Итог подбора: блок для контекста, слаги филиалов и признак успеха.
     """
+    if not has_place_name(place):
+        log.info("Подбор филиалов: место %r без названия, в справочник не идём", place)
+        return NearbyResult(key=key, text=format_missing(place), found=False)
+
     try:
         point = await kb.geocode(place, city_slug=city_slug)
     except Exception as exc:  # noqa: BLE001

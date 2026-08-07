@@ -12,6 +12,7 @@ from graph.nearby import (
     format_found,
     format_missing,
     format_searching,
+    has_place_name,
     is_searching,
     lookup_nearby,
     nearby_key,
@@ -101,6 +102,35 @@ def test_normalize_place_на_не_съедает_весь_адрес() -> None:
     assert nearby_key("spb", "на Чернышевского") == nearby_key("spb", "Чернышевского")
     assert nearby_key("spb", "Чернышевского") == "spb:чернышевского"
     assert normalize_place("Чернышевского") == "чернышевского"
+
+
+def test_has_place_name_общие_слова_без_названия() -> None:
+    """Общие слова и пустая строка — не ориентир: искать нечего."""
+    assert has_place_name("Метро") is False
+    assert has_place_name("станция метро") is False
+    assert has_place_name("север города") is False
+    assert has_place_name("в центре города") is False
+    assert has_place_name("") is False
+
+
+def test_has_place_name_есть_название() -> None:
+    """Хоть одно слово-название — ориентир пригоден для поиска."""
+    assert has_place_name("метро Проспект Просвещения") is True
+    assert has_place_name("Проспект Просвещения") is True
+    assert has_place_name("Коломяжский проспект 15") is True
+    assert has_place_name("север города, проспект Просвещения") is True
+
+
+async def test_lookup_nearby_без_названия_не_ходит_в_геокодер() -> None:
+    """Место без названия: found=False, геокодер не вызывается."""
+    kb = FakeNearbyKB(point=(58.0, 56.0), items=[{"slug": "x"}])
+    result = await lookup_nearby(kb, city_slug="perm", place="Метро", key="perm:метро")
+
+    assert kb.geocode_calls == []
+    assert kb.nearest_calls == []
+    assert result.found is False
+    assert result.text == format_missing("Метро")
+    assert result.key == "perm:метро"
 
 
 def test_apply_result_удача_вытесняет_прежнее() -> None:
