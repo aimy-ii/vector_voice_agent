@@ -58,7 +58,7 @@ from graph.prompts import (
     build_turn_messages,
     build_waiting_messages,
 )
-from graph.reconcile import delivery_patch
+from graph.reconcile import count_agent_messages, delivery_patch
 from graph.resolvers import (
     BranchResolver,
     CityResolver,
@@ -66,7 +66,7 @@ from graph.resolvers import (
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
-from graph.transcript import append_agent, count_spoken_agent, merge_snapshot, to_messages
+from graph.transcript import append_agent, append_client, to_messages
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -421,19 +421,22 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch["script_id"] = script.id
     patch["script_version"] = script.version
 
+    # Снимок бота историей не является: в нём только озвученное. Он нужен
+    # ниже проверке доставки, а история копится своя.
     snapshot = strip_system(state.get("messages") or [])
-    # История живёт в кеше: снимок бота отстаёт на неозвученные реплики.
+    turn_now = int(state.get("turn") or 0) + 1
     ctx_in = await _load_context(state)
-    entries = merge_snapshot(ctx_in.transcript, snapshot, turn=int(state.get("turn") or 0))
+    entries = list(ctx_in.transcript)
+    if not _no_client_reply(_turn_kind()):
+        entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
     if entries != ctx_in.transcript:
         await _save_context(
             ctx_in.model_copy(update={"transcript": entries}),
             fields=CONTEXT_FIELDS_TURN,
         )
     messages = to_messages(entries)
-    spoken_agent_now = count_spoken_agent(entries)
     patch["messages"] = messages
-    patch["turn"] = int(state.get("turn") or 0) + 1
+    patch["turn"] = turn_now
     patch["facts"] = {}
     patch["spoken"] = []
     patch["turn_result"] = {}
@@ -457,9 +460,8 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     delivery = delivery_patch(
         state=state,
-        messages=messages,
-        last_spoken=last_agent_text(messages),
-        ai_count_now=spoken_agent_now,
+        messages=snapshot,
+        last_spoken=last_agent_text(snapshot),
     )
     patch.update(delivery)
     stage("ingest", f"ход {patch['turn']}, скрипт {script.id} v{script.version}", "start")
@@ -970,7 +972,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "pending_len": len(spoken_text)
             if not no_client_reply
             else int(state.get("pending_len") or 0),
-            "pending_ai_count": count_spoken_agent((await _load_context(state)).transcript),
+            "pending_ai_count": count_agent_messages(state.get("messages") or []),
             "city_slug": state.get("city_slug"),
             "city_name": state.get("city_name"),
             "branch_slug": state.get("branch_slug"),

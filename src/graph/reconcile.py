@@ -72,7 +72,6 @@ def delivery_patch(
     state: Mapping[str, Any],
     messages: Sequence[BaseMessage],
     last_spoken: str,
-    ai_count_now: int | None = None,
 ) -> dict[str, Any]:
     """Считает, дослушали ли прошлую реплику, и чистит pending-поля.
 
@@ -82,9 +81,6 @@ def delivery_patch(
         state: состояние звонка на входе хода.
         messages: история после чистки.
         last_spoken: последняя реплика бота.
-        ai_count_now: сколько реплик бота уже прозвучало. Передаётся явно,
-            потому что в истории лежат и те, что сгенерированы, но ещё не
-            озвучены; без аргумента считается по истории, как раньше.
 
     Returns:
         Правки: ``pending_*`` и ``last_delivered``.
@@ -97,7 +93,7 @@ def delivery_patch(
         planned_len=int(state.get("pending_len") or 0),
         spoken_len=len(last_spoken),
         ai_count_before=int(state.get("pending_ai_count") or 0),
-        ai_count_now=(count_agent_messages(messages) if ai_count_now is None else ai_count_now),
+        ai_count_now=count_agent_messages(messages),
     )
     return {
         "pending_step": None,

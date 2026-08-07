@@ -109,36 +109,8 @@ def test_сверка_на_истории_из_словарей():
     assert count_agent_messages(messages) == 1
 
 
-def test_доставка_с_явным_ai_count_now():
-    """Явный ai_count_now управляет доставкой, а не длина messages."""
-    text = "Расскажу, как проходит обучение у нас в академии подробно"
-    state = {
-        "pending_step": "practice",
-        "pending_len": len(text),
-        "pending_ai_count": 0,
-    }
-    # В messages одна AI-реплика, но явный счётчик говорит, что новой нет.
-    patch = delivery_patch(
-        state=state,
-        messages=[AIMessage(content=text)],
-        last_spoken=text,
-        ai_count_now=0,
-    )
-    assert patch["last_delivered"] is False
-    assert patch["undelivered_step"] == "practice"
-
-    patch_ok = delivery_patch(
-        state=state,
-        messages=[],
-        last_spoken=text,
-        ai_count_now=1,
-    )
-    assert patch_ok["last_delivered"] is True
-    assert patch_ok["delivered_step"] == "practice"
-
-
-def test_доставка_без_ai_count_now_как_раньше():
-    """Без аргумента счётчик берётся из messages, как до явного параметра."""
+def test_доставка_по_истории_сообщений():
+    """Счётчик реплик бота берётся из messages."""
     text = "Расскажу, как проходит обучение у нас в академии подробно"
     state = {
         "pending_step": "practice",
@@ -152,3 +124,11 @@ def test_доставка_без_ai_count_now_как_раньше():
     )
     assert patch["last_delivered"] is True
     assert patch["delivered_step"] == "practice"
+
+    patch_miss = delivery_patch(
+        state=state,
+        messages=[],
+        last_spoken=text,
+    )
+    assert patch_miss["last_delivered"] is False
+    assert patch_miss["undelivered_step"] == "practice"
