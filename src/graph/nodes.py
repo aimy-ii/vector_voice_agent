@@ -306,6 +306,47 @@ def _head_steps(state: CallState) -> list[AnyStep]:
     return [step] if step is not None else []
 
 
+def _lead_of(head: Sequence[AnyStep], chosen: AnyStep | None) -> AnyStep | None:
+    """Ведущий шаг хода: выбранный планом, если он есть в шапке.
+
+    План может сдвинуть ведущего на следующий открытый шаг, чтобы не вести
+    одну тему два хода подряд. Это решение и есть ведущий шаг. Шаг вне шапки
+    (устаревшее состояние) не берём — иначе генератор поведёт тему, которой
+    в плане хода нет.
+
+    Args:
+        head: шапка шагов этого хода.
+        chosen: шаг, выбранный планом; может быть None.
+
+    Returns:
+        Выбранный шаг, если он в шапке; иначе первый шаг шапки или None.
+    """
+    if chosen is not None and any(step.id == chosen.id for step in head):
+        return chosen
+    return head[0] if head else None
+
+
+def _lead_first(head: Sequence[AnyStep], lead: AnyStep | None) -> list[AnyStep]:
+    """Ставит ведущий шаг первым в перечне для промпта, не меняя шапку.
+
+    Первый шаг перечня становится разделом «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ»,
+    остальные — «ЕЩЁ НЕ ЗАКРЫТО». Прежний ведущий не пропадает: он съезжает
+    в незакрытые. Шапка в состоянии не меняется — по ней шаги берутся в
+    работу, и её порядок всё равно пересчитывается каждый ход.
+
+    Args:
+        head: шапка шагов этого хода.
+        lead: ведущий шаг или None.
+
+    Returns:
+        Шаги с ведущим впереди; исходный порядок, если ведущего нет в шапке.
+    """
+    steps = list(head)
+    if lead is None or all(step.id != lead.id for step in steps):
+        return steps
+    return [lead, *[step for step in steps if step.id != lead.id]]
+
+
 async def _load_progress(state: CallState) -> ScriptProgress:
     """Читает прогресс из Redis; при промахе — из состояния треда."""
     stored = await script_store.load(_call_id())
@@ -645,7 +686,7 @@ def _build_respond_messages(
         turn_mode = "repeat"
     return build_turn_messages(
         script=script,
-        steps=list(head),
+        steps=_lead_first(head, lead),
         profile=profile,
         facts=facts,
         history=history,
@@ -700,7 +741,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     is_silence = turn_kind == "silence"
 
     digest = reply_hash(user_text) if user_text else ""
-    lead = head[0] if head else None
+    lead = _lead_of(head, _current_step(state))
     lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
     use_ladder = bool(lead_missing) and not is_continuation and not is_silence
 

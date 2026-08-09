@@ -280,3 +280,98 @@ def test_silence_выше_порога_даёт_repeat(script, monkeypatch):
     assert captured["mode"] == "repeat"
     assert LEAD_REPEAT_INTRO in messages[0].content
     assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in messages[0].content
+
+
+def _respond_messages(script, *, lead, head):
+    """Собирает сообщения генератора для проверки порядка разделов."""
+    return nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state=new_state_defaults(),
+        history=[],
+        profile={},
+        facts={},
+        lead=lead,
+        head=head,
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="client",
+    )
+
+
+def test_ведущий_из_плана_идёт_первым_разделом(script):
+    """Ведущий из плана — первый раздел промпта, прежний шаг — во втором."""
+    step_a = script.step("name")
+    step_b = script.step("city")
+    messages = _respond_messages(script, lead=step_b, head=[step_a, step_b])
+    content = messages[0].content
+    now_at = content.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    hang_at = content.index("# ЕЩЁ НЕ ЗАКРЫТО")
+    lead_title_at = content.index(f"## {step_b.goal}", now_at)
+    hang_title_at = content.index(f"## {step_a.goal}", hang_at)
+    assert now_at < lead_title_at < hang_at < hang_title_at
+
+
+def test_прежний_ведущий_не_пропадает(script):
+    """При сдвиге ведущего прежний шаг остаётся в тексте промпта."""
+    step_a = script.step("name")
+    step_b = script.step("city")
+    messages = _respond_messages(script, lead=step_b, head=[step_a, step_b])
+    assert step_a.goal in messages[0].content
+
+
+def test_lead_of_берёт_шаг_плана(script):
+    """``_lead_of`` возвращает шаг плана, если он лежит в шапке."""
+    step_a = script.step("name")
+    step_b = script.step("city")
+    assert nodes_module._lead_of([step_a, step_b], step_b) is step_b
+
+
+def test_lead_of_откатывается_на_первый_если_шага_нет(script):
+    """Нет выбранного или он вне шапки — берётся первый шаг шапки."""
+    step_a = script.step("name")
+    step_b = script.step("city")
+    step_c = script.step("who_studies")
+    assert nodes_module._lead_of([step_a, step_b], None) is step_a
+    assert nodes_module._lead_of([step_a, step_b], step_c) is step_a
+
+
+def test_lead_of_на_пустой_шапке(script):
+    """Пустая шапка — ``_lead_of`` всегда None."""
+    step_a = script.step("name")
+    assert nodes_module._lead_of([], None) is None
+    assert nodes_module._lead_of([], step_a) is None
+
+
+def test_lead_first_один_шаг_в_шапке(script):
+    """Один шаг в шапке — перечень из него, раздела незакрытых нет."""
+    step_a = script.step("name")
+    assert nodes_module._lead_first([step_a], step_a) == [step_a]
+    content = _respond_messages(script, lead=step_a, head=[step_a])[0].content
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" not in content
+
+
+def test_lead_first_пустая_шапка(script):
+    """Пустая шапка — пустой перечень и текст про закрытые шаги."""
+    assert nodes_module._lead_first([], None) == []
+    content = _respond_messages(script, lead=None, head=[])[0].content
+    assert "Все шаги скрипта закрыты" in content
+
+
+def test_lead_first_шаг_вне_шапки_не_добавляется(script):
+    """Ведущий вне шапки не попадает в перечень — порядок шапки как есть."""
+    step_a = script.step("name")
+    step_b = script.step("city")
+    step_c = script.step("who_studies")
+    assert nodes_module._lead_first([step_a, step_b], step_c) == [step_a, step_b]
+
+
+async def test_шапка_в_состоянии_не_переставляется(store, use_v2, plan_logs, monkeypatch):
+    """Сдвиг меняет ``current_step``, порядок ``head_steps`` не трогает."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+    state = _base_state(current_step="name")
+    out = await nodes_module.plan_node(state, None)  # type: ignore[arg-type]
+    assert out["head_steps"][:2] == ["name", "city"]
+    assert out["current_step"] == "city"
