@@ -2317,3 +2317,48 @@ def test_steps_block_normal_без_врезок(script_v4):
     assert LEAD_REPEAT_INTRO not in text
     assert "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in text
     assert "Требования" in text
+
+
+def test_правило_про_знак_вопроса_есть_в_правилах_речи():
+    """В штатном блоке правил речи есть правило про знак вопроса."""
+    block = speech_rules_block()
+    assert "ждёт ответа прямо сейчас" in block
+    assert "заканчивается вопросом со знаком вопроса" in block
+
+
+def test_правило_про_знак_вопроса_есть_в_режимах_повтора_и_вытаскивания():
+    """Правило про знак вопроса не теряется при подмене правил в repeat/pull."""
+    for mode in ("repeat", "pull"):
+        block = speech_rules_block(mode=mode)
+        assert "ждёт ответа прямо сейчас" in block
+        assert "заканчивается вопросом со знаком вопроса" in block
+
+
+def test_правило_называет_обратный_случай():
+    """Правило явно запрещает знак вопроса там, где отвечать нечего."""
+    block = speech_rules_block()
+    assert "знаком вопроса не заканчиваются" in block
+    assert "повиснет в тишине" in block
+
+
+def test_правило_называет_просьбу_на_потом():
+    """Просьба о будущем действии ответа сейчас не требует — знак вопроса вреден."""
+    assert "просьба написать или дать знать потом" in speech_rules_block()
+
+
+def test_естественность_требует_знак_вопроса_когда_ответ_нужен():
+    """В блоке «Естественность» при обычном ask_for_move — требование знака вопроса."""
+    block = naturalness_block(ask_for_move=True, pending_only=False)
+    assert "Ответ нужен сейчас — это вопрос со знаком вопроса" in block
+
+
+def test_естественность_pending_only_не_изменилась():
+    """Ветка pending_only не получила новую формулировку про знак вопроса."""
+    block = naturalness_block(ask_for_move=True, pending_only=True)
+    assert "по уже висящему вопросу" in block
+    assert "Ответ нужен сейчас" not in block
+
+
+def test_число_правил_речи_выросло_на_одно():
+    """После добавления правила про знак вопроса правил стало на одно больше."""
+    assert len(SPEECH_RULES) == 27 + 1
