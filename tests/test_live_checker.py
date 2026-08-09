@@ -188,11 +188,6 @@ async def test_partial_не_попадает_в_срез_истории(script):
 
 async def test_срез_не_отрезает_чужой_human_при_partial(script):
     """Partial ещё не в messages — прошлый ответ клиента остаётся в срезе."""
-    progress = ScriptProgress(
-        status={"city": "pending"},
-        attempts={"city": 1},
-        taken_turn={"city": 1},
-    )
     messages = [
         AIMessage(content="имя?"),
         HumanMessage(content="Андрей"),
@@ -200,9 +195,6 @@ async def test_срез_не_отрезает_чужой_human_при_partial(sc
     ]
     sliced = history_slice_for(
         messages,
-        steps=[script.step("city")],
-        progress=progress,
-        turn=3,
         reply="я из Пер",
     )
     assert any(m.content == "Андрей" for m in sliced)
@@ -1067,7 +1059,7 @@ async def test_live_профиль_попадает_в_кеш_чекера(scrip
     mem = MemoryScriptStore()
     await mem.save("local", progress)
 
-    async def fake_guess(reply, *, known, fields, history=(), agent=None):
+    async def fake_guess(reply, *, known, fields, history=(), agent=None, rewritable=frozenset()):
         return ProfileGuess(values=[ProfileValue(key="caller_name", value="Андрей")])
 
     async def fake_warmup(*args, **kwargs):
@@ -1092,6 +1084,192 @@ async def test_live_профиль_попадает_в_кеш_чекера(scrip
     stored = await mem.load("local")
     assert stored is not None
     assert stored.profile.get("caller_name") == "Андрей"
+
+
+async def test_live_location_hint_запускает_подбор_ближайших(script, monkeypatch, _offline_context):
+    """Профиль с location_hint и город в контексте — nearby_* и кандидаты в кеше."""
+    from graph.profile_agent import ProfileGuess, ProfileValue
+    from script.store import MemoryScriptStore
+    from tests.test_nearby import FakeNearbyKB
+
+    text = "Мне удобнее в Солнечном районе"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    mem = MemoryScriptStore()
+    await mem.save("local", progress)
+
+    items = [
+        {
+            "slug": "perm_a",
+            "address": "ул. Чернышевского, 4",
+            "landmark": "",
+            "distance_km": 0.4,
+        },
+        {
+            "slug": "perm_b",
+            "address": "пр. Ленина, 10",
+            "landmark": "",
+            "distance_km": 1.2,
+        },
+    ]
+    fake_kb = FakeNearbyKB(point=(58.0, 56.0), items=items)
+
+    async def fake_guess(reply, *, known, fields, history=(), agent=None, rewritable=frozenset()):
+        return ProfileGuess(values=[ProfileValue(key="location_hint", value="Солнечный")])
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(city_slug="perm", city_name="Пермь", static_text="Город: Пермь"),
+    )
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.nodes.script_store", mem)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert "ул. Чернышевского, 4" in loaded.nearby_text
+    assert loaded.nearby_key == "perm:солнечный"
+    assert loaded.nearby_found is True
+    assert loaded.branch_candidates == ["perm_a", "perm_b"]
+    assert len(fake_kb.geocode_calls) == 1
+
+
+async def test_live_location_hint_повтор_ключа_не_ходит_в_справочник(
+    script, monkeypatch, _offline_context
+):
+    """При уже совпадающем nearby_key повторный проход в справочник не ходит."""
+    from graph.profile_agent import ProfileGuess, ProfileValue
+    from script.store import MemoryScriptStore
+    from tests.test_nearby import FakeNearbyKB
+
+    text = "Мне удобнее в Солнечном районе"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    mem = MemoryScriptStore()
+    await mem.save("local", progress)
+
+    fake_kb = FakeNearbyKB(
+        items=[{"slug": "x", "address": "ул. X", "landmark": "", "distance_km": 1}]
+    )
+
+    async def fake_guess(reply, *, known, fields, history=(), agent=None, rewritable=frozenset()):
+        return ProfileGuess(values=[ProfileValue(key="location_hint", value="Солнечный")])
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            city_slug="perm",
+            city_name="Пермь",
+            static_text="Город: Пермь",
+            nearby_text="уже подобрано",
+            nearby_key="perm:солнечный",
+            nearby_found=True,
+        ),
+    )
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.nodes.script_store", mem)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert fake_kb.geocode_calls == []
+    assert fake_kb.nearest_calls == []
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.nearby_text == "уже подобрано"
+    assert loaded.nearby_key == "perm:солнечный"
+    assert loaded.nearby_found is True
+
+
+async def test_live_location_hint_неудача_не_затирает_удачный_подбор(
+    script, monkeypatch, _offline_context
+):
+    """После удачного подбора повторный неудачный не меняет блок ближайших."""
+    from graph.profile_agent import ProfileGuess, ProfileValue
+    from script.store import MemoryScriptStore
+    from tests.test_nearby import FakeNearbyKB
+
+    text = "Мне удобнее у метро Проспект Просвещения"
+    progress = _name_progress()
+    state = _state(script, partial=text, progress=progress, last_checked="")
+
+    mem = MemoryScriptStore()
+    await mem.save("local", progress)
+
+    fake_kb = FakeNearbyKB(point=None, items=[])
+
+    async def fake_guess(reply, *, known, fields, history=(), agent=None, rewritable=frozenset()):
+        return ProfileGuess(values=[ProfileValue(key="location_hint", value="другой ориентир")])
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    kept = "Ближайшие филиалы к месту «метро Проспект Просвещения» — три адреса"
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            city_slug="perm",
+            city_name="Пермь",
+            static_text="Город: Пермь",
+            nearby_text=kept,
+            nearby_key="perm:метро проспект просвещения",
+            nearby_found=True,
+            branch_candidates=["perm_a", "perm_b"],
+        ),
+    )
+    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+    monkeypatch.setattr("graph.checker_graph.vector_kb", fake_kb)
+    monkeypatch.setattr("graph.nodes.script_store", mem)
+
+    with (
+        patch("graph.checker_graph._checker_client", FakeChecker([None])),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert len(fake_kb.geocode_calls) == 1
+    loaded = await _offline_context.load("local")
+    assert loaded is not None
+    assert loaded.nearby_text == kept
+    assert loaded.nearby_found is True
+    assert loaded.branch_candidates == ["perm_a", "perm_b"]
+    assert loaded.nearby_key == "perm:другой ориентир"
 
 
 def _branch_pending_progress() -> ScriptProgress:

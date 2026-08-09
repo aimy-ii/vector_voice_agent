@@ -16,12 +16,12 @@ from script.planner import script_head
 from script.source import JsonScriptSource
 
 
-def test_v4_собирается_26_шагов_по_шесть_полей(script_v4):
+def test_v4_собирается_27_шагов_по_шесть_полей(script_v4):
     """Скрипт v4 собирается; у каждого шага ровно шесть полей."""
     assert script_v4.is_sales
     assert script_v4.version == "4"
-    assert len(script_v4.steps) == 26
-    assert len(script_v4.step_order) == 26
+    assert len(script_v4.steps) == 27
+    assert len(script_v4.step_order) == 27
     empty_knowledge = 0
     for step in script_v4.steps.values():
         dumped = step.model_dump()
@@ -36,9 +36,34 @@ def test_v4_собирается_26_шагов_по_шесть_полей(script
         assert isinstance(dumped["knowledge"], list)
         if not dumped["knowledge"]:
             empty_knowledge += 1
-    assert empty_knowledge == 10
+    assert empty_knowledge == 11
     experience = script_v4.step("experience")
     assert "подбадривать" in experience.requirements
+
+
+def test_v4_location_hint_между_who_studies_и_experience(script_v4):
+    """Шаг location_hint: order 45, позиция в step_order, пустой knowledge."""
+    step = script_v4.step("location_hint")
+    assert step.order == 45
+    assert step.knowledge == []
+    order = script_v4.step_order
+    assert order.index("location_hint") == order.index("who_studies") + 1
+    assert order.index("experience") == order.index("location_hint") + 1
+
+
+def test_v4_branch_не_спрашивает_район_заново(script_v4):
+    """В требованиях шага branch есть запрет спрашивать район заново."""
+    req = script_v4.step("branch").requirements
+    assert "заново не спрашивать" in req
+    assert "нет в переданных ближайших" in req
+
+
+def test_v4_branch_examples_не_спрашивают_район(script_v4):
+    """Образцы branch не пересекаются с location_hint и не содержат «район»."""
+    branch = set(script_v4.step("branch").examples)
+    location = set(script_v4.step("location_hint").examples)
+    assert branch.isdisjoint(location)
+    assert all("район" not in example.lower() for example in branch)
 
 
 def test_v4_порядок_по_order(script_v4):
@@ -134,12 +159,12 @@ def test_шапка_v4_по_order_и_потолок(script_v4):
 
     attempts = {"greeting": 1, "city": 1, "who_studies": 1}
     head = script_head(script_v4, status={}, attempts=attempts, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["greeting", "city", "who_studies", "experience"]
+    assert [s.id for s in head] == ["greeting", "city", "who_studies", "location_hint"]
 
-    attempts = {"greeting": 1, "city": 1, "who_studies": 1, "experience": 1}
+    attempts = {"greeting": 1, "city": 1, "who_studies": 1, "location_hint": 1}
     head = script_head(script_v4, status={}, attempts=attempts, profile={}, pending_soft_cap=4)
-    assert [s.id for s in head] == ["greeting", "city", "who_studies", "experience"]
-    assert "transmission" not in {s.id for s in head}
+    assert [s.id for s in head] == ["greeting", "city", "who_studies", "location_hint"]
+    assert "experience" not in {s.id for s in head}
 
     status = {"greeting": "closed", "city": "closed"}
     head = script_head(script_v4, status=status, attempts={}, profile={}, pending_soft_cap=4)
@@ -260,7 +285,7 @@ def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, da
 
 
 def test_реестр_инструментов_всегда_branches_faq_details(script_v4, script):
-    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, факты."""
+    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, ближайшие, факты."""
     for compiled in (script_v4, script):
         tools = build_context_tools(compiled)
         assert [t.name for t in tools] == [
@@ -268,6 +293,7 @@ def test_реестр_инструментов_всегда_branches_faq_details
             "branches",
             "city_faq",
             "branch_details",
+            "nearest_branches",
             "facts",
         ]
 
@@ -308,7 +334,7 @@ def test_messenger_подтверждает_номер_а_не_спрашива�
     ):
         assert blind not in examples
     assert any("с которого" in ex.lower() and "звон" in ex.lower() for ex in step.examples)
-    assert len(script_v4.steps) == 26
+    assert len(script_v4.steps) == 27
 
 
 def test_скрипт_без_сводки_читается_с_пустым_полем():
@@ -331,3 +357,57 @@ def test_скрипт_без_сводки_читается_с_пустым_по�
     assert raw.summary == ""
     compiled = build_script(raw)
     assert compiled.summary == ""
+
+
+@pytest.mark.parametrize("step_id", ["branch", "discount_check", "tariff", "price_lock"])
+def test_v4_шаги_с_реакцией_имеют_строку_закрытия(script_v4, step_id):
+    """Строка «Шаг закрыт, когда…» стоит до строки «Зачем:»."""
+    lines = script_v4.step(step_id).requirements.split("\n")
+    closed_at = next(i for i, line in enumerate(lines) if line.startswith("Шаг закрыт, когда"))
+    why_at = next(i for i, line in enumerate(lines) if line.startswith("Зачем:"))
+    assert closed_at < why_at
+
+
+def test_v4_закрытие_branch_требует_согласия(script_v4):
+    """Закрытие branch: согласие на офис; названный без подтверждения не закрывает."""
+    req = script_v4.step("branch").requirements
+    assert "согласился на конкретный офис" in req
+    assert "Названный, но не подтверждённый филиал шаг не закрывает" in req
+
+
+def test_v4_закрытие_discount_check_имеет_выход_без_льгот(script_v4):
+    """Закрытие discount_check: ответ по категории или сразу, если льгот нет."""
+    req = script_v4.step("discount_check").requirements
+    assert "ответил, попадает он под категорию" in req
+    assert "Льготных категорий в данных города нет" in req
+
+
+def test_v4_закрытие_tariff_покрывает_единственный_тариф(script_v4):
+    """Закрытие tariff: выбор тарифа или сообщение, что вариант один."""
+    req = script_v4.step("tariff").requirements
+    assert "выбрал тариф" in req
+    assert "если тариф один" in req
+
+
+def test_v4_закрытие_price_lock_требует_согласия(script_v4):
+    """Закрытие price_lock: согласие закрепить условия."""
+    req = script_v4.step("price_lock").requirements
+    assert "согласился закрепить условия" in req
+
+
+@pytest.mark.parametrize("step_id", ["branch", "price_lock"])
+def test_v4_короткое_согласие_засчитывается(script_v4, step_id):
+    """Короткое согласие по смыслу засчитывается; молчание — нет."""
+    req = script_v4.step(step_id).requirements
+    assert "важен смысл ответа, а не его длина" in req
+    assert "молчание и уход от ответа согласием не считаются" in req
+
+
+def test_v4_требования_остальных_шагов_не_изменились(script_v4):
+    """Строка закрытия только у четырёх новых шагов плюс greeting и messenger."""
+    allowed = {"branch", "discount_check", "tariff", "price_lock", "greeting", "messenger"}
+    for step_id, step in script_v4.steps.items():
+        if step_id in allowed:
+            continue
+        lines = step.requirements.split("\n")
+        assert not any(line.startswith("Шаг закрыт, когда") for line in lines), step_id

@@ -11,6 +11,8 @@ from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, Field
 
+from graph.transcript import TranscriptEntry
+
 #: Динамика не нужна по этой реплике.
 DYN_NONE = "не требуется"
 #: Ответ уже в статике или накопленном — можно генерить.
@@ -69,10 +71,23 @@ class ConversationContext(BaseModel):
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
         branch_candidates: слаги филиалов, отобранные инструментом ``branches``.
+        nearby_text: блок ближайших филиалов по названному человеком месту:
+            либо строка о том, что подбор идёт, либо перечень адресов, либо
+            строка о том, что место не опознано. Хранится отдельно от
+            ``dynamic_text``: динамика копится за звонок, а этот блок должен
+            заменяться целиком, когда человек назвал другое место.
+        nearby_key: ключ, по которому подбор уже сделан («город: место»).
+            Совпал с текущим — пересчитывать нечего.
+        nearby_found: по этому звонку уже был удачный подбор филиалов.
+            Нужен, чтобы неудачная попытка по другой формулировке места не
+            затирала найденные адреса.
         city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
         conversation_ended: разговор закончен по решению фонового агента
             прощания; переставляется на каждом ходу с репликой человека.
         frozen: статика уже зафиксирована и не пересобирается.
+        transcript: полная история звонка. Пишет основной ход: свои реплики
+            в момент генерации, чужие — из снимка бота. Читают оба графа,
+            у фонового своего снимка нет.
     """
 
     static_text: str = ""
@@ -91,12 +106,19 @@ class ConversationContext(BaseModel):
     city_name: str | None = None
     branch_slug: str | None = None
     branch_candidates: list[str] = Field(default_factory=list)
+    nearby_text: str = ""
+    nearby_key: str = ""
+    nearby_found: bool = False
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     conversation_ended: bool = False
     frozen: bool = False
+    transcript: list[TranscriptEntry] = Field(default_factory=list)
 
     def render(self) -> str:
-        """Собирает документ для промпта: статика, затем динамика.
+        """Собирает документ для промпта: статика, ближайшие филиалы, динамика.
+
+        Ближайшие идут отдельным блоком между статикой и динамикой: они
+        заменяются целиком при смене места, а динамика только копится.
 
         Returns:
             Текст контекста; пустая строка, если ещё нечего класть.
@@ -104,6 +126,8 @@ class ConversationContext(BaseModel):
         parts: list[str] = []
         if self.static_text.strip():
             parts.append(self.static_text.strip())
+        if self.nearby_text.strip():
+            parts.append(self.nearby_text.strip())
         if self.dynamic_text.strip():
             parts.append(self.dynamic_text.strip())
         return "\n\n".join(parts)
@@ -414,6 +438,9 @@ class ContextState(BaseModel):
     city_name: str | None = None
     branch_slug: str | None = None
     branch_candidates: list[str] = Field(default_factory=list)
+    nearby_text: str = ""
+    nearby_key: str = ""
+    nearby_found: bool = False
     city_faq: list[dict[str, str]] = Field(default_factory=list)
     conversation_ended: bool = False
     frozen: bool = False

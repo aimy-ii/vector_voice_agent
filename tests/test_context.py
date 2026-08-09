@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from graph.context import ConversationContext, missing_needs
+from graph.context import ContextState, ConversationContext, missing_needs
 
 
 def test_missing_needs_без_города_не_возвращает_городские():
@@ -102,3 +102,35 @@ def test_missing_needs_не_возвращает_empty_needs():
     record_empty_needs(ctx, ["price"], found=True)
     assert ctx.empty_needs == []
     assert missing_needs(ctx, ["price"]) == ["price"]
+
+
+def test_render_ближайшие_между_статикой_и_динамикой() -> None:
+    """Блок ближайших стоит между статикой и динамикой."""
+    ctx = ConversationContext(
+        static_text="СТАТИКА",
+        nearby_text="БЛИЖАЙШИЕ",
+        dynamic_text="ДИНАМИКА",
+    )
+    rendered = ctx.render()
+    assert rendered.index("СТАТИКА") < rendered.index("БЛИЖАЙШИЕ")
+    assert rendered.index("БЛИЖАЙШИЕ") < rendered.index("ДИНАМИКА")
+
+
+def test_render_пустой_nearby_не_добавляет_блок() -> None:
+    """Пустой nearby_text в документ ничего не добавляет."""
+    ctx = ConversationContext(static_text="СТАТИКА", nearby_text="", dynamic_text="ДИНАМИКА")
+    rendered = ctx.render()
+    assert rendered == "СТАТИКА\n\nДИНАМИКА"
+
+
+def test_context_state_nearby_поля_переживают_to_context() -> None:
+    """ContextState с nearby_* отдаёт те же поля в ConversationContext."""
+    state = ContextState(
+        nearby_text="Ближайшие филиалы…",
+        nearby_key="perm:солнечный",
+        nearby_found=True,
+    )
+    ctx = state.to_context()
+    assert ctx.nearby_text == "Ближайшие филиалы…"
+    assert ctx.nearby_key == "perm:солнечный"
+    assert ctx.nearby_found is True

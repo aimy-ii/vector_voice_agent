@@ -14,6 +14,8 @@ from graph.tools_registry import (
     CityFaqTool,
     CityTool,
     FactsTool,
+    NearestBranchesTool,
+    build_context_tools,
 )
 from script.build import build_script
 from script.source import JsonScriptSource
@@ -96,11 +98,78 @@ async def test_branches_tool_чужие_слаги_игнорирует_лими
     assert "ул. В, 3" not in text  # четвёртый валидный не берём
 
 
-async def test_branches_tool_пустые_слаги_или_город(branches_kb: _FakeKB):
+async def test_branches_tool_пустые_слаги_с_городом_отбирает_сам(branches_kb: _FakeKB):
+    """Пустые слаги при городе — отбор по запросу / первые три, не отмена."""
     tool = BranchesTool()
-    assert await tool.run("x", ConversationContext(city_slug="perm"), slugs=()) == ""
+    text = await tool.run("x", ConversationContext(city_slug="perm"), slugs=())
+    assert "ул. А, 1" in text
+    assert "ул. Б, 2" in text
+    assert "ул. В, 3" in text
+    assert "ул. Г, 4" not in text
+    assert branches_kb.calls == ["list_branches:perm"]
+
+
+async def test_branches_tool_без_города(branches_kb: _FakeKB):
+    """Без города — пустая строка, в справочник не ходим."""
+    tool = BranchesTool()
     assert await tool.run("x", ConversationContext(), slugs=["a"]) == ""
     assert branches_kb.calls == []
+
+
+async def test_branches_tool_чужие_слаги_совпадение_по_запросу(monkeypatch):
+    """Слаги не из перечня, запрос совпал с адресом — адреса совпавших."""
+    kb = _FakeKB(
+        branches=[
+            {
+                "slug": "spb_prosveshcheniya",
+                "address": "Проспект Просвещения, 1",
+                "landmark": "метро",
+            },
+            {"slug": "spb_other", "address": "ул. Другая, 2", "landmark": ""},
+            {"slug": "spb_third", "address": "ул. Третья, 3", "landmark": ""},
+        ]
+    )
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = BranchesTool()
+    text = await tool.run(
+        "Проспект Просвещения",
+        ConversationContext(city_slug="spb"),
+        slugs=["prospekt-prosveshcheniya", "krestovskiy-ostrov"],
+    )
+    assert "Проспект Просвещения, 1" in text
+    assert "ул. Другая" not in text
+    assert "ул. Третья" not in text
+
+
+async def test_branches_tool_чужие_слаги_без_совпадения_первые_три(branches_kb: _FakeKB):
+    """Слаги не из перечня, запрос ни с чем не совпал — первые три города."""
+    tool = BranchesTool()
+    text = await tool.run(
+        "совсем неизвестное место",
+        ConversationContext(city_slug="perm"),
+        slugs=["чужой_а", "чужой_б"],
+    )
+    assert "ул. А, 1" in text
+    assert "ул. Б, 2" in text
+    assert "ул. В, 3" in text
+    assert "ул. Г, 4" not in text
+
+
+async def test_branches_tool_пустые_слаги_пустой_перечень(monkeypatch):
+    """Слаги пустые, перечень города пустой — пустая строка, как раньше."""
+    monkeypatch.setattr("graph.tools_registry.vector_kb", _FakeKB(branches=[]))
+    tool = BranchesTool()
+    assert await tool.run("x", ConversationContext(city_slug="perm"), slugs=()) == ""
+
+
+async def test_branches_tool_без_поля_адреса(monkeypatch):
+    """У филиалов нет поля адреса — пустая строка, как раньше."""
+    monkeypatch.setattr(
+        "graph.tools_registry.vector_kb",
+        _FakeKB(branches=[{"slug": "a", "landmark": "парк"}, {"slug": "b"}]),
+    )
+    tool = BranchesTool()
+    assert await tool.run("", ConversationContext(city_slug="perm"), slugs=["a", "b"]) == ""
 
 
 async def test_city_faq_игнорирует_slugs():
@@ -450,3 +519,146 @@ async def test_branches_tool_сохраняет_кандидатов(branches_kb
     ctx = ConversationContext(city_slug="perm")
     await tool.run("", ctx, slugs=["b", "a"])
     assert ctx.branch_candidates == ["b", "a"]
+
+
+class _FakeNearbyKB:
+    """Фейковый справочник для инструмента ближайших филиалов."""
+
+    def __init__(
+        self,
+        *,
+        point: tuple[float, float] | None = (58.0, 56.0),
+        items: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.point = point
+        self.items = items if items is not None else []
+        self.geocode_calls: list[dict[str, Any]] = []
+        self.nearest_calls: list[dict[str, Any]] = []
+
+    async def geocode(
+        self, text: str, *, city_slug: str | None = None
+    ) -> tuple[float, float] | None:
+        self.geocode_calls.append({"text": text, "city_slug": city_slug})
+        return self.point
+
+    async def nearest_branches(
+        self,
+        lat: float,
+        lon: float,
+        *,
+        city_slug: str | None = None,
+        limit: int | None = None,
+        radius_km: float | None = None,
+    ) -> list[dict[str, Any]]:
+        self.nearest_calls.append(
+            {
+                "lat": lat,
+                "lon": lon,
+                "city_slug": city_slug,
+                "limit": limit,
+                "radius_km": radius_km,
+            }
+        )
+        return self.items
+
+
+def test_nearest_branches_есть_в_реестре(data_dir) -> None:
+    """Инструмент nearest_branches входит в build_context_tools."""
+    script = build_script(JsonScriptSource(data_dir).fetch("vector_ru", "4"))
+    names = [t.name for t in build_context_tools(script)]
+    assert "nearest_branches" in names
+
+
+async def test_nearest_branches_новое_место(monkeypatch) -> None:
+    """Город известен, место новое: блок, ключ, кандидаты и непустой ответ."""
+    items = [
+        {"slug": "perm_a", "address": "ул. А, 1", "landmark": "", "distance_km": 0.4},
+        {"slug": "perm_b", "address": "ул. Б, 2", "landmark": "", "distance_km": 1.0},
+    ]
+    kb = _FakeNearbyKB(items=items)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = NearestBranchesTool()
+    ctx = ConversationContext(city_slug="perm")
+    text = await tool.run("Солнечный", ctx)
+    assert text
+    assert "ул. А, 1" in ctx.nearby_text
+    assert "ул. Б, 2" in ctx.nearby_text
+    assert ctx.nearby_key == "perm:солнечный"
+    assert ctx.nearby_found is True
+    assert ctx.branch_candidates == ["perm_a", "perm_b"]
+    assert len(kb.geocode_calls) == 1
+
+
+async def test_nearest_branches_повтор_того_же_места(monkeypatch) -> None:
+    """Повтор с тем же ключом: в справочник не ходят, контекст не меняется."""
+    items = [
+        {"slug": "perm_a", "address": "ул. А, 1", "landmark": "", "distance_km": 0.4},
+    ]
+    kb = _FakeNearbyKB(items=items)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = NearestBranchesTool()
+    ctx = ConversationContext(city_slug="perm")
+    first = await tool.run("Солнечный", ctx)
+    assert first
+    snapshot = (ctx.nearby_text, ctx.nearby_key, ctx.nearby_found, list(ctx.branch_candidates))
+    calls_after_first = len(kb.geocode_calls)
+    second = await tool.run("Солнечный", ctx)
+    assert second
+    assert "уже сделан" in second
+    assert len(kb.geocode_calls) == calls_after_first
+    assert (
+        ctx.nearby_text,
+        ctx.nearby_key,
+        ctx.nearby_found,
+        list(ctx.branch_candidates),
+    ) == snapshot
+
+
+async def test_nearest_branches_без_города(monkeypatch) -> None:
+    """Без города — пустой ответ, поля пусты, в справочник не ходили."""
+    kb = _FakeNearbyKB(items=[{"slug": "x", "address": "ул. X", "distance_km": 1}])
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = NearestBranchesTool()
+    ctx = ConversationContext()
+    text = await tool.run("Солнечный", ctx)
+    assert text == ""
+    assert ctx.nearby_text == ""
+    assert ctx.nearby_key == ""
+    assert ctx.nearby_found is False
+    assert kb.geocode_calls == []
+
+
+async def test_nearest_branches_место_не_опознано(monkeypatch) -> None:
+    """Geocode вернул None: пустой ответ, nearby_text с «не удалось», кандидаты не тронуты."""
+    kb = _FakeNearbyKB(point=None)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = NearestBranchesTool()
+    ctx = ConversationContext(city_slug="perm", branch_candidates=["keep_me"])
+    text = await tool.run("Неизвестно", ctx)
+    assert text == ""
+    assert "не удалось" in ctx.nearby_text
+    assert ctx.nearby_found is False
+    assert ctx.branch_candidates == ["keep_me"]
+    assert len(kb.geocode_calls) == 1
+    assert kb.nearest_calls == []
+
+
+async def test_nearest_branches_неудача_не_затирает_удачу(monkeypatch) -> None:
+    """Неудачный подбор по новому месту не затирает уже найденные адреса."""
+    items = [
+        {"slug": "perm_a", "address": "ул. А, 1", "landmark": "", "distance_km": 0.4},
+    ]
+    kb = _FakeNearbyKB(items=items)
+    monkeypatch.setattr("graph.tools_registry.vector_kb", kb)
+    tool = NearestBranchesTool()
+    ctx = ConversationContext(city_slug="perm")
+    first = await tool.run("Солнечный", ctx)
+    assert first
+    kept = ctx.nearby_text
+    kb.point = None
+    text = await tool.run("Неизвестно", ctx)
+    assert text == ""
+    assert ctx.nearby_text == kept
+    assert ctx.nearby_found is True
+    assert ctx.branch_candidates == ["perm_a"]
+    assert ctx.nearby_key == "perm:неизвестно"

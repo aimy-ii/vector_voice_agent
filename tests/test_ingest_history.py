@@ -1,4 +1,4 @@
-"""Восстановление last_agent_reply в хвосте истории на узле ingest."""
+"""Приём хода: история копится мозгом, снимок бота не сшивается."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from graph import nodes as nodes_module
 from graph.context import ConversationContext
 from graph.history import text_of
 from graph.state import new_state_defaults
+from graph.transcript import ROLE_AGENT, ROLE_CLIENT, TranscriptEntry
 
 
 @pytest.fixture()
@@ -28,91 +29,117 @@ def quiet(monkeypatch) -> None:
     monkeypatch.setattr(nodes_module, "stage", lambda *a, **k: None)
 
 
-def _runtime() -> SimpleNamespace:
-    return SimpleNamespace(context={})
+def _runtime(*, turn_kind: str = "client") -> SimpleNamespace:
+    return SimpleNamespace(context={}, configurable={"turn_kind": turn_kind})
 
 
-def _base_state(*, messages: list[Any]) -> dict[str, Any]:
+def _base_state(*, messages: list[Any], turn: int = 2) -> dict[str, Any]:
     return {
         **new_state_defaults(),
         "messages": messages,
         "script_id": "vector_ru",
         "script_version": "2",
-        "turn": 2,
+        "turn": turn,
     }
 
 
-def _agent_texts(messages: list[Any]) -> list[str]:
-    return [text_of(m) for m in messages if isinstance(m, AIMessage)]
+@pytest.fixture()
+def turn_kind(monkeypatch):
+    """Подменяет ``_turn_kind`` значением из аргумента теста."""
+
+    def _set(kind: str) -> None:
+        monkeypatch.setattr(nodes_module, "_turn_kind", lambda: kind)
+
+    return _set
 
 
-async def test_нет_в_истории_дописывает_в_конец(ctx_store, quiet):
-    """Последней реплики бота нет в истории — после ingest она в конце."""
-    reply = "Из какого вы города?"
-    await ctx_store.save("local", ConversationContext(last_agent_reply=reply))
-    state = _base_state(
-        messages=[
-            HumanMessage(content="алло"),
-            AIMessage(content="Здравствуйте"),
-        ]
-    )
-    out = await nodes_module.ingest_node(state, _runtime())  # type: ignore[arg-type]
-    assert _agent_texts(out["messages"]) == ["Здравствуйте", reply]
-    assert text_of(out["messages"][-1]) == reply
-    assert isinstance(out["messages"][-1], AIMessage)
-
-
-async def test_уже_есть_в_хвосте_без_дубля(ctx_store, quiet):
-    """Реплика уже в хвосте — история не меняется, дубля нет."""
-    reply = "Из какого вы города?"
-    await ctx_store.save("local", ConversationContext(last_agent_reply=reply))
-    messages = [HumanMessage(content="алло"), AIMessage(content=reply)]
-    state = _base_state(messages=list(messages))
-    out = await nodes_module.ingest_node(state, _runtime())  # type: ignore[arg-type]
-    assert len(out["messages"]) == len(messages)
-    assert _agent_texts(out["messages"]) == [reply]
-
-
-async def test_отличается_пробелами_и_знаками_без_дубля(ctx_store, quiet):
-    """В хвосте та же реплика с другими пробелами/знаками — дубля нет."""
+async def test_ход_с_фразой_клиента_дописывает_её(ctx_store, quiet, turn_kind):
+    """Ход с фразой клиента дописывает её в историю."""
+    turn_kind("client")
     await ctx_store.save(
         "local",
-        ConversationContext(last_agent_reply="Из какого вы города?"),
+        ConversationContext(
+            transcript=[
+                TranscriptEntry(entry_id="agent:1:0", role=ROLE_AGENT, text="Здравствуйте"),
+            ],
+        ),
     )
-    messages = [
-        HumanMessage(content="алло"),
-        AIMessage(content="Из  какого вы города !"),
+    state = _base_state(messages=[HumanMessage(content="алло")])
+    out = await nodes_module.ingest_node(state, _runtime())  # type: ignore[arg-type]
+    assert [text_of(m) for m in out["messages"]] == ["Здравствуйте", "алло"]
+    assert isinstance(out["messages"][-1], HumanMessage)
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert [item.role for item in loaded.transcript] == [ROLE_AGENT, ROLE_CLIENT]
+    assert loaded.transcript[-1].text == "алло"
+
+
+async def test_ход_вытаскивания_историю_не_трогает(ctx_store, quiet, turn_kind):
+    """Ход вытаскивания историю не трогает."""
+    turn_kind("pull")
+    prior = [
+        TranscriptEntry(entry_id="agent:1:0", role=ROLE_AGENT, text="Здравствуйте"),
+        TranscriptEntry(entry_id="client:2:1", role=ROLE_CLIENT, text="алло"),
     ]
-    state = _base_state(messages=list(messages))
-    out = await nodes_module.ingest_node(state, _runtime())  # type: ignore[arg-type]
-    assert len(out["messages"]) == len(messages)
-    assert _agent_texts(out["messages"]) == ["Из  какого вы города !"]
+    await ctx_store.save("local", ConversationContext(transcript=list(prior)))
+    state = _base_state(messages=[HumanMessage(content="шум")])
+    out = await nodes_module.ingest_node(state, _runtime(turn_kind="pull"))  # type: ignore[arg-type]
+    assert [text_of(m) for m in out["messages"]] == ["Здравствуйте", "алло"]
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert [item.text for item in loaded.transcript] == ["Здравствуйте", "алло"]
 
 
-async def test_пустая_last_agent_reply_история_не_меняется(ctx_store, quiet):
-    """Первый ход: last_agent_reply пуста — историю не трогаем."""
-    await ctx_store.save("local", ConversationContext(last_agent_reply=""))
-    messages = [HumanMessage(content="алло")]
-    state = _base_state(messages=list(messages))
-    out = await nodes_module.ingest_node(state, _runtime())  # type: ignore[arg-type]
-    assert len(out["messages"]) == 1
-    assert isinstance(out["messages"][0], HumanMessage)
-    assert _agent_texts(out["messages"]) == []
+async def test_ход_продолжения_историю_не_трогает(ctx_store, quiet, turn_kind):
+    """Ход продолжения историю не трогает."""
+    turn_kind("continuation")
+    prior = [
+        TranscriptEntry(entry_id="agent:1:0", role=ROLE_AGENT, text="Подождите"),
+    ]
+    await ctx_store.save("local", ConversationContext(transcript=list(prior)))
+    state = _base_state(messages=[])
+    out = await nodes_module.ingest_node(state, _runtime(turn_kind="continuation"))  # type: ignore[arg-type]
+    assert [text_of(m) for m in out["messages"]] == ["Подождите"]
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert len(loaded.transcript) == 1
 
 
-async def test_встаёт_перед_репликой_клиента_этого_хода(ctx_store, quiet):
-    """Есть human в хвосте — реплика бота встаёт перед ним."""
-    reply = "Как к вам обращаться?"
-    await ctx_store.save("local", ConversationContext(last_agent_reply=reply))
-    state = _base_state(
-        messages=[
-            HumanMessage(content="алло"),
-            HumanMessage(content="Павел"),
-        ]
+async def test_ход_молчания_историю_не_трогает(ctx_store, quiet, turn_kind):
+    """Ход молчания историю не трогает."""
+    turn_kind("silence")
+    prior = [
+        TranscriptEntry(entry_id="agent:1:0", role=ROLE_AGENT, text="Вы на связи?"),
+    ]
+    await ctx_store.save("local", ConversationContext(transcript=list(prior)))
+    state = _base_state(messages=[])
+    out = await nodes_module.ingest_node(state, _runtime(turn_kind="silence"))  # type: ignore[arg-type]
+    assert [text_of(m) for m in out["messages"]] == ["Вы на связи?"]
+    loaded = await ctx_store.load("local")
+    assert loaded is not None
+    assert len(loaded.transcript) == 1
+
+
+async def test_история_из_кеша_целиком_даже_если_снимок_пустой(ctx_store, quiet, turn_kind):
+    """История из кеша уходит в messages целиком, даже если снимок бота пустой."""
+    turn_kind("client")
+    await ctx_store.save(
+        "local",
+        ConversationContext(
+            transcript=[
+                TranscriptEntry(entry_id="agent:1:0", role=ROLE_AGENT, text="Здравствуйте"),
+                TranscriptEntry(entry_id="client:2:1", role=ROLE_CLIENT, text="алло"),
+                TranscriptEntry(entry_id="agent:2:2", role=ROLE_AGENT, text="Из какого вы города?"),
+            ],
+        ),
     )
+    state = _base_state(messages=[])
     out = await nodes_module.ingest_node(state, _runtime())  # type: ignore[arg-type]
-    assert [m.type for m in out["messages"]] == ["human", "ai", "human"]
-    assert text_of(out["messages"][0]) == "алло"
-    assert text_of(out["messages"][1]) == reply
-    assert text_of(out["messages"][2]) == "Павел"
-    assert _agent_texts(out["messages"]) == [reply]
+    assert [text_of(m) for m in out["messages"]] == [
+        "Здравствуйте",
+        "алло",
+        "Из какого вы города?",
+    ]
+    assert isinstance(out["messages"][0], AIMessage)
+    assert isinstance(out["messages"][1], HumanMessage)
+    assert isinstance(out["messages"][2], AIMessage)

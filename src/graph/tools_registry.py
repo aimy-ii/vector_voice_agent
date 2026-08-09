@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 
 from graph.context import ConversationContext, format_branch_static, merge_static
+from graph.nearby import apply_result, lookup_nearby, normalize_place, should_refresh
 from graph.resolvers import CityResolver, resolve_city
 from kb.client import vector_kb
 from script.build import CompiledScript
@@ -204,6 +205,42 @@ class CityTool:
         return f"Город: {resolution.name}."
 
 
+def _pick_by_query(
+    branches: Sequence[Mapping[str, Any]],
+    query: str,
+) -> list[Mapping[str, Any]]:
+    """Отбирает филиалы по названному месту, когда слаги не подошли.
+
+    Модель называет слаги филиалов по памяти и промахивается; адреса при этом
+    лежат в перечне города. Совпадением считаем вхождение запроса в название,
+    адрес или ориентир филиала. Не совпало ничего — отдаём первые три филиала
+    города: это факт из справочника, а разговор идёт о филиалах.
+
+    Args:
+        branches: перечень филиалов города из справочника.
+        query: место словами от агента; может быть пустым.
+
+    Returns:
+        До трёх филиалов; пустой список, если перечень пуст.
+    """
+    needle = normalize_place(query)
+    if needle:
+        hits: list[Mapping[str, Any]] = []
+        for branch in branches:
+            haystack = normalize_place(
+                " ".join(
+                    str(branch.get(key) or "") for key in ("name", "address", "landmark", "slug")
+                )
+            )
+            if needle in haystack:
+                hits.append(branch)
+            if len(hits) >= 3:
+                break
+        if hits:
+            return hits
+    return list(branches)[:3]
+
+
 class BranchesTool:
     """Подтверждение адресов филиалов, отобранных агентом по реплике."""
 
@@ -220,21 +257,21 @@ class BranchesTool:
         *,
         slugs: Sequence[str] = (),
     ) -> str:
-        """Собирает адреса филиалов строго по переданным слагам.
+        """Собирает адреса филиалов по слагам или по запросу.
 
         Успешный отбор сохраняет слаги в ``context.branch_candidates``.
+        Если слаги не совпали с перечнем — отбор по ``query`` / первые три.
 
         Args:
-            query: не используется; отбор уже сделан агентом.
+            query: место словами; запасной отбор, когда слаги не подошли.
             context: текущий контекст; нужен ``city_slug``.
             slugs: слаги филиалов в порядке агента, не больше трёх.
 
         Returns:
-            Строка «Филиалы под запрос: …» или пустая, если города/слагов нет.
+            Строка «Филиалы под запрос: …» или пустая, если города нет / адресов нет.
         """
-        _ = query
         city_slug = (context.city_slug or "").strip()
-        if not city_slug or not slugs:
+        if not city_slug:
             return ""
         branches = await vector_kb.list_branches(city_slug)
         if not branches:
@@ -248,6 +285,8 @@ class BranchesTool:
             picked.append(branch)
             if len(picked) >= 3:
                 break
+        if not picked:
+            picked = _pick_by_query(branches, query)
         if not picked:
             return ""
         context.branch_candidates = [
@@ -436,10 +475,88 @@ class FactsTool:
         return _facts_to_dynamic(facts)
 
 
+class NearestBranchesTool:
+    """Подбор ближайших филиалов, когда место названо вне своего шага.
+
+    Основной путь детерминированный: подбор запускает живой канал по
+    изменению поля формы. Инструмент нужен на случай, когда человек называет
+    район в середине разговора или уже после подбора — тогда пересчёт
+    запускает агент контекста.
+
+    Считает то же самое и теми же функциями, поэтому два пути разойтись не
+    могут: повтор по тому же месту в справочник не ходит.
+    """
+
+    name = "nearest_branches"
+    description = (
+        "Подобрать ближайшие филиалы по названному ориентиру внутри города. "
+        "Город указывать не нужно: он уже известен и передаётся отдельно. "
+        "В query передай только адресный ориентир в виде, пригодном для "
+        "поиска на карте: улицу с домом или без, станцию метро с её "
+        "названием, известное здание. Примеры: «Проспект Просвещения», "
+        "«метро Проспект Просвещения», «Коломяжский проспект 15», «ТЦ Гранд "
+        "Каньон». Не передавай пересказ реплики, название города и общие "
+        "слова: «север города», «станция метро», «рядом с домом», «недалеко "
+        "от центра» — по ним карта ничего не найдёт. Если человек назвал "
+        "только сторону света или район без названия — инструмент не "
+        "вызывай, попроси уточнить улицу или станцию."
+    )
+
+    async def run(
+        self,
+        query: str,
+        context: ConversationContext,
+        *,
+        slugs: Sequence[str] = (),
+    ) -> str:
+        """Считает ближайшие филиалы и кладёт их в контекст.
+
+        Перечень адресов уходит в отдельный блок контекста, а не в динамику:
+        динамика копится за звонок, а список должен заменяться целиком.
+
+        Args:
+            query: место словами из реплики клиента.
+            context: текущий контекст; нужен ``city_slug``.
+            slugs: не используется — филиалы выбирает код по расстоянию.
+
+        Returns:
+            Короткая строка о том, что подбор сделан, либо пустая, если
+            подбирать нечего или не нашлось.
+        """
+        _ = slugs
+        place = (query or "").strip()
+        city_slug = (context.city_slug or "").strip()
+        key = should_refresh(
+            city_slug=city_slug or None,
+            place=place,
+            current_key=context.nearby_key,
+        )
+        if key is None:
+            if context.nearby_text.strip():
+                return "Подбор по этому месту уже сделан — смотри блок ближайших филиалов."
+            return ""
+        previous_text = context.nearby_text
+        previous_found = context.nearby_found
+        context.nearby_key = key
+        result = await lookup_nearby(vector_kb, city_slug=city_slug, place=place, key=key)
+        context.nearby_text, context.nearby_found = apply_result(
+            previous_text=previous_text,
+            previous_found=previous_found,
+            result=result,
+        )
+        if result.branch_slugs:
+            context.branch_candidates = result.branch_slugs
+        if not result.found:
+            return ""
+        return (
+            f"Ближайшие филиалы к месту «{place}» подобраны — перечень в блоке ближайших филиалов."
+        )
+
+
 def build_context_tools(script: CompiledScript) -> list[ContextTool]:
     """Собирает реестр инструментов контекстера.
 
-    Город, филиалы, FAQ, детали филиала и факты шага.
+    Город, филиалы, FAQ, детали филиала, ближайшие филиалы и факты шага.
 
     Args:
         script: скомпилированный скрипт (цена и ``FactsTool``).
@@ -452,5 +569,6 @@ def build_context_tools(script: CompiledScript) -> list[ContextTool]:
         BranchesTool(),
         CityFaqTool(),
         BranchDetailsTool(),
+        NearestBranchesTool(),
         FactsTool(script),
     ]

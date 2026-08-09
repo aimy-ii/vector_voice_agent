@@ -193,3 +193,44 @@ async def test_dynamic_turn_hash_pending_пишутся_с_динамикой(
     assert loaded.dynamic_reply_hash == "dyn456"
     assert loaded.pending_fields == ["branch"]
     assert "Ищем филиалы" in loaded.dynamic_text
+
+
+def test_nearby_поля_в_динамике_не_в_статике() -> None:
+    """nearby_text, nearby_key и nearby_found — динамика; в статику не входят."""
+    assert "nearby_text" in CONTEXT_FIELDS_DYNAMIC
+    assert "nearby_key" in CONTEXT_FIELDS_DYNAMIC
+    assert "nearby_found" in CONTEXT_FIELDS_DYNAMIC
+    assert "nearby_text" not in CONTEXT_FIELDS_STATIC
+    assert "nearby_key" not in CONTEXT_FIELDS_STATIC
+    assert "nearby_found" not in CONTEXT_FIELDS_STATIC
+
+
+def test_merge_динамики_переносит_nearby() -> None:
+    """Слияние по динамике переносит непустые nearby_text, nearby_key и nearby_found."""
+    base = ConversationContext(static_text="Город: Пермь")
+    overlay = ConversationContext(
+        nearby_text="Ближайшие филиалы к месту «Солнечный»",
+        nearby_key="perm:солнечный",
+        nearby_found=True,
+    )
+    merged = merge_context_fields(base, overlay, CONTEXT_FIELDS_DYNAMIC)
+    assert merged.nearby_text == "Ближайшие филиалы к месту «Солнечный»"
+    assert merged.nearby_key == "perm:солнечный"
+    assert merged.nearby_found is True
+    assert merged.static_text == "Город: Пермь"
+
+
+def test_merge_динамики_затирает_nearby_пустой_строкой() -> None:
+    """Сброс nearby_text пустой строкой проходит (в отличие от статики)."""
+    base = ConversationContext(
+        static_text="Город: Пермь",
+        nearby_text="Ближайшие филиалы…",
+        nearby_key="perm:солнечный",
+        nearby_found=True,
+    )
+    overlay = ConversationContext(nearby_text="", nearby_key="", nearby_found=False)
+    merged = merge_context_fields(base, overlay, CONTEXT_FIELDS_DYNAMIC)
+    assert merged.nearby_text == ""
+    assert merged.nearby_key == ""
+    assert merged.nearby_found is False
+    assert merged.static_text == "Город: Пермь"

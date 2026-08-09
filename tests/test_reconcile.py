@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from graph.reconcile import (
     SPOKEN_ENOUGH,
     count_agent_messages,
+    delivery_patch,
     reopen_if_interrupted,
     spoken_ratio,
     was_delivered,
@@ -106,3 +107,28 @@ def test_сверка_на_истории_из_словарей():
     )
     assert patch["step_status"]["practice"] == "pending"
     assert count_agent_messages(messages) == 1
+
+
+def test_доставка_по_истории_сообщений():
+    """Счётчик реплик бота берётся из messages."""
+    text = "Расскажу, как проходит обучение у нас в академии подробно"
+    state = {
+        "pending_step": "practice",
+        "pending_len": len(text),
+        "pending_ai_count": 0,
+    }
+    patch = delivery_patch(
+        state=state,
+        messages=[AIMessage(content=text)],
+        last_spoken=text,
+    )
+    assert patch["last_delivered"] is True
+    assert patch["delivered_step"] == "practice"
+
+    patch_miss = delivery_patch(
+        state=state,
+        messages=[],
+        last_spoken=text,
+    )
+    assert patch_miss["last_delivered"] is False
+    assert patch_miss["undelivered_step"] == "practice"

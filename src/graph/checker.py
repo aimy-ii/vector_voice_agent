@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from core.config import settings
 from graph.history import last_user_text, normalize
-from graph.log_fmt import format_check_pending
+from graph.log_fmt import format_check_pending, format_check_verdict
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep, Step
 from script.planner import is_closed, iter_available, profile_has, render_step_text
@@ -29,9 +29,6 @@ from script.store import ScriptProgress, progress_from_state
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
 
 log = logging.getLogger(__name__)
-
-#: Потолок ходов в срезе истории для уже заданных шагов.
-HISTORY_TURN_CAP = 12
 
 #: Критерий закрытия по виду шага — и в промпт, и в код.
 _KIND_CRITERIA: dict[str, str] = {
@@ -270,33 +267,29 @@ def _message_text(message: BaseMessage) -> str:
 def history_slice_for(
     messages: Sequence[BaseMessage],
     *,
-    steps: Sequence[AnyStep],
-    progress: ScriptProgress,
-    turn: int,
     reply: str | None = None,
 ) -> list[BaseMessage]:
-    """Срез истории под проверяемые шаги.
+    """Срез истории для судьи: переписка звонка целиком.
 
-    От взятия самого старого шага в работе; для шагов не в работе —
-    с начала звонка. Сверху — потолок по числу сообщений.
+    Судья решает, выполнено ли требование шага, по всему разговору.
+    Окно по ходам убрано осознанно: оно отсчитывалось от момента взятия
+    шага в работу, и факт, названный до этого момента, судья не видел —
+    шаг оставался незакрываемым до конца звонка.
 
-    Текущая реплика (полная или накопленный partial) в срез не входит:
-    она уходит отдельным полем ``client_reply``. Из хвоста истории
-    убираем последнее human-сообщение только если его текст после
-    ``normalize`` совпадает с проверяемой репликой — иначе прошлый
-    ответ клиента остаётся в срезе. Сами тексты сообщений в срезе
-    не меняем: судье нужны знаки препинания.
+    Текущая реплика в срез не входит: она уходит отдельным полем
+    ``client_reply``. Хвостовое human-сообщение убираем, только если его
+    текст после ``normalize`` совпадает с проверяемой репликой, иначе
+    одна и та же фраза пришла бы судье дважды. При ``reply is None``
+    хвостовой human отрезается безусловно. Тексты сообщений не меняем:
+    судье нужны знаки препинания.
 
     Args:
-        messages: полная история хода.
-        steps: шаги, которые сейчас проверяем.
-        progress: прогресс скрипта.
-        turn: номер текущего хода.
-        reply: текст реплики, который уходит отдельным блоком; ``None`` —
-            срез как раньше (отрезать хвостовой human).
+        messages: полная история звонка.
+        reply: текст реплики, уходящий отдельным блоком; ``None`` —
+            отрезать хвостовой human без сравнения.
 
     Returns:
-        Срез сообщений без проверяемой реплики.
+        Список сообщений без проверяемой реплики.
     """
     if not messages:
         return []
@@ -305,24 +298,7 @@ def history_slice_for(
         last_text = _message_text(body[-1])
         if reply is None or normalize(last_text) == normalize(reply):
             body = body[:-1]
-
-    work_ids = set(progress.in_work)
-    has_idle = any(step.id not in work_ids for step in steps)
-    if has_idle:
-        start_turn = 0
-    else:
-        taken_turns = [
-            int(progress.taken_turn.get(step.id, turn)) for step in steps if step.id in work_ids
-        ]
-        start_turn = min(taken_turns) if taken_turns else 0
-
-    # Грубая оценка: 2 сообщения на ход (клиент + агент).
-    keep_from = max(0, len(body) - HISTORY_TURN_CAP * 2)
-    if start_turn > 0:
-        # taken_turn — номер хода; оставляем хвост с запасом от начала взятия.
-        approx = max(0, (start_turn - 1) * 2)
-        keep_from = max(keep_from, min(approx, len(body)))
-    return body[keep_from:]
+    return body
 
 
 def _script_from_state(state: Mapping[str, Any]) -> CompiledScript:
@@ -426,13 +402,7 @@ async def check_pass(
     )
     if pending and reply.strip():
         client = judge or LlmCheckerClient()
-        history = history_slice_for(
-            messages,
-            steps=pending,
-            progress=updated,
-            turn=turn,
-            reply=reply,
-        )
+        history = history_slice_for(messages, reply=reply)
         history_text = _format_history(history)
 
         for step in pending:
@@ -448,10 +418,30 @@ async def check_pass(
             )
             if verdict is None:
                 # Модель не ответила — шаги не трогаем, ход продолжается.
+                log.info(
+                    "[check|verdict] %s",
+                    format_check_verdict(
+                        step_id=step.id,
+                        age=age,
+                        history_len=len(history),
+                    ),
+                )
                 break
+            log.info(
+                "[check|verdict] %s",
+                format_check_verdict(
+                    step_id=step.id,
+                    age=age,
+                    history_len=len(history),
+                    reply_usable=verdict.reply_usable,
+                    step_closed=verdict.step_closed,
+                    asking_pointless=verdict.asking_pointless,
+                ),
+            )
             if verdict.client_asks_inform:
                 asks_inform = True
             if not verdict.reply_usable:
+                # Реплика негодна целиком, а не для одного шага.
                 break
             if verdict.step_closed:
                 updated.status[step.id] = "closed"
@@ -461,7 +451,6 @@ async def check_pass(
                 updated.status[step.id] = "closed"
                 closures.append((step.id, "бессмысленно"))
                 continue
-            break
 
     return updated, closures, asks_inform
 

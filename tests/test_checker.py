@@ -72,12 +72,7 @@ async def test_вход_разделён_история_и_реплика_не_�
     assert "Как к вам обращаться" in call["history_slice"]
 
 
-async def test_срез_от_взятия_самого_старого(script):
-    steps = [script.step("name"), script.step("city")]
-    progress = ScriptProgress(
-        attempts={"name": 1, "city": 1},
-        taken_turn={"name": 1, "city": 3},
-    )
+async def test_срез_содержит_всю_историю_кроме_текущей_реплики(script):
     messages = [
         HumanMessage(content="привет"),
         AIMessage(content="имя?"),
@@ -85,27 +80,27 @@ async def test_срез_от_взятия_самого_старого(script):
         AIMessage(content="город?"),
         HumanMessage(content="Пермь"),
     ]
-    sliced = history_slice_for(messages, steps=steps, progress=progress, turn=4)
-    # Последняя реплика клиента отрезана.
-    assert sliced[-1].type != "human" or sliced[-1].content != "Пермь"
+    sliced = history_slice_for(messages, reply="Пермь")
+    assert [m.content for m in sliced] == [
+        "привет",
+        "имя?",
+        "Андрей",
+        "город?",
+    ]
 
 
-async def test_для_шага_не_в_работе_история_с_начала(script):
-    steps = [script.step("city")]
-    progress = ScriptProgress(attempts={"city": 0}, in_work=[])
+async def test_срез_начинается_с_первого_сообщения(script):
     messages = [
         HumanMessage(content="я из Перми"),
         AIMessage(content="как зовут?"),
         HumanMessage(content="Игорь"),
     ]
-    sliced = history_slice_for(messages, steps=steps, progress=progress, turn=2)
-    assert sliced[0].content == "я из Перми" or any("Перми" in str(m.content) for m in sliced[:-1])
+    sliced = history_slice_for(messages, reply="Игорь")
+    assert sliced[0].content == "я из Перми"
 
 
 def test_срез_отрезает_хвост_при_разной_пунктуации(script):
     """Хвост уходит, если реплика отличается от human только знаками."""
-    steps = [script.step("name")]
-    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
     original = "Да, механика."
     messages = [
         AIMessage(content="Какая коробка?"),
@@ -113,9 +108,6 @@ def test_срез_отрезает_хвост_при_разной_пунктуа
     ]
     sliced = history_slice_for(
         messages,
-        steps=steps,
-        progress=progress,
-        turn=2,
         reply="да механика",
     )
     assert not any(m.type == "human" and m.content == original for m in sliced)
@@ -123,8 +115,6 @@ def test_срез_отрезает_хвост_при_разной_пунктуа
 
 def test_срез_отрезает_хвост_при_регистре_и_ё(script):
     """Хвост уходит при отличии только регистром и «ё»/«е»."""
-    steps = [script.step("name")]
-    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
     original = "Всё понятно"
     messages = [
         AIMessage(content="Вопрос?"),
@@ -132,9 +122,6 @@ def test_срез_отрезает_хвост_при_регистре_и_ё(scri
     ]
     sliced = history_slice_for(
         messages,
-        steps=steps,
-        progress=progress,
-        turn=2,
         reply="все понятно",
     )
     assert not any(m.type == "human" and m.content == original for m in sliced)
@@ -142,8 +129,6 @@ def test_срез_отрезает_хвост_при_регистре_и_ё(scri
 
 def test_срез_не_отрезает_чужой_хвост(script):
     """Хвост остаётся, если последняя реплика в истории действительно другая."""
-    steps = [script.step("city")]
-    progress = ScriptProgress(attempts={"city": 1}, taken_turn={"city": 1})
     messages = [
         AIMessage(content="имя?"),
         HumanMessage(content="Андрей"),
@@ -151,9 +136,6 @@ def test_срез_не_отрезает_чужой_хвост(script):
     ]
     sliced = history_slice_for(
         messages,
-        steps=steps,
-        progress=progress,
-        turn=3,
         reply="я из Перми",
     )
     assert any(m.content == "Андрей" for m in sliced)
@@ -162,8 +144,6 @@ def test_срез_не_отрезает_чужой_хвост(script):
 
 def test_срез_не_меняет_текст_сообщений(script):
     """Тексты в срезе совпадают с исходными символ в символ."""
-    steps = [script.step("name")]
-    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
     messages = [
         AIMessage(content="Как к вам обращаться?"),
         HumanMessage(content="Меня зовут Андрей!"),
@@ -172,9 +152,6 @@ def test_срез_не_меняет_текст_сообщений(script):
     ]
     sliced = history_slice_for(
         messages,
-        steps=steps,
-        progress=progress,
-        turn=2,
         reply="да механика",
     )
     # Хвост отрезан; оставшиеся тексты — без нормализации.
@@ -189,21 +166,42 @@ def test_срез_не_меняет_текст_сообщений(script):
 
 def test_срез_при_reply_none_отрезает_хвостовой_human(script):
     """При ``reply is None`` хвостовой human отрезается безусловно."""
-    steps = [script.step("name")]
-    progress = ScriptProgress(attempts={"name": 1}, taken_turn={"name": 1})
     messages = [
         AIMessage(content="Как зовут?"),
         HumanMessage(content="Совершенно другая фраза"),
     ]
     sliced = history_slice_for(
         messages,
-        steps=steps,
-        progress=progress,
-        turn=2,
         reply=None,
     )
     assert not any(m.type == "human" for m in sliced)
     assert sliced[-1].content == "Как зовут?"
+
+
+def test_срез_держит_факт_названный_до_взятия_шага(script):
+    """Факт до взятия шага в работу остаётся в срезе судьи.
+
+    Раньше окно отсчитывалось от ``taken_turn`` (здесь name на ходу 9,
+    ``turn=10``) и отрезало цену, прозвучавшую третьим сообщением.
+    """
+    price_line = "Стоимость обучения — от 39900 рублей"
+    messages = [
+        AIMessage(content="Здравствуйте"),
+        HumanMessage(content="Добрый день"),
+        AIMessage(content=price_line),
+        HumanMessage(content="Понятно"),
+        AIMessage(content="Какая коробка?"),
+        HumanMessage(content="Механика"),
+        AIMessage(content="Очно или онлайн?"),
+        HumanMessage(content="Очно"),
+        AIMessage(content="Расскажу про стоимость"),
+        HumanMessage(content="Хорошо"),
+    ]
+    assert len(messages) == 10
+    sliced = history_slice_for(messages, reply="Хорошо")
+    assert any(m.content == price_line for m in sliced)
+    assert sliced[0].content == "Здравствуйте"
+    assert not any(m.content == "Хорошо" for m in sliced)
 
 
 async def test_реплика_не_годится_цикл_рвётся(script):
@@ -219,6 +217,58 @@ async def test_реплика_не_годится_цикл_рвётся(script):
     )
     assert updated.status.get("name") != "closed"
     assert len(client.calls) == 1
+
+
+async def test_незакрытый_шаг_не_глушит_следующие(script):
+    """Незакрытый шаг не обрывает проверку остальных висящих."""
+    client = FakeChecker(
+        [
+            CheckerVerdict(reply_usable=True, step_closed=False),
+            CheckerVerdict(reply_usable=True, step_closed=True),
+        ]
+    )
+    progress = ScriptProgress(
+        status={"name": "pending", "city": "pending"},
+        attempts={"name": 1, "city": 1},
+    )
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="Андрей, Пермь")],
+        profile={},
+        turn=2,
+        client=client,
+    )
+    assert len(client.calls) == 2
+    assert client.calls[0]["step_id"] == "name"
+    assert client.calls[1]["step_id"] == "city"
+    assert updated.status.get("name") != "closed"
+    assert updated.status.get("city") == "closed"
+
+
+async def test_модель_не_ответила_цикл_рвётся(script):
+    """None от модели рвёт цикл: следующие шаги судье не отдаём."""
+    client = FakeChecker(
+        [
+            None,
+            CheckerVerdict(reply_usable=True, step_closed=True),
+        ]
+    )
+    progress = ScriptProgress(
+        status={"name": "pending", "city": "pending"},
+        attempts={"name": 1, "city": 1},
+    )
+    updated, _ = await run_checker(
+        script=script,
+        progress=progress,
+        messages=[HumanMessage(content="Андрей, Пермь")],
+        profile={},
+        turn=2,
+        client=client,
+    )
+    assert len(client.calls) == 1
+    assert updated.status.get("name") != "closed"
+    assert updated.status.get("city") != "closed"
 
 
 async def test_цикл_останавливается_на_первом_незакрывшемся(script):
@@ -551,8 +601,8 @@ async def test_фейковый_судья_получает_возраст(scrip
     assert client.calls[0]["in_work"] is True
 
 
-async def test_просьба_повторить_не_закрывает_и_цикл_рвётся(script):
-    """step_closed=false на просьбе повторить — шаг pending, дальше по шапке нет."""
+async def test_просьба_повторить_не_закрывает_шаг(script):
+    """step_closed=false на просьбе повторить — шаг остаётся pending."""
     client = FakeChecker(
         [
             CheckerVerdict(reply_usable=True, step_closed=False),
@@ -572,9 +622,10 @@ async def test_просьба_повторить_не_закрывает_и_ци
         client=client,
     )
     assert updated.status.get("name") == "pending"
-    assert updated.status.get("city") != "closed"
-    assert len(client.calls) == 1
+    assert len(client.calls) == 2
     assert client.calls[0]["step_id"] == "name"
+    assert client.calls[1]["step_id"] == "city"
+    assert updated.status.get("city") == "closed"
 
 
 async def test_на_проверку_только_взятые_в_работу(script, caplog):

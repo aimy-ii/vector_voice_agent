@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from graph.profile_agent import ProfileGuess, ProfileValue, guess_profile
+from graph.profile_agent import ProfileGuess, ProfileValue, guess_profile, profile_fields_of
+from graph.profile_form import field_pairs
 
 
 class _FakeAgent:
@@ -103,3 +104,54 @@ async def test_сбой_агента_пустой_результат_без_ис
         agent=agent,
     )
     assert result == ProfileGuess()
+
+
+def test_profile_fields_of_v4_из_формы(script_v4):
+    """Формат продаж берёт перечень из явной формы, не из требований шагов."""
+    pairs = profile_fields_of(script_v4)
+    assert pairs == field_pairs()
+    keys = [key for key, _title in pairs]
+    assert "location_hint" in keys
+    assert len(keys) == 18
+
+
+def test_profile_fields_of_старый_формат_из_скрипта(script):
+    """Старый формат несёт поля внутри данных скрипта."""
+    pairs = profile_fields_of(script)
+    assert {key for key, _title in pairs} == set(script.profile_fields)
+
+
+async def test_уточняемое_поле_перезаписывается():
+    agent = _FakeAgent(ProfileGuess(values=[ProfileValue(key="location_hint", value="центр")]))
+    result = await guess_profile(
+        "центр",
+        known={"location_hint": "Солнечный"},
+        fields=[("location_hint", "Ориентир")],
+        agent=agent,
+        rewritable=frozenset({"location_hint"}),
+    )
+    assert [(v.key, v.value) for v in result.values] == [("location_hint", "центр")]
+
+
+async def test_то_же_значение_не_перезаписывает():
+    agent = _FakeAgent(ProfileGuess(values=[ProfileValue(key="location_hint", value="Солнечный")]))
+    result = await guess_profile(
+        "Солнечный",
+        known={"location_hint": "Солнечный"},
+        fields=[("location_hint", "Ориентир")],
+        agent=agent,
+        rewritable=frozenset({"location_hint"}),
+    )
+    assert result.values == []
+
+
+async def test_обычное_поле_не_перезаписывается_при_rewritable():
+    agent = _FakeAgent(ProfileGuess(values=[ProfileValue(key="caller_name", value="Пётр")]))
+    result = await guess_profile(
+        "Пётр",
+        known={"caller_name": "Андрей"},
+        fields=[("caller_name", "Имя")],
+        agent=agent,
+        rewritable=frozenset({"location_hint"}),
+    )
+    assert result.values == []

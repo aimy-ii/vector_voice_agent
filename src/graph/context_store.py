@@ -46,11 +46,14 @@ CONTEXT_FIELDS_DYNAMIC: frozenset[str] = frozenset(
         "dynamic_reply_hash",
         "pending_fields",
         "empty_needs",
+        "nearby_text",
+        "nearby_key",
+        "nearby_found",
         "conversation_ended",
     }
 )
 #: Поля хода: пишет только основной ход после генерации.
-CONTEXT_FIELDS_TURN: frozenset[str] = frozenset({"last_agent_reply"})
+CONTEXT_FIELDS_TURN: frozenset[str] = frozenset({"last_agent_reply", "transcript"})
 #: Все поля контекста (полная запись без слияния).
 CONTEXT_FIELDS_ALL: frozenset[str] = (
     CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC | CONTEXT_FIELDS_TURN
@@ -75,19 +78,18 @@ def merge_context_fields(
     Returns:
         Новый контекст со слиянием выбранных полей.
     """
-    merged = base.model_copy(deep=True)
+    data = base.model_dump()
     overlay_data = overlay.model_dump()
-    base_data = merged.model_dump()
     for name in fields:
         if name not in overlay_data:
             continue
         value = overlay_data[name]
         if name in CONTEXT_FIELDS_STATIC and isinstance(value, str) and not value.strip():
-            existing = base_data.get(name)
+            existing = data.get(name)
             if isinstance(existing, str) and existing.strip():
                 continue
-        setattr(merged, name, value)
-    return merged
+        data[name] = value
+    return ConversationContext.model_validate(data)
 
 
 class ContextStore(Protocol):

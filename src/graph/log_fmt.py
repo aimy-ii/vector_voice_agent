@@ -144,6 +144,46 @@ def format_check_pending(
     return text
 
 
+def _yes_no(value: bool | None) -> str:
+    """Флаг вердикта в человеческом виде."""
+    return "да" if value else "нет"
+
+
+def format_check_verdict(
+    *,
+    step_id: str,
+    age: int,
+    history_len: int,
+    reply_usable: bool | None = None,
+    step_closed: bool | None = None,
+    asking_pointless: bool | None = None,
+) -> str:
+    """Решение судьи по одному шагу.
+
+    Нужна, чтобы в логе различались исходы, которые раньше сливались в одно
+    слово «ничего»: модель не ответила, реплика негодна, шаг не закрыт.
+
+    Args:
+        step_id: идентификатор шага.
+        age: возраст шага в ходах.
+        history_len: сколько сообщений ушло судье в срезе.
+        reply_usable: годится ли реплика для анализа; ``None`` — ответа нет.
+        step_closed: закрыт ли шаг; ``None`` — ответа нет.
+        asking_pointless: висит ли шаг безнадёжно; ``None`` — ответа нет.
+
+    Returns:
+        Строка для ``[check|verdict]``.
+    """
+    head = f"{step_id}: возраст {age}, срез {history_len} сообщ."
+    if reply_usable is None and step_closed is None and asking_pointless is None:
+        return f"{head} — модель не ответила"
+    return (
+        f"{head}; реплика годна: {_yes_no(reply_usable)}, "
+        f"закрыт: {_yes_no(step_closed)}, "
+        f"бессмысленно: {_yes_no(asking_pointless)}"
+    )
+
+
 def format_contexter_done(
     *,
     tool: str | None,

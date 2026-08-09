@@ -42,11 +42,10 @@ from graph.context_store import (
 from graph.contexter import reply_hash
 from graph.facts import needs_of
 from graph.history import (
+    agent_texts,
     last_agent_text,
     last_user_text,
-    normalize,
     strip_system,
-    text_of,
 )
 from graph.log_fmt import (
     format_plan_done,
@@ -68,6 +67,7 @@ from graph.resolvers import (
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
+from graph.transcript import append_agent, append_client, reconcile_last_agent, to_messages
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -307,6 +307,47 @@ def _head_steps(state: CallState) -> list[AnyStep]:
     return [step] if step is not None else []
 
 
+def _lead_of(head: Sequence[AnyStep], chosen: AnyStep | None) -> AnyStep | None:
+    """Ведущий шаг хода: выбранный планом, если он есть в шапке.
+
+    План может сдвинуть ведущего на следующий открытый шаг, чтобы не вести
+    одну тему два хода подряд. Это решение и есть ведущий шаг. Шаг вне шапки
+    (устаревшее состояние) не берём — иначе генератор поведёт тему, которой
+    в плане хода нет.
+
+    Args:
+        head: шапка шагов этого хода.
+        chosen: шаг, выбранный планом; может быть None.
+
+    Returns:
+        Выбранный шаг, если он в шапке; иначе первый шаг шапки или None.
+    """
+    if chosen is not None and any(step.id == chosen.id for step in head):
+        return chosen
+    return head[0] if head else None
+
+
+def _lead_first(head: Sequence[AnyStep], lead: AnyStep | None) -> list[AnyStep]:
+    """Ставит ведущий шаг первым в перечне для промпта, не меняя шапку.
+
+    Первый шаг перечня становится разделом «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ»,
+    остальные — «ЕЩЁ НЕ ЗАКРЫТО». Прежний ведущий не пропадает: он съезжает
+    в незакрытые. Шапка в состоянии не меняется — по ней шаги берутся в
+    работу, и её порядок всё равно пересчитывается каждый ход.
+
+    Args:
+        head: шапка шагов этого хода.
+        lead: ведущий шаг или None.
+
+    Returns:
+        Шаги с ведущим впереди; исходный порядок, если ведущего нет в шапке.
+    """
+    steps = list(head)
+    if lead is None or all(step.id != lead.id for step in steps):
+        return steps
+    return [lead, *[step for step in steps if step.id != lead.id]]
+
+
 async def _load_progress(state: CallState) -> ScriptProgress:
     """Читает прогресс из Redis; при промахе — из состояния треда."""
     stored = await script_store.load(_call_id())
@@ -408,30 +449,6 @@ def call_summary(state: CallState) -> dict[str, Any]:
     )
 
 
-def _tail_has_agent_reply(messages: Sequence[Any], reply: str) -> bool:
-    """Есть ли в хвосте истории последняя реплика бота.
-
-    Смотрит последнюю AI-реплику (хвостовой human не мешает). Сравнение
-    через ``normalize``: снимок бота и запись мозга могут отличаться
-    пробелами и знаками.
-    """
-    target = normalize(reply)
-    if not target:
-        return True
-    for message in reversed(list(messages)):
-        if isinstance(message, AIMessage):
-            return normalize(text_of(message)) == target
-    return False
-
-
-def _restore_last_agent_reply(messages: list[Any], reply: str) -> list[Any]:
-    """Дописывает реплику бота в хвост, перед хвостовым human если он есть."""
-    agent = AIMessage(content=reply)
-    if messages and getattr(messages[-1], "type", None) == "human":
-        return list(messages[:-1]) + [agent, messages[-1]]
-    return list(messages) + [agent]
-
-
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое."""
     ctx: CallContext = runtime.context or {}
@@ -446,14 +463,31 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     patch["script_id"] = script.id
     patch["script_version"] = script.version
 
-    messages = strip_system(state.get("messages") or [])
-    # Снимок бота может затереть произнесённое: commit кладёт его в
-    # last_agent_reply, здесь возвращаем в хвост, если пропало.
-    last_reply = ((await _load_context(state)).last_agent_reply or "").strip()
-    if last_reply and not _tail_has_agent_reply(messages, last_reply):
-        messages = _restore_last_agent_reply(messages, last_reply)
+    # Снимок бота историей не является: в нём только озвученное. Он нужен
+    # ниже проверке доставки, а история копится своя.
+    snapshot = strip_system(state.get("messages") or [])
+    turn_now = int(state.get("turn") or 0) + 1
+    ctx_in = await _load_context(state)
+    before = list(ctx_in.transcript)
+    entries = reconcile_last_agent(before, aired=agent_texts(snapshot))
+    if len(entries) < len(before):
+        log.info("[transcript] реплика прошлого хода не прозвучала, убрана из истории")
+    elif entries and before and entries[-1].text != before[-1].text:
+        log.info(
+            "[transcript] реплика прошлого хода прозвучала частично: %d из %d симв.",
+            len(entries[-1].text),
+            len(before[-1].text),
+        )
+    if not _no_client_reply(_turn_kind()):
+        entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
+    if entries != ctx_in.transcript:
+        await _save_context(
+            ctx_in.model_copy(update={"transcript": entries}),
+            fields=CONTEXT_FIELDS_TURN,
+        )
+    messages = to_messages(entries)
     patch["messages"] = messages
-    patch["turn"] = int(state.get("turn") or 0) + 1
+    patch["turn"] = turn_now
     patch["facts"] = {}
     patch["spoken"] = []
     patch["turn_result"] = {}
@@ -477,8 +511,8 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     delivery = delivery_patch(
         state=state,
-        messages=messages,
-        last_spoken=last_agent_text(messages),
+        messages=snapshot,
+        last_spoken=last_agent_text(snapshot),
     )
     patch.update(delivery)
     stage("ingest", f"ход {patch['turn']}, скрипт {script.id} v{script.version}", "start")
@@ -497,8 +531,8 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     реплики клиента (``continuation`` / ``silence``) пометки и счётчики
     не трогаем.
 
-    Если на ходе с репликой клиента ведущий снова совпал с шагом прошлого
-    хода — берём следующий открытый из шапки (шапка сама не меняется).
+    Если ведущий снова совпал с шагом прошлого хода — берём следующий
+    открытый из шапки на любом виде хода (шапка сама не меняется).
     Так не ведём повторно шаг, который судья ещё не успел закрыть.
 
     Счётчик ``lead_repeat`` считает подряд идущие ходы с одним ведущим
@@ -541,13 +575,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     shifted_from: str | None = None
     lead_repeat = int(state.get("lead_repeat") or 0)
     lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
-    if (
-        not no_client_reply
-        and step is not None
-        and prev_step_id
-        and step.id == prev_step_id
-        and len(head) > 1
-    ):
+    if step is not None and prev_step_id and step.id == prev_step_id and len(head) > 1:
         shifted_from = step.id
         step = head[1]
         lead_repeat = 1
@@ -653,16 +681,16 @@ def _build_respond_messages(
         script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
     )
     turn_mode: TurnMode = "normal"
-    if turn_kind == "pull":
-        turn_mode = "pull"
-    elif (
+    if (
         settings.lead_repeat_threshold > 0
         and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
     ):
         turn_mode = "repeat"
+    elif turn_kind == "pull":
+        turn_mode = "pull"
     return build_turn_messages(
         script=script,
-        steps=list(head),
+        steps=_lead_first(head, lead),
         profile=profile,
         facts=facts,
         history=history,
@@ -717,7 +745,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     is_silence = turn_kind == "silence"
 
     digest = reply_hash(user_text) if user_text else ""
-    lead = head[0] if head else None
+    lead = _lead_of(head, _current_step(state))
     lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
     use_ladder = bool(lead_missing) and not is_continuation and not is_silence
 
@@ -771,10 +799,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         step_prefix = f"ступень {step}, " if step is not None else ""
         lead_count = int(state.get("lead_repeat") or 0)
         turn_mode: TurnMode = "normal"
-        if turn_kind == "pull":
-            turn_mode = "pull"
-        elif settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
+        if settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
             turn_mode = "repeat"
+        elif turn_kind == "pull":
+            turn_mode = "pull"
         if turn_mode == "pull":
             lead_hint = ", режим pull, вытаскивание"
         elif settings.lead_repeat_threshold > 0:
@@ -961,7 +989,16 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             conversation_ended = bool(ctx.conversation_ended)
             patch["conversation_ended"] = conversation_ended
         if spoken_text:
-            ctx = ctx.model_copy(update={"last_agent_reply": spoken_text})
+            ctx = ctx.model_copy(
+                update={
+                    "last_agent_reply": spoken_text,
+                    "transcript": append_agent(
+                        ctx.transcript,
+                        turn=int(state.get("turn") or 0),
+                        text=spoken_text,
+                    ),
+                }
+            )
             ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
             conversation_context = ctx_patch["conversation_context"]
 
@@ -991,7 +1028,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     stage(
         "commit",
         (
-            f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
+            f"сгенерировано {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
             f"ожидание продолжения={expect_continuation}, "
             f"разговор закончен={conversation_ended}"
             if spoken_text
