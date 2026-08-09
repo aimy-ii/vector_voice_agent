@@ -136,6 +136,22 @@ def last_agent_text(messages: Sequence[BaseMessage]) -> str:
     return ""
 
 
+def agent_texts(messages: Sequence[BaseMessage]) -> list[str]:
+    """Все непустые реплики бота из снимка, в порядке появления.
+
+    Снимок содержит и служебные фразы бота — оклики проверки связи. Поэтому
+    судить о доставке по одной последней реплике нельзя: оклик встаёт после
+    настоящей реплики и делает вид, что её не было.
+
+    Args:
+        messages: снимок разговора от бота.
+
+    Returns:
+        Список текстов реплик бота; пустой, если бот не говорил.
+    """
+    return [text_of(m) for m in messages if isinstance(m, AIMessage) and text_of(m).strip()]
+
+
 def is_first_turn(messages: Sequence[BaseMessage]) -> bool:
     """Первый ли это содержательный ход бота в звонке.
 

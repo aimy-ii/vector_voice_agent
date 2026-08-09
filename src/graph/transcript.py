@@ -133,23 +133,27 @@ def to_messages(entries: Sequence[TranscriptEntry]) -> list[BaseMessage]:
 def reconcile_last_agent(
     entries: Sequence[TranscriptEntry],
     *,
-    spoken: str,
+    aired: Sequence[str],
 ) -> list[TranscriptEntry]:
     """Приводит последнюю реплику бота в истории к тому, что ушло в эфир.
 
     Реплика ложится в историю в момент генерации: иначе при нескольких ходах
     подряд модель не видит собственных слов и повторяется. Но в эфир она может
     уйти не вся или не уйти вовсе — человек перебил, или следующий ход обогнал
-    предыдущий. К началу следующего хода это уже известно: в снимке бота лежит
-    то, что действительно прозвучало.
+    предыдущий. К началу следующего хода это известно: в снимке бота лежит то,
+    что действительно прозвучало.
 
-    Правится только последняя запись бота. Списки не сшиваются: всё, что
-    старше, уже сверено на предыдущих ходах. Сверка вызывается только когда
-    в снимке есть реплики бота; пустой снимок историю не трогает.
+    Ищем запись среди всех реплик бота в снимке, а не только в последней:
+    после реплики бот мог сказать служебную фразу — оклик проверки связи, — и
+    сравнение с последней решило бы, что реплика не прозвучала.
+
+    Правится только последняя запись. Списки не сшиваются: всё, что старше,
+    сверено на предыдущих ходах. Пустой снимок историю не трогает: снимка может
+    не быть вовсе, и сверка молча съела бы разговор.
 
     Args:
         entries: накопленная история.
-        spoken: последняя реплика бота из снимка; пустая — бот не говорил.
+        aired: тексты реплик бота из снимка.
 
     Returns:
         История, где последняя запись бота равна прозвучавшему тексту.
@@ -158,11 +162,15 @@ def reconcile_last_agent(
     body = list(entries)
     if not body or body[-1].role != ROLE_AGENT:
         return body
-    said = (spoken or "").strip()
-    planned = body[-1].text
-    if said == planned:
+    said = [(text or "").strip() for text in aired]
+    said = [text for text in said if text]
+    if not said:
         return body
-    if said and planned.startswith(said):
-        body[-1] = body[-1].model_copy(update={"text": said})
+    planned = body[-1].text
+    if planned in said:
+        return body
+    partial = [text for text in said if planned.startswith(text)]
+    if partial:
+        body[-1] = body[-1].model_copy(update={"text": max(partial, key=len)})
         return body
     return body[:-1]
