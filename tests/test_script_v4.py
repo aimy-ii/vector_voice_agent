@@ -357,3 +357,57 @@ def test_скрипт_без_сводки_читается_с_пустым_по�
     assert raw.summary == ""
     compiled = build_script(raw)
     assert compiled.summary == ""
+
+
+@pytest.mark.parametrize("step_id", ["branch", "discount_check", "tariff", "price_lock"])
+def test_v4_шаги_с_реакцией_имеют_строку_закрытия(script_v4, step_id):
+    """Строка «Шаг закрыт, когда…» стоит до строки «Зачем:»."""
+    lines = script_v4.step(step_id).requirements.split("\n")
+    closed_at = next(i for i, line in enumerate(lines) if line.startswith("Шаг закрыт, когда"))
+    why_at = next(i for i, line in enumerate(lines) if line.startswith("Зачем:"))
+    assert closed_at < why_at
+
+
+def test_v4_закрытие_branch_требует_согласия(script_v4):
+    """Закрытие branch: согласие на офис; названный без подтверждения не закрывает."""
+    req = script_v4.step("branch").requirements
+    assert "согласился на конкретный офис" in req
+    assert "Названный, но не подтверждённый филиал шаг не закрывает" in req
+
+
+def test_v4_закрытие_discount_check_имеет_выход_без_льгот(script_v4):
+    """Закрытие discount_check: ответ по категории или сразу, если льгот нет."""
+    req = script_v4.step("discount_check").requirements
+    assert "ответил, попадает он под категорию" in req
+    assert "Льготных категорий в данных города нет" in req
+
+
+def test_v4_закрытие_tariff_покрывает_единственный_тариф(script_v4):
+    """Закрытие tariff: выбор тарифа или сообщение, что вариант один."""
+    req = script_v4.step("tariff").requirements
+    assert "выбрал тариф" in req
+    assert "если тариф один" in req
+
+
+def test_v4_закрытие_price_lock_требует_согласия(script_v4):
+    """Закрытие price_lock: согласие закрепить условия."""
+    req = script_v4.step("price_lock").requirements
+    assert "согласился закрепить условия" in req
+
+
+@pytest.mark.parametrize("step_id", ["branch", "price_lock"])
+def test_v4_короткое_согласие_засчитывается(script_v4, step_id):
+    """Короткое согласие по смыслу засчитывается; молчание — нет."""
+    req = script_v4.step(step_id).requirements
+    assert "важен смысл ответа, а не его длина" in req
+    assert "молчание и уход от ответа согласием не считаются" in req
+
+
+def test_v4_требования_остальных_шагов_не_изменились(script_v4):
+    """Строка закрытия только у четырёх новых шагов плюс greeting и messenger."""
+    allowed = {"branch", "discount_check", "tariff", "price_lock", "greeting", "messenger"}
+    for step_id, step in script_v4.steps.items():
+        if step_id in allowed:
+            continue
+        lines = step.requirements.split("\n")
+        assert not any(line.startswith("Шаг закрыт, когда") for line in lines), step_id
