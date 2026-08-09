@@ -468,7 +468,11 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     turn_now = int(state.get("turn") or 0) + 1
     ctx_in = await _load_context(state)
     before = list(ctx_in.transcript)
-    entries = reconcile_last_agent(before, spoken=last_agent_text(snapshot))
+    entries = before
+    # Пустой снимок ≠ «не прозвучало»: снимка может не быть вовсе, и тогда
+    # сверка молча съела бы историю. Сверяем, только если бот в снимке говорил.
+    if count_agent_messages(snapshot):
+        entries = reconcile_last_agent(before, spoken=last_agent_text(snapshot))
     if len(entries) < len(before):
         log.info("[transcript] реплика прошлого хода не прозвучала, убрана из истории")
     elif entries and before and entries[-1].text != before[-1].text:
