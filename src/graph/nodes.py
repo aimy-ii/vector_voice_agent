@@ -66,7 +66,7 @@ from graph.resolvers import (
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
-from graph.transcript import append_agent, append_client, to_messages
+from graph.transcript import append_agent, append_client, reconcile_last_agent, to_messages
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -467,7 +467,16 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     snapshot = strip_system(state.get("messages") or [])
     turn_now = int(state.get("turn") or 0) + 1
     ctx_in = await _load_context(state)
-    entries = list(ctx_in.transcript)
+    before = list(ctx_in.transcript)
+    entries = reconcile_last_agent(before, spoken=last_agent_text(snapshot))
+    if len(entries) < len(before):
+        log.info("[transcript] реплика прошлого хода не прозвучала, убрана из истории")
+    elif entries and before and entries[-1].text != before[-1].text:
+        log.info(
+            "[transcript] реплика прошлого хода прозвучала частично: %d из %d симв.",
+            len(entries[-1].text),
+            len(before[-1].text),
+        )
     if not _no_client_reply(_turn_kind()):
         entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
     if entries != ctx_in.transcript:
@@ -521,8 +530,8 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     реплики клиента (``continuation`` / ``silence``) пометки и счётчики
     не трогаем.
 
-    Если на ходе с репликой клиента ведущий снова совпал с шагом прошлого
-    хода — берём следующий открытый из шапки (шапка сама не меняется).
+    Если ведущий снова совпал с шагом прошлого хода — берём следующий
+    открытый из шапки на любом виде хода (шапка сама не меняется).
     Так не ведём повторно шаг, который судья ещё не успел закрыть.
 
     Счётчик ``lead_repeat`` считает подряд идущие ходы с одним ведущим
@@ -565,13 +574,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     shifted_from: str | None = None
     lead_repeat = int(state.get("lead_repeat") or 0)
     lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
-    if (
-        not no_client_reply
-        and step is not None
-        and prev_step_id
-        and step.id == prev_step_id
-        and len(head) > 1
-    ):
+    if step is not None and prev_step_id and step.id == prev_step_id and len(head) > 1:
         shifted_from = step.id
         step = head[1]
         lead_repeat = 1
@@ -677,13 +680,13 @@ def _build_respond_messages(
         script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
     )
     turn_mode: TurnMode = "normal"
-    if turn_kind == "pull":
-        turn_mode = "pull"
-    elif (
+    if (
         settings.lead_repeat_threshold > 0
         and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
     ):
         turn_mode = "repeat"
+    elif turn_kind == "pull":
+        turn_mode = "pull"
     return build_turn_messages(
         script=script,
         steps=_lead_first(head, lead),
@@ -795,10 +798,10 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         step_prefix = f"ступень {step}, " if step is not None else ""
         lead_count = int(state.get("lead_repeat") or 0)
         turn_mode: TurnMode = "normal"
-        if turn_kind == "pull":
-            turn_mode = "pull"
-        elif settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
+        if settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
             turn_mode = "repeat"
+        elif turn_kind == "pull":
+            turn_mode = "pull"
         if turn_mode == "pull":
             lead_hint = ", режим pull, вытаскивание"
         elif settings.lead_repeat_threshold > 0:
@@ -1024,7 +1027,7 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     stage(
         "commit",
         (
-            f"произнесено {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
+            f"сгенерировано {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
             f"ожидание продолжения={expect_continuation}, "
             f"разговор закончен={conversation_ended}"
             if spoken_text

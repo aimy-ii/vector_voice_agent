@@ -128,3 +128,40 @@ def to_messages(entries: Sequence[TranscriptEntry]) -> list[BaseMessage]:
         else:
             out.append(HumanMessage(content=item.text))
     return out
+
+
+def reconcile_last_agent(
+    entries: Sequence[TranscriptEntry],
+    *,
+    spoken: str,
+) -> list[TranscriptEntry]:
+    """Приводит последнюю реплику бота в истории к тому, что ушло в эфир.
+
+    Реплика ложится в историю в момент генерации: иначе при нескольких ходах
+    подряд модель не видит собственных слов и повторяется. Но в эфир она может
+    уйти не вся или не уйти вовсе — человек перебил, или следующий ход обогнал
+    предыдущий. К началу следующего хода это уже известно: в снимке бота лежит
+    то, что действительно прозвучало.
+
+    Правится только последняя запись бота. Списки не сшиваются: всё, что
+    старше, уже сверено на предыдущих ходах.
+
+    Args:
+        entries: накопленная история.
+        spoken: последняя реплика бота из снимка; пустая — бот не говорил.
+
+    Returns:
+        История, где последняя запись бота равна прозвучавшему тексту.
+        Не прозвучавшая запись удаляется, прозвучавшая частично — урезается.
+    """
+    body = list(entries)
+    if not body or body[-1].role != ROLE_AGENT:
+        return body
+    said = (spoken or "").strip()
+    planned = body[-1].text
+    if said == planned:
+        return body
+    if said and planned.startswith(said):
+        body[-1] = body[-1].model_copy(update={"text": said})
+        return body
+    return body[:-1]
