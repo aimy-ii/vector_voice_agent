@@ -43,12 +43,19 @@ services:
       REDIS_URI: redis://vector-agent-redis:6379
       DATABASE_URI: postgres://postgres:postgres@vector-agent-postgres:5432/postgres?sslmode=disable
     extra_hosts:
-      # Общей docker-сети между стеками нет и не будет. Справочник опубликован
-      # на 127.0.0.1:8317 хоста, поэтому из контейнера ходим через шлюз.
-      # Compose справочника при этом не трогаем.
+      # Нужен только при запуске этого compose отдельно от vector-infra:
+      # справочник тогда на порту хоста. В общем стеке VECTOR_KB_URL указывает
+      # на сервис vector-kb в сети vector, и extra_hosts не используется.
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ok || exit 1"]
+      # В образе langgraph build нет curl — тот же приём, что в vector-infra.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ok')",
+        ]
       interval: 10s
       timeout: 3s
       retries: 5
