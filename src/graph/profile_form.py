@@ -34,7 +34,7 @@ class ProfileFormField(BaseModel):
 #: Пометка уточняемого поля в перечне, который видит агент профиля.
 REWRITABLE_MARK = "уточняемое"
 
-#: Форма разговора: восемнадцать полей в порядке появления по скрипту.
+#: Форма разговора: девятнадцать полей в порядке появления по скрипту.
 PROFILE_FORM: tuple[ProfileFormField, ...] = (
     ProfileFormField(key="caller_name", title="Имя звонящего"),
     ProfileFormField(key="city", title="Город обучения"),
@@ -63,6 +63,9 @@ PROFILE_FORM: tuple[ProfileFormField, ...] = (
     ProfileFormField(key="outcome", title="Итог разговора"),
     ProfileFormField(key="second_category", title="Интерес ко второй категории"),
     ProfileFormField(key="messenger", title="Мессенджер для документов"),
+    ProfileFormField(
+        key="caller_phone", title="Номер для переписки, если он не тот, с которого звонят"
+    ),
     ProfileFormField(key="urgency", title="Срочность и сравнение с другими школами"),
 )
 

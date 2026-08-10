@@ -182,6 +182,33 @@ async def get_llm(
     yield chat
 
 
+def _empty_reply_note(result: dict[str, Any] | None, text_field: str | None) -> str:
+    """Короткая справка о том, что модель вернула вместо реплики.
+
+    Строка «Пустой ответ модели» не различает три разных случая: объекта нет
+    вовсе, объект пришёл пустым, объект пришёл с ключами, но поле реплики
+    пустое. Для разбора это разные болезни. Значение поля наружу не выводим —
+    только его тип и длину.
+
+    Args:
+        result: разобранный ответ модели или ``None``.
+        text_field: имя поля с текстом реплики; ``None`` — поле не запрашивалось.
+
+    Returns:
+        Строка вида ``объекта нет`` либо ``ключи [reply], поле 'reply': str, 0 симв.``.
+    """
+    if result is None:
+        return "объекта нет"
+    if not result:
+        return "объект пустой"
+    keys = ", ".join(sorted(str(key) for key in result))
+    if not text_field:
+        return f"ключи [{keys}], поле реплики не запрашивалось"
+    value = result.get(text_field)
+    size = len(value) if isinstance(value, str) else 0
+    return f"ключи [{keys}], поле {text_field!r}: {type(value).__name__}, {size} симв."
+
+
 async def astream_structured(
     llm: ChatOpenAI,
     messages: list[Any],
@@ -245,12 +272,22 @@ async def astream_structured(
                     if text_field is not None:
                         value = result.get(text_field)
                         if not isinstance(value, str) or not value.strip():
+                            log.warning(
+                                "Пустая реплика от модели (попытка %s): %s",
+                                attempt,
+                                _empty_reply_note(result, text_field),
+                            )
                             last = LLMTurnFailed("Пустой ответ модели")
                         else:
                             return result
                     else:
                         return result
                 else:
+                    log.warning(
+                        "Пустой ответ модели (попытка %s): %s",
+                        attempt,
+                        _empty_reply_note(result, text_field),
+                    )
                     last = LLMTurnFailed("Пустой ответ модели")
             except TimeoutError as exc:
                 log.warning(

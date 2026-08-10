@@ -16,8 +16,8 @@ from script.planner import script_head
 from script.source import JsonScriptSource
 
 
-def test_v4_собирается_27_шагов_по_шесть_полей(script_v4):
-    """Скрипт v4 собирается; у каждого шага ровно шесть полей."""
+def test_v4_собирается_27_шагов_по_полям(script_v4):
+    """Скрипт v4 собирается; у каждого шага семь полей, включая form."""
     assert script_v4.is_sales
     assert script_v4.version == "4"
     assert len(script_v4.steps) == 27
@@ -32,8 +32,10 @@ def test_v4_собирается_27_шагов_по_шесть_полей(script
             "requirements",
             "examples",
             "knowledge",
+            "form",
         }
         assert isinstance(dumped["knowledge"], list)
+        assert isinstance(dumped["form"], str)
         if not dumped["knowledge"]:
             empty_knowledge += 1
     assert empty_knowledge == 11
@@ -127,6 +129,7 @@ def test_knowledge_пустой_и_заполненный():
         }
     )
     assert empty.knowledge == []
+    assert empty.form == ""
 
     filled = SalesStep.model_validate(
         {
@@ -150,6 +153,7 @@ def test_knowledge_пустой_и_заполненный():
         }
     )
     assert bare.knowledge == []
+    assert bare.form == ""
 
 
 def test_шапка_v4_по_order_и_потолок(script_v4):
@@ -184,13 +188,14 @@ def test_v1_v2_v3_собираются_как_раньше(script, script_v1, sc
 
 
 def test_промпт_v4_название_требования_образцы(script_v4):
-    """Вывод шага: название, требования, примеры."""
+    """Вывод шага: название, требования, примеры; служебное form не попадает."""
     step = script_v4.step("city")
     lines = _describe_step(step, {}, {}, heading="Шаг")
     text = "\n".join(lines)
     assert "## Выявление города" in text
     assert "**Требования**" in text
-    assert "Записать город в форму как city" in text
+    assert "Спросить город обучения и записать его" in text
+    assert "Записать город в форму как city" not in text
     assert "**Примеры**" in text
     assert "Подскажите, в каком городе планируете обучение?" in text
 
@@ -403,11 +408,100 @@ def test_v4_короткое_согласие_засчитывается(script_
     assert "молчание и уход от ответа согласием не считаются" in req
 
 
-def test_v4_требования_остальных_шагов_не_изменились(script_v4):
-    """Строка закрытия только у четырёх новых шагов плюс greeting и messenger."""
+def test_требования_других_шагов_не_изменились(script_v4):
+    """Кроме вынесенной строки про форму и правки messenger требования не менялись."""
+    import json
+    from pathlib import Path
+
     allowed = {"branch", "discount_check", "tariff", "price_lock", "greeting", "messenger"}
     for step_id, step in script_v4.steps.items():
         if step_id in allowed:
             continue
         lines = step.requirements.split("\n")
         assert not any(line.startswith("Шаг закрыт, когда") for line in lines), step_id
+
+    expected = json.loads(
+        (Path(__file__).resolve().parent / "data" / "v4_requirements_expected.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    for step_id, req in expected.items():
+        if step_id == "messenger":
+            continue
+        assert script_v4.step(step_id).requirements == req, step_id
+
+
+def test_ни_один_шаг_не_говорит_про_форму_в_требованиях(script_v4):
+    """Ни у одного шага requirements не содержит «в форму»."""
+    for step_id, step in script_v4.steps.items():
+        assert "в форму" not in step.requirements, step_id
+
+
+def test_служебные_указания_переехали_в_поле_form(script_v4):
+    """Ровно девятнадцать шагов с непустым form; ключевые поля на месте."""
+    with_form = [s for s in script_v4.steps.values() if s.form.strip()]
+    assert len(with_form) == 19
+    assert "caller_name" in script_v4.step("greeting").form
+    messenger_form = script_v4.step("messenger").form
+    assert "messenger" in messenger_form
+    assert "caller_phone" in messenger_form
+    assert "сворачивает" in script_v4.step("wrap_up").form
+
+
+def test_поле_form_не_попадает_в_промпт_генератора(script_v4):
+    """Служебное form не уходит в системное сообщение генератора."""
+    step = script_v4.step("theory_format")
+    assert step.form
+    assert "Записать в форму" in step.form
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[step],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert "Записать в форму" not in content
+    assert "Предложить выбор формата теории" in content
+
+
+def test_поле_form_не_попадает_в_промпт_судьи(script_v4):
+    """То, что судья получает по шагу, не содержит «Записать в форму»."""
+    from graph.checker import closure_criterion
+    from script.models import SalesStep
+
+    step = script_v4.step("theory_format")
+    assert isinstance(step, SalesStep)
+    assert "Записать в форму" in step.form
+    # Судья для SalesStep получает step.requirements, не step.form.
+    judge_payload = "\n".join(
+        [
+            f"Название: {step.name}",
+            f"Критерий закрытия: {closure_criterion(step)}",
+            f"Требования:\n{step.requirements}",
+        ]
+    )
+    assert "Записать в форму" not in judge_payload
+    assert "Предложить выбор формата теории" in judge_payload
+
+
+def test_messenger_требует_зачитать_номер(script_v4):
+    """В требованиях messenger — зачитать номер обратно целиком, один раз."""
+    req = script_v4.step("messenger").requirements
+    assert "зачитать обратно вслух целиком" in req
+    assert "один раз, в той же реплике" in req
+    assert "третий раз не переспрашивать" in req
+
+
+def test_messenger_не_зачитывает_известный_номер(script_v4):
+    """Номер, с которого звонят, зачитывать не нужно."""
+    assert "зачитывать нечего, он уже известен" in script_v4.step("messenger").requirements
+
+
+def test_messenger_закрытие_не_изменилось(script_v4):
+    """Строка закрытия messenger без изменений."""
+    assert (
+        "Шаг закрыт, когда понятно, на какой номер и в какой мессенджер писать."
+        in script_v4.step("messenger").requirements.split("\n")
+    )
