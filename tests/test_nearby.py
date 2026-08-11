@@ -236,6 +236,56 @@ def test_format_found_адреса_расстояния_ориентиры_по�
     assert "Называть улицу и дом" in text
 
 
+def test_блок_филиалов_разрешает_назвать_второй() -> None:
+    """При сомнении человека — назвать следующий филиал с расстоянием."""
+    items = [
+        {"slug": "a", "address": "ул. А, 1", "landmark": "", "distance_km": 0.5},
+        {"slug": "b", "address": "ул. Б, 2", "landmark": "", "distance_km": 1.0},
+        {"slug": "c", "address": "ул. В, 3", "landmark": "", "distance_km": 1.5},
+    ]
+    text = format_found("метро X", items)
+    assert "назвать следующий по списку вместе с его расстоянием" in text
+
+
+def test_блок_филиалов_не_утверждает_что_ближе_нет() -> None:
+    """Блок не утверждает, что в городе ближе ничего нет."""
+    items = [
+        {"slug": "a", "address": "ул. А, 1", "landmark": "", "distance_km": 0.5},
+        {"slug": "b", "address": "ул. Б, 2", "landmark": "", "distance_km": 1.0},
+        {"slug": "c", "address": "ул. В, 3", "landmark": "", "distance_km": 1.5},
+    ]
+    text = format_found("метро X", items).lower()
+    assert "в городе нет" not in text
+    assert "по всему городу" not in text
+
+
+def test_блок_филиалов_сохраняет_порядок_и_адреса() -> None:
+    """Адреса идут в исходном порядке, нумерация с единицы, расстояния на месте."""
+    items = [
+        {"slug": "a", "address": "ул. А, 1", "landmark": "Ориентир А", "distance_km": 0.5},
+        {"slug": "b", "address": "ул. Б, 2", "landmark": "", "distance_km": 1.0},
+        {"slug": "c", "address": "ул. В, 3", "landmark": "Ориентир В", "distance_km": 2.25},
+    ]
+    text = format_found("метро X", items)
+    assert text.index("ул. А, 1") < text.index("ул. Б, 2") < text.index("ул. В, 3")
+    assert "1." in text.split("\n")[1]
+    assert "2." in text.split("\n")[2]
+    assert "3." in text.split("\n")[3]
+    assert "0,5" in text
+    assert "1,0" in text
+    assert "2,2" in text
+    assert "(Ориентир А)" in text
+    assert "(Ориентир В)" in text
+
+
+def test_блок_филиалов_с_одним_филиалом() -> None:
+    """На списке из одного филиала format_found не падает."""
+    text = format_found("место", [{"slug": "a", "address": "ул. А, 1", "distance_km": 0.3}])
+    assert "ул. А, 1" in text
+    assert "0,3" in text
+    assert "назвать следующий по списку вместе с его расстоянием" in text
+
+
 def test_format_missing_и_searching_содержат_место() -> None:
     """Формулировки missing и searching называют место."""
     assert "Солнечный" in format_missing("Солнечный")

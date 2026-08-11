@@ -271,9 +271,14 @@ async def test_возражение_не_пишет_asides_и_resume(
     assert state["profile"].get("urgency") != "думает"
 
 
-async def test_модель_не_ответила_в_эфир_идёт_заглушка(
-    spoken, store, checker, kb, resolvers, model, script, use_v2, caplog
+async def test_аварийная_реплика_звучит_на_обычном_ходе(
+    spoken, store, checker, kb, resolvers, model, script, use_v2, caplog, monkeypatch
 ):
+    """На обычном ходе (turn_kind=client) при сбое модели в эфир идёт заглушка."""
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": "client", "thread_id": "local"}},
+    )
     model["result"] = LLMTurnFailed("бюджет хода исчерпан")
     with caplog.at_level("WARNING"):
         state = await graph.ainvoke({"messages": [HumanMessage(content="Здравствуйте")]})
@@ -281,6 +286,49 @@ async def test_модель_не_ответила_в_эфир_идёт_загл�
     assert state["last_error"]
     assert any("Подстановка фолбэка" in rec.message for rec in caplog.records)
     assert any("бюджет хода исчерпан" in rec.message for rec in caplog.records)
+
+
+async def test_аварийная_реплика_молчит_на_ходе_вытаскивания(
+    spoken, store, checker, kb, resolvers, model, script, use_v2, monkeypatch
+):
+    """На turn_kind=pull аварийная реплика в эфир не уходит."""
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": "pull", "thread_id": "local"}},
+    )
+    model["result"] = LLMTurnFailed("Пустой ответ модели")
+    state = await graph.ainvoke(
+        {
+            "messages": [AIMessage(content="Как Вас зовут?")],
+            "turn_kind": "pull",
+        }
+    )
+    spoken_text = "".join(spoken)
+    assert script.params.fallback not in spoken_text
+    assert spoken_text == ""
+    assert state.get("last_error")
+
+
+@pytest.mark.parametrize("kind", ["silence", "continuation"])
+async def test_аварийная_реплика_молчит_на_молчании_и_продолжении(
+    spoken, store, checker, kb, resolvers, model, script, use_v2, monkeypatch, kind
+):
+    """На silence и continuation аварийная реплика в эфир не уходит."""
+    monkeypatch.setattr(
+        "graph.nodes.get_config",
+        lambda: {"configurable": {"turn_kind": kind, "thread_id": "local"}},
+    )
+    model["result"] = LLMTurnFailed("Пустой ответ модели")
+    state = await graph.ainvoke(
+        {
+            "messages": [AIMessage(content="Как Вас зовут?")],
+            "turn_kind": kind,
+        }
+    )
+    spoken_text = "".join(spoken)
+    assert script.params.fallback not in spoken_text
+    assert spoken_text == ""
+    assert state.get("last_error")
 
 
 async def test_версия_скрипта_фиксируется_в_состоянии(

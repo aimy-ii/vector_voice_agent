@@ -112,7 +112,8 @@ def test_profile_fields_of_v4_из_формы(script_v4):
     assert pairs == field_pairs()
     keys = [key for key, _title in pairs]
     assert "location_hint" in keys
-    assert len(keys) == 18
+    assert "caller_phone" in keys
+    assert len(keys) == 19
 
 
 def test_profile_fields_of_старый_формат_из_скрипта(script):

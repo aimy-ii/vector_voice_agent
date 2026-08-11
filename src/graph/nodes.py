@@ -844,11 +844,19 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             reason_fail = str(exc) or "неизвестная причина"
             log.warning("Подстановка фолбэка: %s", reason_fail)
             last_error = str(exc)
-            if not streamed:
+            if streamed:
+                stage("respond", "модель оборвалась, в эфир ушло начатое", "done")
+            elif _no_client_reply(turn_kind):
+                # Ход затеял бот, человек молчал. Аварийная реплика просит
+                # повторить сказанное — повторять нечего, и вместо помощи
+                # выходит нелепость. Молчим: дальше отработает штатная
+                # лестница окликов на стороне бота.
+                stage("respond", "модель не ответила, реплики человека не было — молчим", "done")
+            else:
                 say(script.params.fallback)
                 spoken.append(script.params.fallback)
                 streamed.append(script.params.fallback)
-            stage("respond", "модель не ответила, отдана аварийная реплика", "done")
+                stage("respond", "модель не ответила, отдана аварийная реплика", "done")
             last_result = TurnResult(reply="".join(streamed))
             return "".join(streamed)
 

@@ -257,6 +257,12 @@ def format_found(place: str, items: Sequence[Mapping[str, Any]]) -> str:
         tail = f" ({landmark})" if landmark else ""
         lines.append(f"{number}. {address} — {_km(item.get('distance_km'))} км{tail}")
     lines.append("Первый — ближайший, о нём и речь. Остальные — только если первый не подошёл.")
+    lines.append(
+        "Человек засомневался, замялся или спросил, есть ли ближе, — назвать "
+        "следующий по списку вместе с его расстоянием, чтобы было с чем "
+        "сравнить. Согласие и молчание сомнением не считаются: там просто "
+        "идём дальше."
+    )
     lines.append("Называть улицу и дом; ориентир добавляется к адресу, а не вместо него.")
     return "\n".join(lines)
 
