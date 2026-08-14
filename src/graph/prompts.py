@@ -16,7 +16,7 @@ from typing import Any, Literal, Mapping, Sequence
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.config import settings
-from graph.context import DYN_MISSING, DYN_READY
+from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING
 from graph.names import given_name
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
@@ -222,6 +222,20 @@ LEAD_REPEAT_OVERRIDES: dict[str, str] = {
     ),
 }
 
+#: Замены правил речи для хода вытаскивания. Три правила — как в
+#: ``LEAD_REPEAT_OVERRIDES``; правило перехода (``RULE_MOVE_ON``) своё:
+#: по текущей теме идём, пока есть чем, иначе берём незакрытое.
+LEAD_PULL_OVERRIDES: dict[str, str] = {
+    **LEAD_REPEAT_OVERRIDES,
+    RULE_MOVE_ON: (
+        "По текущей теме продвигаемся, пока есть чем: довод, уточнение, "
+        "следующий вопрос по существу. Когда по ней данных нет или человек "
+        "уже ответил — брать незакрытое из раздела «ЕЩЁ НЕ ЗАКРЫТО», а не "
+        "топтаться на месте. Исключение — реплика ожидания, пока данные "
+        "готовятся: ход к человеку не нужен."
+    ),
+}
+
 #: Врезка в начало раздела «СЕЙЧАС ГОВОРИМ ОБ ЭТОМ» на повторном заходе.
 LEAD_REPEAT_INTRO: str = (
     "Эту тему ты ведёшь не первый ход подряд, и ответа она не дала. Посмотри весь "
@@ -233,12 +247,15 @@ LEAD_REPEAT_INTRO: str = (
 #: Раздел с задачей хода вытаскивания. Встаёт перед разделом текущего шага:
 #: тема и требования подаются штатно, меняется только задача хода.
 PULL_TASK: str = (
-    "Человек молчит после твоей реплики. Если ты обещал что-то рассказать — "
-    "расскажи сейчас, коротко. Если не обещал — не начинай новую тему.\n\n"
-    "Закончи вопросом, на который нельзя ответить одним «да»: он должен "
-    "требовать выбора или решения по тому, о чём ты только что говорил.\n\n"
-    "Спрашивать, понятно ли, всё ли ясно и остались ли вопросы — ошибка. "
-    "Пересказывать уже прозвучавшее — ошибка."
+    "Человек молчит после твоей реплики. Разговор нужно вести дальше, "
+    "а не ждать ответа.\n\n"
+    "Если по текущему шагу есть чем продвинуться — продвинь его: довод, "
+    "уточнение, следующий вопрос по существу. Если по текущему шагу данных "
+    "нет или человек уже дал по нему ответ — возьми незакрытое из раздела "
+    "«ЕЩЁ НЕ ЗАКРЫТО» и веди его.\n\n"
+    "Повторять последнюю мысль, пересказывать её другими словами и заново "
+    "перечислять уже названное — ошибка. Закончи вопросом, который требует "
+    "выбора или решения, а не проверки понимания."
 )
 
 #: Запрет озвучивать служебную механику — ровно одно вхождение в персоне.
@@ -408,18 +425,26 @@ TurnMode = Literal["normal", "repeat", "pull"]
 def speech_rules_block(*, mode: TurnMode = "normal") -> str:
     """Собирает нумерованный список правил речи.
 
+    Последним пунктом во всех режимах идёт жёсткий запрет называть факты
+    вне переданных данных (``_HARD_FACT_BAN``).
+
     Args:
-        mode: режим сборки хода. При ``repeat`` и ``pull`` часть правил
-            берётся из ``LEAD_REPEAT_OVERRIDES``. При ``normal`` список
-            штатный, символ в символ.
+        mode: режим сборки хода. При ``repeat`` часть правил берётся из
+            ``LEAD_REPEAT_OVERRIDES``. При ``pull`` — из
+            ``LEAD_PULL_OVERRIDES``. При ``normal`` список штатный,
+            символ в символ, плюс последний пункт-запрет.
 
     Returns:
         Правила речи одной строкой, по одному правилу на строку.
     """
     rules = SPEECH_RULES
-    if mode in {"repeat", "pull"}:
+    if mode == "repeat":
         rules = tuple(LEAD_REPEAT_OVERRIDES.get(rule, rule) for rule in rules)
-    return "\n".join(f"{index}. {rule}" for index, rule in enumerate(rules))
+    elif mode == "pull":
+        rules = tuple(LEAD_PULL_OVERRIDES.get(rule, rule) for rule in rules)
+    numbered = [f"{index}. {rule}" for index, rule in enumerate(rules)]
+    numbered.append(f"{len(rules)}. {_HARD_FACT_BAN}")
+    return "\n".join(numbered)
 
 
 def profile_block(
@@ -542,7 +567,7 @@ _EXAMPLES_PREFIX = (
 
 
 #: Жёсткий запрет называть факты вне переданных данных — одна формулировка
-#: для коротких сборок (silence / filler / waiting).
+#: для последнего пункта правил речи и коротких сборок (filler / waiting).
 _HARD_FACT_BAN = (
     "Жёсткий запрет: не называть цифр, цен, сроков, адресов, дат и "
     "названий, которых нет в переданных данных."
@@ -691,6 +716,8 @@ def next_step_block(
     step: AnyStep,
     profile: Mapping[str, str],
     facts: Mapping[str, Any],
+    *,
+    context_text: str | None = None,
 ) -> str:
     """Описывает следующий шаг как ориентир: только название и требования.
 
@@ -698,12 +725,23 @@ def next_step_block(
         step: следующий незакрытый шаг после перечня.
         profile: профиль для ветвления текста.
         facts: факты хода для подстановки.
+        context_text: документ контекста для проверки ``knowledge``.
+            ``None`` (по умолчанию) — прежнее поведение, без раздела
+            о нехватке: так собирается ориентир «ЧТО ДАЛЬШЕ».
+            Строка, в том числе пустая, — проверить knowledge и при
+            отсутствии данных дописать ``**Не хватает данных**``.
 
     Returns:
-        Текст раздела «ЧТО ДАЛЬШЕ» без примеров.
+        Текст раздела «ЧТО ДАЛЬШЕ» без примеров; для висящего шага —
+        то же плюс нехватка данных, если передан ``context_text``.
     """
     if isinstance(step, SalesStep):
-        return f"## {step.name}\n\n**Требования**\n{step.requirements}"
+        text = f"## {step.name}\n\n**Требования**\n{step.requirements}"
+        if context_text is not None:
+            gap = _missing_knowledge_line(step, context_text=context_text, facts=facts)
+            if gap:
+                text = f"{text}\n\n**Не хватает данных**\n{gap}"
+        return text
 
     lines = [
         f"## {step.goal}",
@@ -790,7 +828,9 @@ def steps_block(
         parts.append(now)
 
     if len(steps) > 1:
-        hang_body = "\n\n".join(next_step_block(step, profile, facts) for step in steps[1:])
+        hang_body = "\n\n".join(
+            next_step_block(step, profile, facts, context_text=context_text) for step in steps[1:]
+        )
         hang = _section("ЕЩЁ НЕ ЗАКРЫТО", hang_body)
         if hang:
             parts.append(hang)
@@ -862,8 +902,10 @@ def facts_block(facts: Mapping[str, Any]) -> str:
 def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
     """Инструкция генератору по статусу динамики контекста.
 
-    Ветка ``DYN_SEARCHING`` сюда не входит — её обслуживает
-    ``build_waiting_messages``.
+    ``DYN_MISSING`` — данных нет, вести разговор по известному.
+    ``DYN_SEARCHING`` — данные готовятся; цифры по этому предмету
+    не называть, если тема всплыла — честно сказать, что уточняем.
+    ``DYN_READY`` и прочие — пустая строка.
 
     Args:
         status: ``dynamic_status`` из контекста.
@@ -881,6 +923,13 @@ def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
             "предложить прислать подробности в переписку, но только там, где "
             "разговор до мессенджера дошёл, а не посреди другой темы."
         )
+    if status == DYN_SEARCHING:
+        return (
+            "По нужному факту данные сейчас готовятся. Называть цифры, цены, "
+            "сроки, адреса и даты по этому предмету нельзя ни в каком виде. "
+            "Если тема всплыла — честно обозначить, что уточняем, и вести "
+            "разговор дальше по тому, что известно."
+        )
     if status == DYN_READY:
         return ""
     return ""
@@ -897,12 +946,12 @@ def continuation_block(*, turn_kind: str) -> str:
 
     Args:
         turn_kind: вид хода; блок нужен всем ходам без реплики человека —
-            ``continuation`` и ``silence``.
+            ``continuation``, ``silence`` и ``pull``.
 
     Returns:
         Текстовый блок или пустая строка для обычного хода по реплике человека.
     """
-    if turn_kind not in {"continuation", "silence"}:
+    if turn_kind not in {"continuation", "silence", "pull"}:
         return ""
     return "Реплики человека не было: он молчит, разговор продолжается."
 

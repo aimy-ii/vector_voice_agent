@@ -18,9 +18,12 @@ from graph.facts import (
     needs_of,
 )
 from graph.prompts import (
+    _HARD_FACT_BAN,
     _NO_MECHANICS,
+    LEAD_PULL_OVERRIDES,
     LEAD_REPEAT_INTRO,
     LEAD_REPEAT_OVERRIDES,
+    PULL_TASK,
     RULE_MOVE_ON,
     RULE_NO_OPEN_QUESTIONS,
     RULE_NO_VERBATIM,
@@ -30,9 +33,12 @@ from graph.prompts import (
     aside_block,
     build_turn_messages,
     context_block,
+    continuation_block,
+    dynamic_status_block,
     facts_block,
     fill_facts,
     naturalness_block,
+    next_step_block,
     persona_block,
     profile_block,
     speech_rules_block,
@@ -1568,8 +1574,8 @@ def test_приказ_не_совпадать_с_образцами_дослов
 
 
 def test_жёсткий_запрет_фактов_вне_данных(script):
-    """В полной сборке — правило про данные как есть; жёсткий запрет — в коротких."""
-    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+    """В полной сборке — правило про данные как есть и жёсткий запрет; в коротких — запрет."""
+    from graph.prompts import build_filler_messages
 
     messages = build_turn_messages(
         script=script,
@@ -1581,6 +1587,7 @@ def test_жёсткий_запрет_фактов_вне_данных(script):
     )
     content = messages[0].content
     assert "из переданных данных как есть" in content
+    assert _HARD_FACT_BAN in content
     filler = build_filler_messages(script, messages=[], history_limit=2)
     assert _HARD_FACT_BAN in filler[0].content
 
@@ -1736,9 +1743,8 @@ def test_правила_речи_и_короткие_сборки_без_ука�
 
 
 def test_жёсткий_запрет_фактов_во_всех_сборках(script):
-    """Жёсткий запрет на факты вне данных — в коротких сборках; в полной — правило данных."""
+    """Жёсткий запрет на факты вне данных — в полной сборке и в коротких."""
     from graph.prompts import (
-        _HARD_FACT_BAN,
         build_filler_messages,
         build_waiting_messages,
     )
@@ -1752,6 +1758,7 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         asides_done=[],
     )[0].content
     assert "из переданных данных как есть" in full
+    assert _HARD_FACT_BAN in full
     filler = build_filler_messages(
         script,
         messages=[HumanMessage(content="?")],
@@ -1765,7 +1772,7 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         step=script.step("price"),
         history_limit=2,
     )[0].content
-    for content in (filler, waiting):
+    for content in (filler, waiting, full):
         assert _HARD_FACT_BAN in content
 
 
@@ -2226,7 +2233,7 @@ def test_speech_rules_block_repeat_подменяет_четыре_правил�
     repeated = speech_rules_block(mode="repeat")
     staff_lines = staff.splitlines()
     repeated_lines = repeated.splitlines()
-    assert len(staff_lines) == len(repeated_lines) == len(SPEECH_RULES)
+    assert len(staff_lines) == len(repeated_lines) == len(SPEECH_RULES) + 1
     changed = sum(
         1 for left, right in zip(staff_lines, repeated_lines, strict=True) if left != right
     )
@@ -2268,7 +2275,7 @@ def test_speech_rules_block_pull_подменяет_четыре_правила(
     """При ``mode="pull"`` подменённые правила отличаются от штатных, число то же."""
     staff = speech_rules_block(mode="normal")
     pulled = speech_rules_block(mode="pull")
-    assert len(staff.splitlines()) == len(pulled.splitlines()) == len(SPEECH_RULES)
+    assert len(staff.splitlines()) == len(pulled.splitlines()) == len(SPEECH_RULES) + 1
     assert staff != pulled
     changed = sum(
         1
@@ -2394,3 +2401,145 @@ def test_правило_про_прощание_во_всех_режимах():
         assert "буду ждать Вас" in block
         assert "после того, как простился сам собеседник" in block
         assert "Подтверждение договорённости о встрече прощанием не является" in block
+
+
+#: Прежний текст ``dynamic_status_block`` при ``DYN_MISSING`` — без изменений.
+_MISSING_STATUS_TEXT = (
+    "По нужному факту в данных ничего нет. Вслух об этом не сообщать, "
+    "не извиняться и не объявлять о пробеле. Вести разговор дальше по "
+    "тому, что известно — не выдумывать. Если по смыслу уместно — "
+    "предложить прислать подробности в переписку, но только там, где "
+    "разговор до мессенджера дошёл, а не посреди другой темы."
+)
+
+#: Редакция правила 17 для ``repeat`` — не менялась.
+_REPEAT_MOVE_ON = (
+    "По текущей теме человек ещё не ответил, и ответ сейчас нужен. Уходить "
+    "на следующую тему рано: реплика обязана вести к слову собеседника. "
+    "Исключение — реплика ожидания, пока данные готовятся: ход к человеку не нужен."
+)
+
+
+def test_speech_rules_block_жёсткий_запрет_во_всех_режимах():
+    """В каждом режиме последний пункт — жёсткий запрет; нумерация и порядок на месте."""
+    last_index = len(SPEECH_RULES)
+    for mode in ("normal", "repeat", "pull"):
+        block = speech_rules_block(mode=mode)
+        lines = block.splitlines()
+        assert _HARD_FACT_BAN in block
+        assert lines[-1] == f"{last_index}. {_HARD_FACT_BAN}"
+        assert len(lines) == last_index + 1
+        for index, line in enumerate(lines):
+            assert line.startswith(f"{index}. ")
+        if mode == "normal":
+            for index, rule in enumerate(SPEECH_RULES):
+                assert lines[index] == f"{index}. {rule}"
+
+
+def test_next_step_block_без_context_text_прежнее_поведение(script_v4):
+    """Без ``context_text`` для SalesStep — ровно название и требования."""
+    step = script_v4.step("terms")
+    assert step.knowledge
+    expected = f"## {step.name}\n\n**Требования**\n{step.requirements}"
+    assert next_step_block(step, {}, {}) == expected
+
+
+def test_next_step_block_нехватка_данных_по_контексту(script_v4):
+    """С контекстом без данных — раздел о нехватке; с данными — без него."""
+    step = script_v4.step("terms")
+    assert step.knowledge
+    missing = next_step_block(step, {}, {}, context_text="Город: Пермь")
+    assert "**Не хватает данных**" in missing
+    assert "В контексте нет данных:" in missing
+    assert step.name in missing
+    present_ctx = "срок обучения по городу: 2 месяца; время до первого занятия по вождению: 3 дня"
+    present = next_step_block(step, {}, {}, context_text=present_ctx)
+    assert "**Не хватает данных**" not in present
+    assert present == f"## {step.name}\n\n**Требования**\n{step.requirements}"
+
+
+def test_steps_block_висящий_шаг_нехватка_данных(script_v4):
+    """У висящего шага раздел о нехватке появляется, если данных в контексте нет."""
+    current = script_v4.step("city")
+    hang = script_v4.step("terms")
+    assert hang.knowledge
+    block = steps_block([current, hang], {}, {}, context_text="Город: Пермь")
+    hang_part = block.split("# ЕЩЁ НЕ ЗАКРЫТО", 1)[1]
+    assert "**Не хватает данных**" in hang_part
+    assert "В контексте нет данных:" in hang_part
+    filled = "срок обучения по городу: 2 месяца; время до первого занятия по вождению: 3 дня"
+    ok = steps_block([current, hang], {}, {}, context_text=filled)
+    hang_ok = ok.split("# ЕЩЁ НЕ ЗАКРЫТО", 1)[1]
+    assert "**Не хватает данных**" not in hang_ok
+
+
+def test_dynamic_status_block_поиск_и_не_нашлось():
+    """``DYN_SEARCHING`` — непустой текст; ``DYN_MISSING`` — прежний текст."""
+    from graph.context import DYN_MISSING, DYN_SEARCHING
+
+    searching = dynamic_status_block(status=DYN_SEARCHING)
+    assert searching
+    lowered = searching.lower()
+    assert "готовятся" in lowered
+    assert "цифры" in lowered
+    assert "уточняем" in lowered
+    assert dynamic_status_block(status=DYN_MISSING) == _MISSING_STATUS_TEXT
+
+
+def test_continuation_block_pull_та_же_отметка_что_у_молчания():
+    """На ``pull`` — та же отметка молчания, что на continuation и silence."""
+    silence_fact = "Реплики человека не было: он молчит, разговор продолжается."
+    assert continuation_block(turn_kind="pull") == silence_fact
+    assert continuation_block(turn_kind="continuation") == silence_fact
+    assert continuation_block(turn_kind="silence") == silence_fact
+    assert continuation_block(turn_kind="client") == ""
+
+
+def test_pull_task_без_обещания_и_запрета_новой_темы():
+    """``PULL_TASK`` не держит модель на уже сказанном и не запрещает новую тему."""
+    lowered = PULL_TASK.lower()
+    assert "расскажи, что обещал" not in lowered
+    assert "если ты обещал" not in lowered
+    assert "не начинай новую тему" not in lowered
+    assert "если не обещал" not in lowered
+
+
+def test_правило_17_pull_отличается_от_repeat():
+    """Правило 17 в ``pull`` своё; редакция ``repeat`` не изменилась."""
+    move_index = SPEECH_RULES.index(RULE_MOVE_ON)
+    assert move_index == 17
+    assert LEAD_REPEAT_OVERRIDES[RULE_MOVE_ON] == _REPEAT_MOVE_ON
+    repeat_lines = speech_rules_block(mode="repeat").splitlines()
+    pull_lines = speech_rules_block(mode="pull").splitlines()
+    assert repeat_lines[move_index] == f"{move_index}. {_REPEAT_MOVE_ON}"
+    assert pull_lines[move_index] != repeat_lines[move_index]
+    assert "Уходить на следующую тему рано" in repeat_lines[move_index]
+    assert "Уходить на следующую тему рано" not in pull_lines[move_index]
+    assert LEAD_PULL_OVERRIDES[RULE_MOVE_ON] in pull_lines[move_index]
+    assert "не топтаться" in pull_lines[move_index]
+
+
+def test_сборка_pull_молчание_запрет_нехватка(script_v4):
+    """Pull, два шага, пустой контекст: молчание, запрет фактов, нехватка у обоих."""
+    current = script_v4.step("terms")
+    hang = script_v4.step("theory_format")
+    assert current.knowledge and hang.knowledge
+    silence_fact = continuation_block(turn_kind="pull")
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[current, hang],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        context_text="",
+        mode="pull",
+        turn_kind="pull",
+    )
+    content = messages[0].content
+    assert silence_fact in content
+    assert _HARD_FACT_BAN in content
+    now = _top_section(content, "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    hang_part = _top_section(content, "ЕЩЁ НЕ ЗАКРЫТО")
+    assert "**Не хватает данных**" in now
+    assert "**Не хватает данных**" in hang_part
