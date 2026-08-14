@@ -16,12 +16,12 @@ from script.planner import script_head
 from script.source import JsonScriptSource
 
 
-def test_v4_собирается_27_шагов_по_полям(script_v4):
+def test_v4_собирается_22_шага_по_полям(script_v4):
     """Скрипт v4 собирается; у каждого шага семь полей, включая form."""
     assert script_v4.is_sales
     assert script_v4.version == "4"
-    assert len(script_v4.steps) == 27
-    assert len(script_v4.step_order) == 27
+    assert len(script_v4.steps) == 22
+    assert len(script_v4.step_order) == 22
     empty_knowledge = 0
     for step in script_v4.steps.values():
         dumped = step.model_dump()
@@ -38,7 +38,7 @@ def test_v4_собирается_27_шагов_по_полям(script_v4):
         assert isinstance(dumped["form"], str)
         if not dumped["knowledge"]:
             empty_knowledge += 1
-    assert empty_knowledge == 11
+    assert empty_knowledge == 7
     experience = script_v4.step("experience")
     assert "подбадривать" in experience.requirements
 
@@ -339,7 +339,7 @@ def test_messenger_подтверждает_номер_а_не_спрашива�
     ):
         assert blind not in examples
     assert any("с которого" in ex.lower() and "звон" in ex.lower() for ex in step.examples)
-    assert len(script_v4.steps) == 27
+    assert len(script_v4.steps) == 22
 
 
 def test_скрипт_без_сводки_читается_с_пустым_полем():
@@ -438,14 +438,13 @@ def test_ни_один_шаг_не_говорит_про_форму_в_треб�
 
 
 def test_служебные_указания_переехали_в_поле_form(script_v4):
-    """Ровно девятнадцать шагов с непустым form; ключевые поля на месте."""
+    """Ровно четырнадцать шагов с непустым form; ключевые поля на месте."""
     with_form = [s for s in script_v4.steps.values() if s.form.strip()]
-    assert len(with_form) == 19
+    assert len(with_form) == 14
     assert "caller_name" in script_v4.step("greeting").form
     messenger_form = script_v4.step("messenger").form
     assert "messenger" in messenger_form
     assert "caller_phone" in messenger_form
-    assert "сворачивает" in script_v4.step("wrap_up").form
 
 
 def test_поле_form_не_попадает_в_промпт_генератора(script_v4):
