@@ -19,7 +19,9 @@ from graph.facts import (
 )
 from graph.prompts import (
     _HARD_FACT_BAN,
+    _MISSING_KNOWLEDGE_GUARD,
     _NO_MECHANICS,
+    _STEPS_HANGING_NOTE,
     LEAD_PULL_OVERRIDES,
     LEAD_REPEAT_INTRO,
     LEAD_REPEAT_OVERRIDES,
@@ -29,6 +31,7 @@ from graph.prompts import (
     RULE_NO_VERBATIM,
     RULE_QUESTION_MOVES,
     SPEECH_RULES,
+    _context_has_fact,
     _describe_step,
     aside_block,
     build_turn_messages,
@@ -2543,3 +2546,252 @@ def test_сборка_pull_молчание_запрет_нехватка(script
     hang_part = _top_section(content, "ЕЩЁ НЕ ЗАКРЫТО")
     assert "**Не хватает данных**" in now
     assert "**Не хватает данных**" in hang_part
+
+
+#: Правило про разрешение продолжать — ищется по началу, номер не важен.
+def _rule_no_permission() -> str:
+    """Возвращает пункт правил речи про разрешение продолжать."""
+    return next(rule for rule in SPEECH_RULES if rule.startswith("Разрешения продолжать"))
+
+
+#: Редакции четырёх подменяемых правил для повтора — меняться не должны.
+_REPEAT_EDITION: dict[str, str] = {
+    RULE_MOVE_ON: _REPEAT_MOVE_ON,
+    RULE_QUESTION_MOVES: (
+        "Вопрос по делу двигает разговор дальше: это выбор из двух вариантов, "
+        "уточнение недостающего или предложение следующего шага. Сейчас вопрос "
+        "обязателен, и берётся он из всего разговора — из того, что человек уже "
+        "сказал и что осталось непрояснённым, а не из требований текущей темы."
+    ),
+    RULE_NO_OPEN_QUESTIONS: (
+        "Вопросы вида «что бы Вы хотели узнать», «что Вас интересует», «о чём "
+        "рассказать», «что осталось непонятным» запрещены: это перекладывание "
+        "разговора на собеседника. Спросить о том, что уже прозвучало в разговоре, "
+        "и предложить конкретный следующий шаг — можно и нужно."
+    ),
+    RULE_NO_VERBATIM: (
+        "Эту тему в разговоре уже поднимали. Повторять её той же стороной — ошибка, "
+        "и пересказ прежней мысли другими словами — тоже ошибка. Сказать надо то, "
+        "чего человек про неё ещё не слышал."
+    ),
+}
+
+
+def test_вопрос_остались_ли_вопросы_запрещён_без_оговорок():
+    """В правиле про вопросы к собеседнику нет разрешающей оговорки «изредка»."""
+    assert "изредка" not in RULE_NO_OPEN_QUESTIONS
+    assert "остались ли вопросы, тоже нельзя" in RULE_NO_OPEN_QUESTIONS
+    assert "ни в любой другой момент" in RULE_NO_OPEN_QUESTIONS
+    # Смысл правила — запрет перекладывать ведение разговора — остался.
+    assert "перекладывание разговора на собеседника" in RULE_NO_OPEN_QUESTIONS
+    assert "что осталось непонятным" in RULE_NO_OPEN_QUESTIONS
+    # Приглашение спрашивать — тот же приём, только без вопросительного знака.
+    assert "«спрашивайте, я отвечу»" in RULE_NO_OPEN_QUESTIONS
+    assert "«если что-то интересно — расскажу»" in RULE_NO_OPEN_QUESTIONS
+    assert len(RULE_NO_OPEN_QUESTIONS) <= 500
+    for mode in ("normal", "repeat", "pull"):
+        assert "изредка" not in speech_rules_block(mode=mode)
+    for rule in SPEECH_RULES:
+        assert "изредка" not in rule.lower()
+
+
+def test_разрешение_продолжать_запрещено_классом_а_не_перечнем():
+    """Правило запрещает класс вопросов, а прежние обороты остались примерами."""
+    rule = _rule_no_permission()
+    assert "Запрещён весь класс" in rule
+    assert "любой вопрос или приглашение спросить" in rule
+    assert "просит согласия говорить дальше" in rule
+    assert "отдаёт выбор темы собеседнику" in rule
+    assert "какими бы словами это ни было сказано" in rule
+    assert "Примеры, не весь перечень:" in rule
+    for phrase in (
+        "«рассказать подробнее?»",
+        "«могу назвать?»",
+        "«продолжать?»",
+        "«продолжим?»",
+        "«интересно узнать подробнее?»",
+    ):
+        assert phrase in rule
+    assert rule.index("Запрещён весь класс") < rule.index("Примеры, не весь перечень:")
+    assert "не запрет на вопросы вообще" in rule
+    assert len(rule) <= 500
+
+
+def test_нумерация_правил_сплошная_во_всех_режимах():
+    """Номера правил идут подряд без дублей и разрывов; число правил прежнее."""
+    assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
+    for mode in ("normal", "repeat", "pull"):
+        lines = speech_rules_block(mode=mode).splitlines()
+        numbers = [int(line.split(".", 1)[0]) for line in lines]
+        assert numbers == list(range(len(SPEECH_RULES) + 1))
+        assert len(numbers) == len(set(numbers))
+        assert lines[-1] == f"{len(SPEECH_RULES)}. {_HARD_FACT_BAN}"
+
+
+def test_жёсткий_запрет_фактов_в_трёх_режимах_правил():
+    """Жёсткий запрет на выдуманные факты остаётся во всех трёх режимах."""
+    for mode in ("normal", "repeat", "pull"):
+        assert _HARD_FACT_BAN in speech_rules_block(mode=mode)
+
+
+def test_переопределения_подменяют_те_же_пункты_редакция_повтора_прежняя():
+    """Repeat и pull подменяют одни и те же четыре пункта; повтор не изменился."""
+    keys = {RULE_MOVE_ON, RULE_QUESTION_MOVES, RULE_NO_OPEN_QUESTIONS, RULE_NO_VERBATIM}
+    assert set(LEAD_REPEAT_OVERRIDES) == keys
+    assert set(LEAD_PULL_OVERRIDES) == keys
+    assert LEAD_REPEAT_OVERRIDES == _REPEAT_EDITION
+    for rule in keys - {RULE_MOVE_ON}:
+        assert LEAD_PULL_OVERRIDES[rule] == LEAD_REPEAT_OVERRIDES[rule]
+    assert LEAD_PULL_OVERRIDES[RULE_MOVE_ON] != LEAD_REPEAT_OVERRIDES[RULE_MOVE_ON]
+
+
+def test_указание_вытаскивания_без_ссылки_на_отсутствующий_раздел():
+    """Ни задача хода, ни правило перехода не ссылаются на раздел по названию."""
+    assert "ЕЩЁ НЕ ЗАКРЫТО" not in PULL_TASK
+    assert "ЕЩЁ НЕ ЗАКРЫТО" not in LEAD_PULL_OVERRIDES[RULE_MOVE_ON]
+    assert "Незакрытых тем ниже нет" in PULL_TASK
+    assert "уже известно из разговора" in PULL_TASK
+    assert "Закончи вопросом, который требует выбора или решения" in PULL_TASK
+    assert "Незакрытых тем ниже нет" in LEAD_PULL_OVERRIDES[RULE_MOVE_ON]
+    assert "не топтаться на месте" in LEAD_PULL_OVERRIDES[RULE_MOVE_ON]
+
+
+def test_сборка_вытаскивания_с_одним_шагом_исполнима(script_v4):
+    """Один шаг в шапке: раздела нет и ссылок на него в промпте тоже нет."""
+    one = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("terms")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        mode="pull",
+        turn_kind="pull",
+    )
+    content = one[0].content
+    assert PULL_TASK in content
+    assert "ЕЩЁ НЕ ЗАКРЫТО" not in content
+    assert _STEPS_HANGING_NOTE not in content
+    assert "Незакрытых тем ниже нет" in content
+
+    two = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("terms"), script_v4.step("group")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        mode="pull",
+        turn_kind="pull",
+    )
+    with_hang = two[0].content
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" in with_hang
+    assert _STEPS_HANGING_NOTE in with_hang
+
+
+def test_обычный_ход_с_одним_шагом_без_ссылки_на_незакрытое(script_v4):
+    """Хвост вступления про незакрытое выводится только вместе с разделом."""
+    one = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    assert "ЕЩЁ НЕ ЗАКРЫТО" not in one[0].content
+    two = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("city"), script_v4.step("terms")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = two[0].content
+    assert _STEPS_HANGING_NOTE in content
+    assert "# ЕЩЁ НЕ ЗАКРЫТО" in content
+
+
+def test_четыре_шага_пустой_контекст_без_четырёх_одинаковых_блоков(script_v4):
+    """Нехватка данных отмечена у каждого шага, а указание печатается один раз."""
+    ids = ("terms", "theory_format", "included", "group")
+    steps = [script_v4.step(step_id) for step_id in ids]
+    for step in steps:
+        assert step.knowledge
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=steps,
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+        context_text="",
+    )
+    content = messages[0].content
+    assert content.count("**Не хватает данных**") == len(steps)
+    assert content.count(_MISSING_KNOWLEDGE_GUARD) == 1
+    blocks = [part.splitlines()[1] for part in content.split("**Не хватает данных**")[1:]]
+    assert len(set(blocks)) == len(steps)
+    for step in steps:
+        for fact in step.knowledge:
+            assert fact in content
+    now = _top_section(content, "СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    assert _MISSING_KNOWLEDGE_GUARD in now
+
+
+def test_указание_о_нехватке_достаётся_первому_шагу_с_пробелом(script_v4):
+    """Ведущему шагу данных хватает — указание уходит первому висящему."""
+    block = steps_block(
+        [script_v4.step("city"), script_v4.step("terms"), script_v4.step("group")],
+        {},
+        {},
+        context_text="Город: Пермь",
+    )
+    assert block.count(_MISSING_KNOWLEDGE_GUARD) == 1
+    now, hang = block.split("# ЕЩЁ НЕ ЗАКРЫТО", 1)
+    assert "**Не хватает данных**" not in now
+    assert hang.count("**Не хватает данных**") == 2
+    terms_part, group_part = hang.split(f"## {script_v4.step('group').name}", 1)
+    assert _MISSING_KNOWLEDGE_GUARD in terms_part
+    assert _MISSING_KNOWLEDGE_GUARD not in group_part
+    assert "В контексте нет данных: расписание ближайших стартов по филиалу" in group_part
+
+
+def test_проверка_факта_требует_все_значимые_слова():
+    """Совпадения двух случайных слов из разных тем для факта не хватает."""
+    price_ctx = "Цена: Стоимость — от 43900 рублей. Срок действия цены — до конца месяца."
+    assert not _context_has_fact(price_ctx, {}, "стоимость и срок второй категории")
+    assert not _context_has_fact(price_ctx, {}, "категории обучения кроме легковой")
+    assert _context_has_fact("срок обучения по городу: 2 месяца", {}, "срок обучения по городу")
+    # Падежи сравнению не мешают: слова сопоставляются по основам.
+    assert _context_has_fact("Формат теории в городах: очно", {}, "форматы теории в городе")
+    assert _context_has_fact("", {"tariffs": "линейка тарифов города"}, "линейка тарифов города")
+    assert not _context_has_fact(
+        "",
+        {"price": "стоимость 43900, срок 2 месяца"},
+        "стоимость и срок второй категории",
+    )
+    assert _context_has_fact("что угодно", {}, "   ")
+
+
+def test_естественность_без_образца_с_разрешением_рассказать():
+    """В блоке естественности нет образца, спрашивающего разрешения рассказать."""
+    block = naturalness_block(ask_for_move=True)
+    assert "Рассказать, что входит?" not in block
+    assert "Обучение под ключ — всё включено, доплат нет" in block
+
+
+def test_полная_сборка_содержит_оба_изменённых_правила(script_v4):
+    """Оба переписанных правила попадают в системное сообщение целиком."""
+    messages = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("terms")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert RULE_NO_OPEN_QUESTIONS in content
+    assert _rule_no_permission() in content
