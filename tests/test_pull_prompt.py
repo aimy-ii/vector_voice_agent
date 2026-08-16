@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -21,6 +23,7 @@ from graph.prompts import (
     build_pull_messages,
     build_turn_messages,
     build_waiting_messages,
+    profile_block,
 )
 from graph.state import new_state_defaults
 
@@ -39,6 +42,19 @@ _HISTORY = [
     AIMessage(content="И ещё можно вернуть тринадцать процентов через налоговый вычет."),
 ]
 
+#: Разговор длиннее прежней обрезки в шесть сообщений: начало обязано доходить
+#: до модели целиком, иначе она не видит, что уже обещано.
+_LONG_HISTORY = [
+    HumanMessage(content="Добрый день, звоню про обучение."),
+    AIMessage(content="Добрый день, академия «Вектор». Как к Вам обращаться?"),
+    HumanMessage(content="Андрей."),
+    AIMessage(content="Андрей, а где Вам удобно заниматься?"),
+    HumanMessage(content="У Просвещения."),
+    AIMessage(content="Подберу ближайший филиал. Сколько времени готовы уделять?"),
+    HumanMessage(content="Вечерами после работы."),
+    AIMessage(content="Хорошо, отправлю информацию в Max."),
+]
+
 
 def _pull(script, **extra: Any) -> list[Any]:
     """Собирает короткое вытаскивание на общих для тестов данных."""
@@ -48,7 +64,6 @@ def _pull(script, **extra: Any) -> list[Any]:
         "pending_fields": [],
         "step": script.step("terms"),
         "facts": {},
-        "history_limit": 6,
         "context_text": _CONTEXT,
     }
     kwargs.update(extra)
@@ -95,13 +110,55 @@ def test_вытаскивание_требует_вопроса_в_конце(sc
     assert task_index < demand_index < content.index(_HARD_FACT_BAN)
 
 
-def test_вытаскивание_ограничивает_длину_и_запрещает_повтор(script_v4):
-    """В промпте есть потолок длины и запрет пересказывать последнюю мысль."""
+def test_запрет_повтора_стоит_среди_первых_требований(script_v4):
+    """Запрет пересказа — второе главное требование, сразу за требованием вопроса."""
     content = _pull(script_v4)[0].content
-    assert "одна-две короткие фразы" in content
-    assert "не длиннее двадцати пяти слов" in content
-    assert "Последнюю мысль не повторять и не пересказывать другими словами" in content
+    assert "последнюю мысль не повторять и не пересказывать другими словами" in content
     assert "уже названное заново не перечислять" in content
+    task_index = content.index("Задача этого хода одна")
+    question_index = content.index("ГЛАВНОЕ:")
+    repeat_index = content.index("ВТОРОЕ ГЛАВНОЕ:")
+    fact_ban_index = content.index(_HARD_FACT_BAN)
+    assert task_index < question_index < repeat_index < fact_ban_index
+    # Рядом с требованием вопроса: между ними ничего постороннего не вклинилось.
+    between = content[question_index:repeat_index]
+    assert between.count("\n") == 1
+
+
+def test_запрет_подхватывать_свою_последнюю_мысль(script_v4):
+    """Отдельным пунктом закрыт вход через связку-пересказ, с примером из звонка."""
+    content = _pull(script_v4)[0].content
+    assert "Реплика не начинается с подхвата собственной последней мысли" in content
+    assert "«поняла»" in content
+    assert "«как и сказала»" in content
+    assert "тот же пересказ под новой шапкой" in content
+    assert "Поняла, отправляю всё в Max" in content
+    repeat_index = content.index("ВТОРОЕ ГЛАВНОЕ:")
+    pickup_index = content.index("Реплика не начинается с подхвата")
+    assert repeat_index < pickup_index < content.index(_HARD_FACT_BAN)
+
+
+def test_ограничения_по_числу_слов_в_промпте_нет(script_v4):
+    """Потолок длины убран: счёта слов и фраз в требованиях режима не осталось."""
+    content = _pull(script_v4)[0].content
+    assert "двадцати пяти слов" not in content
+    assert "одна-две короткие фразы" not in content
+    assert re.search(r"(не длиннее|не больше|не более|максимум)[^.]{0,40}слов", content) is None
+    assert "сколько нужно, чтобы человек снова заговорил" in content
+
+
+def test_предписаний_о_чём_говорить_нет(script_v4):
+    """Разбор случаев убран: чем растормошить, модель решает по всему разговору."""
+    content = _pull(script_v4)[0].content
+    assert "продвинуть текущий шаг" not in content
+    assert "продвигать его" not in content
+    assert "взять другую тему разговора" not in content
+    assert "Чем растормошить — выбор твой" in content
+    assert "Прочитай весь разговор целиком" in content
+    assert "тоже твоё решение" in content
+    # Формулировка самодостаточна: ссылок на разделы, которых в промпте нет.
+    for reference in ("перечисленных ниже", "из перечисленных", "ЕЩЁ НЕ ЗАКРЫТО", "раздел"):
+        assert reference not in content
 
 
 def test_вытаскивание_держит_запрет_фактов_и_требования_шага(script_v4):
@@ -138,14 +195,42 @@ def test_вытаскивание_без_повторяющихся_блоков
     assert full.count("**Не хватает данных**") > 1
 
 
-def test_указание_о_выборе_темы_исполнимо_при_одном_шаге(script_v4):
-    """Выбор темы описан самодостаточно: ссылок на отсутствующие разделы нет."""
+def test_профиль_и_запрет_прощаться_первым_на_месте(script_v4):
+    """Форма разговора и границы режима из промпта не выпали."""
     content = _pull(script_v4)[0].content
-    assert "есть чем продвинуть текущий шаг — продвигать его" in content
-    assert "взять другую тему разговора, которая ещё не закрыта" in content
-    assert "продвигать текущий шаг по тому, что уже известно из разговора" in content
-    for reference in ("перечисленных ниже", "из перечисленных", "ЕЩЁ НЕ ЗАКРЫТО", "раздел"):
-        assert reference not in content
+    assert profile_block(script_v4, {"caller_name": "Андрей"}, pending_fields=[]) in content
+    assert "не прощаться первым" in content
+    assert "Не здороваться заново" in content
+
+
+def test_история_разговора_уходит_целиком(script_v4):
+    """Разговор длиннее шести реплик доходит до модели весь, включая первую."""
+    built = _pull(script_v4, messages=_LONG_HISTORY)
+    tail = built[1:]
+    assert len(_LONG_HISTORY) > 6
+    assert len(tail) == len(_LONG_HISTORY)
+    assert [message.content for message in tail] == [message.content for message in _LONG_HISTORY]
+    assert tail[0].content == _LONG_HISTORY[0].content
+
+    full = build_turn_messages(
+        script=script_v4,
+        steps=[script_v4.step("terms")],
+        profile={},
+        facts={},
+        history=_LONG_HISTORY,
+        asides_done=[],
+        context_text=_CONTEXT,
+        turn_kind="pull",
+    )
+    assert [message.content for message in built[1:]] == [message.content for message in full[1:]]
+
+
+def test_обрезки_истории_в_сборке_не_осталось(script_v4):
+    """Ни параметра обрезки, ни константы хвоста у вытаскивания больше нет."""
+    import graph.prompts as prompts_module
+
+    assert "history_limit" not in inspect.signature(build_pull_messages).parameters
+    assert not hasattr(prompts_module, "PULL_HISTORY_TURNS")
 
 
 def test_хвост_диалога_как_в_реплике_ожидания(script_v4):
@@ -155,7 +240,6 @@ def test_хвост_диалога_как_в_реплике_ожидания(scr
         messages=[],
         profile={},
         step=script_v4.step("terms"),
-        history_limit=6,
     )
     waiting = build_waiting_messages(
         script_v4,
@@ -167,11 +251,7 @@ def test_хвост_диалога_как_в_реплике_ожидания(scr
     )
     assert pull[-1].content == waiting[-1].content == "(клиент молчит)"
     assert len(pull) == 2
-
-    limited = _pull(script_v4, history_limit=2)
-    assert len(limited) - 1 == 2
-    assert limited[-1].content == _HISTORY[-1].content
-    assert "Реплики человека не было" in limited[0].content
+    assert "Реплики человека не было" in pull[0].content
 
 
 def _respond(script, **extra: Any) -> list[Any]:
@@ -198,7 +278,7 @@ def test_точка_выбора_на_pull_даёт_короткую_сборк�
     """При ``turn_kind="pull"`` собирается вытаскивание, а не полный ход."""
     monkeypatch.setattr(nodes_module.settings, "script_version", "4")
     content = _respond(script_v4, turn_kind="pull")[0].content
-    assert "Задача этого хода одна: вытянуть человека на ответ" in content
+    assert "Задача этого хода одна: растормошить человека" in content
     assert PULL_TASK not in content
     assert "# ПРАВИЛА РЕЧИ" not in content
 

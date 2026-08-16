@@ -55,7 +55,6 @@ from graph.log_fmt import (
 )
 from graph.progress import say, stage
 from graph.prompts import (
-    PULL_HISTORY_TURNS,
     TurnMode,
     build_filler_messages,
     build_pull_messages,
@@ -733,7 +732,6 @@ def _build_respond_messages(
             pending_fields=pending_fields,
             step=lead,
             facts=facts,
-            history_limit=PULL_HISTORY_TURNS,
             context_text=context_text,
         )
     closed_steps = [

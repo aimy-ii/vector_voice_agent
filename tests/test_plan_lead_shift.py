@@ -385,7 +385,7 @@ def test_догон_с_единичным_счётчиком_идёт_в_кор�
         turn_kind="pull",
     )
     content = messages[0].content
-    assert "Задача этого хода одна: вытянуть человека на ответ" in content
+    assert "Задача этого хода одна: растормошить человека" in content
     assert PULL_TASK not in content
     assert LEAD_REPEAT_INTRO not in content
 
