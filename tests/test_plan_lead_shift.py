@@ -112,18 +112,70 @@ async def test_один_открытый_в_шапке_ведущий_не_ме�
     assert "сдвиг" not in plan_logs[-1]
 
 
-@pytest.mark.parametrize("turn_kind", ["continuation", "silence"])
-async def test_сдвиг_на_ходе_без_реплики_клиента(
-    store, use_v2, plan_logs, monkeypatch, turn_kind: str
-):
-    """Ходы continuation / silence — ведущий тоже сдвигается по шапке."""
+async def test_сдвиг_на_ходе_без_реплики_клиента(store, use_v2, plan_logs, monkeypatch):
+    """Ход continuation — ведущий тоже сдвигается по шапке."""
     monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
     await _seed_pending_head(store)
-    state = _base_state(current_step="name", turn_kind=turn_kind)
+    state = _base_state(current_step="name", turn_kind="continuation")
     out = await nodes_module.plan_node(state, None)  # type: ignore[arg-type]
     assert out["current_step"] == "city"
     assert out["head_steps"][:2] == ["name", "city"]
     assert "сдвиг" in plan_logs[-1]
+
+
+async def test_молчание_не_сдвигает_ведущего(store, use_v2, plan_logs, monkeypatch):
+    """Ход silence — ведущий остаётся прежним, хотя в шапке есть куда сдвинуть."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+    state = _base_state(current_step="name", turn_kind="silence")
+    out = await nodes_module.plan_node(state, None)  # type: ignore[arg-type]
+    assert out["current_step"] == "name"
+    assert out["head_steps"][:2] == ["name", "city"]
+    assert "сдвиг" not in plan_logs[-1]
+
+
+async def test_молчание_копит_счётчик_повторов(store, use_v2, monkeypatch):
+    """Без сдвига на молчании ``lead_repeat`` растёт — режим промпта сменится сам."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+    out = await nodes_module.plan_node(
+        _base_state(current_step="name", lead_repeat=1, turn_kind="silence"),
+        None,  # type: ignore[arg-type]
+    )
+    assert out["current_step"] == "name"
+    assert out["lead_repeat"] == 2
+
+
+async def test_молчание_с_другим_ведущим_сбрасывает_счётчик(store, use_v2, monkeypatch):
+    """Пересчитанный ведущий не совпал с прошлым — счётчик единица и на молчании."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+    out = await nodes_module.plan_node(
+        _base_state(current_step="city", lead_repeat=3, turn_kind="silence"),
+        None,  # type: ignore[arg-type]
+    )
+    assert out["current_step"] == "name"
+    assert out["lead_repeat"] == 1
+
+
+@pytest.mark.parametrize("turn_kind", ["continuation", "silence", "pull"])
+async def test_ход_без_реплики_не_трогает_счётчики(
+    store, use_v2, plan_logs, monkeypatch, turn_kind: str
+):
+    """Попытки, взятие в работу и статусы на ходах без реплики остаются прежними."""
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+    before = await store.load("local")
+    assert before is not None
+    state = _base_state(current_step="name", turn_kind=turn_kind)
+    out = await nodes_module.plan_node(state, None)  # type: ignore[arg-type]
+    after = await store.load("local")
+    assert after is not None
+    assert after.attempts == before.attempts
+    assert after.in_work == before.in_work
+    assert after.taken_turn == before.taken_turn
+    assert after.status == before.status
+    assert out["head_new_step"] is None
 
 
 async def test_лог_сдвига_содержит_прежний_шаг(store, use_v2, plan_logs, monkeypatch):

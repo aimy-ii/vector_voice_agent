@@ -16,6 +16,7 @@ Plan читает закрытия из Redis-кеша и не ждёт лайв
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -535,11 +536,24 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     не трогаем.
 
     Если ведущий снова совпал с шагом прошлого хода — берём следующий
-    открытый из шапки на любом виде хода (шапка сама не меняется).
-    Так не ведём повторно шаг, который судья ещё не успел закрыть.
+    открытый из шапки (шапка сама не меняется). Так не ведём повторно шаг,
+    который судья ещё не успел закрыть. Исключение — ход ``silence``: бот
+    задал вопрос, человек молчит, тема поднята и ответа ждут именно по ней;
+    уехать с неё на другую — то самое перескакивание, которого не должно
+    быть. На ``pull`` и на обычном ходе сдвиг работает как прежде.
 
     Счётчик ``lead_repeat`` считает подряд идущие ходы с одним ведущим
-    шагом; на сдвиге сбрасывается. Сами шаги не закрываются и не открываются.
+    шагом; на сдвиге сбрасывается. Без сдвига на молчании он растёт — и
+    по достижении порога промпт сам переходит в режим «вывести человека
+    на реплику». Сами шаги не закрываются и не открываются.
+
+    Args:
+        state: состояние хода после ``ingest_node``.
+        runtime: рантайм LangGraph; здесь не используется.
+
+    Returns:
+        Правки ``CallState``: зеркало прогресса, профиль, ведущий шаг,
+        счётчик повторов, следующий шаг, шапка и новый шаг хода.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -573,12 +587,21 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Повтор ведущего прошлого хода на реплике клиента — сдвиг по шапке.
+    # Повтор ведущего прошлого хода — сдвиг по шапке. На молчании после
+    # вопроса не сдвигаем: тема поднята, ответа ждут по ней, а не по
+    # следующей. Счётчик повторов при этом растёт — режим промпта сменится
+    # сам, темы разговора смена не касается.
     prev_step_id = state.get("current_step")
     shifted_from: str | None = None
     lead_repeat = int(state.get("lead_repeat") or 0)
     lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
-    if step is not None and prev_step_id and step.id == prev_step_id and len(head) > 1:
+    if (
+        turn_kind != "silence"
+        and step is not None
+        and prev_step_id
+        and step.id == prev_step_id
+        and len(head) > 1
+    ):
         shifted_from = step.id
         step = head[1]
         lead_repeat = 1
@@ -978,8 +1001,86 @@ def _safe_result(raw: dict[str, Any]) -> TurnResult:
         return TurnResult(reply=reply if isinstance(reply, str) else "")
 
 
+#: Обороты, которыми разговор заканчивают, и ничем другим они не бывают.
+#: Перечень намеренно узкий: «на связи», «жду Вас», «напомню», «пишите» и
+#: прочие обещания продолжения сюда не входят — после них разговор живёт.
+#: «до связи» от «всегда на связи» отличает предлог, поэтому сравнение идёт
+#: по целым словам, а не по вхождению подстроки. «до встречи» не в перечне
+#: намеренно: это оборот договорённости о встрече, а она концом разговора
+#: не считается — ни здесь, ни у агента прощания.
+_FAREWELL_MARKERS: tuple[str, ...] = (
+    "до свидания",
+    "до связи",
+    "до скорого",
+    "всего доброго",
+    "всего хорошего",
+    "всего наилучшего",
+    "хорошего дня",
+    "хорошего вечера",
+    "приятного дня",
+    "спасибо за звонок",
+    "счастливо",
+    "прощайте",
+)
+
+#: Сколько последних предложений реплики проверяется на прощание. Прощаются
+#: в конце реплики; те же слова раньше — часть другой мысли («спасибо за
+#: звонок, я всё записала», а дальше про сроки и оплату).
+_FAREWELL_TAIL_SENTENCES = 2
+
+#: Границы предложений и всё, что не буква и не цифра: сравнение идёт по
+#: целым словам приведённого текста.
+_SENTENCE_SPLIT = re.compile(r"[.!?…\n]+")
+_NON_WORD = re.compile(r"[^0-9a-zа-я]+")
+
+
+def is_farewell_reply(text: str) -> bool:
+    """Прощается ли бот в собственной реплике.
+
+    Дешёвая локальная проверка вместо ещё одного вызова модели: флаг конца
+    разговора бот читает через миллисекунды после того, как реплика
+    договорена, а живой агент прощания отвечает секундами — он к этому
+    моменту не успевает.
+
+    Совпадение ищется по целым словам в последних предложениях реплики.
+    Реплика с вопросом в конце прощанием не считается ни при каких словах:
+    вопрос ждёт ответа, и разговор продолжается.
+
+    Args:
+        text: произнесённая репликой бота строка.
+
+    Returns:
+        ``True`` — реплика заканчивается прощанием; иначе ``False``.
+    """
+    body = (text or "").strip()
+    if not body or body.endswith("?"):
+        return False
+    sentences = [part.strip() for part in _SENTENCE_SPLIT.split(body) if part.strip()]
+    if not sentences:
+        return False
+    tail = " ".join(sentences[-_FAREWELL_TAIL_SENTENCES:]).lower().replace("ё", "е")
+    words = _NON_WORD.sub(" ", tail)
+    padded = f" {' '.join(words.split())} "
+    return any(f" {marker} " in padded for marker in _FAREWELL_MARKERS)
+
+
 async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Раскладывает разобранное по состоянию; в конце звонка — слепок в тред."""
+    """Раскладывает разобранное по состоянию; в конце звонка — слепок в тред.
+
+    Флаг конца разговора приезжает из кеша контекста — его ставит фоновый
+    агент прощания по реплике человека. Прощание самого бота через агента не
+    проходит, поэтому реплика хода проверяется здесь локально
+    (``is_farewell_reply``): распознали — флаг поднимается и уходит и в
+    состояние, и в кеш, на любом виде хода.
+
+    Args:
+        state: состояние хода после ``respond_node``.
+        runtime: рантайм LangGraph; здесь не используется.
+
+    Returns:
+        Правки ``CallState``: зеркало прогресса, история, профиль, признаки
+        доставки и флаг конца разговора.
+    """
     script = _script_of(state)
     step = _current_step(state)
     progress = await _load_progress(state)
@@ -1019,25 +1120,33 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     # Разговор закончен — по флагу из кеша контекста (фоновый агент прощания).
     # На продолжении и молчании флаг не трогаем: реплики человека не было.
+    # Исключение — прощание в собственной реплике: его агент не видит вообще,
+    # и распознаётся оно здесь, на любом виде хода.
     conversation_ended = bool(state.get("conversation_ended"))
     conversation_context = state.get("conversation_context") or {}
+    bot_farewell = is_farewell_reply(spoken_text)
     if not no_client_reply or spoken_text:
         ctx = await _load_context(state)
         if not no_client_reply:
             conversation_ended = bool(ctx.conversation_ended)
             patch["conversation_ended"] = conversation_ended
         if spoken_text:
-            ctx = ctx.model_copy(
-                update={
-                    "last_agent_reply": spoken_text,
-                    "transcript": append_agent(
-                        ctx.transcript,
-                        turn=int(state.get("turn") or 0),
-                        text=spoken_text,
-                    ),
-                }
-            )
-            ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
+            updates: dict[str, Any] = {
+                "last_agent_reply": spoken_text,
+                "transcript": append_agent(
+                    ctx.transcript,
+                    turn=int(state.get("turn") or 0),
+                    text=spoken_text,
+                ),
+            }
+            fields = CONTEXT_FIELDS_TURN
+            if bot_farewell:
+                conversation_ended = True
+                patch["conversation_ended"] = True
+                updates["conversation_ended"] = True
+                fields = CONTEXT_FIELDS_TURN | frozenset({"conversation_ended"})
+            ctx = ctx.model_copy(update=updates)
+            ctx_patch = await _save_context(ctx, fields=fields)
             conversation_context = ctx_patch["conversation_context"]
 
     # Пустой эфир — pending не ставим. Без реплики клиента шаги не трогаем.
@@ -1063,12 +1172,13 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "expect_continuation": expect_continuation,
         }
     )
+    farewell_note = ", прощание в реплике бота" if bot_farewell else ""
     stage(
         "commit",
         (
             f"сгенерировано {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
             f"ожидание продолжения={expect_continuation}, "
-            f"разговор закончен={conversation_ended}"
+            f"разговор закончен={conversation_ended}{farewell_note}"
             if spoken_text
             else (
                 f"шаг {step.id if step else '—'}, в эфир ничего не ушло, "

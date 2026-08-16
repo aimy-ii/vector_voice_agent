@@ -47,6 +47,7 @@ from graph.nodes import (
     _load_context,
     _load_progress,
     _merge_profile,
+    _no_client_reply,
     _save_context,
     _save_progress,
 )
@@ -267,6 +268,18 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
 
     Точка отсчёта сбрасывается при смене ``partial_utterance_id``;
     порог прироста — только внутри одной реплики.
+
+    Агент прощания смотрит на реплику человека, поэтому на ходах без неё
+    (``continuation``, ``silence``, ``pull``) не вызывается: прощание в
+    репликах самого бота ловит ``is_farewell_reply`` в ``commit_node``.
+
+    Args:
+        state: состояние звонка с накопленной репликой человека.
+        runtime: рантайм LangGraph; здесь не используется.
+
+    Returns:
+        Правки ``CallState``: прогресс, профиль, слаги справочника,
+        зеркало контекста и точка отсчёта прироста.
     """
     started = time.perf_counter()
     reply = str(state.get("partial_reply") or "")
@@ -403,8 +416,9 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         patch["profile"] = profile
 
         turn_kind = str(state.get("turn_kind") or "client").strip().lower()
-        no_client_reply = turn_kind in {"continuation", "silence"}
-        if no_client_reply:
+        # Признак один на весь граф: своя копия перечня видов хода забыла
+        # про «pull», и на договаривании агент мог решать по чужой реплике.
+        if _no_client_reply(turn_kind):
             farewell_note = "пропуск: нет реплики человека"
         elif len(history) < settings.farewell_min_messages:
             farewell_note = (

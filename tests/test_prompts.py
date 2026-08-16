@@ -21,6 +21,7 @@ from graph.prompts import (
     _HARD_FACT_BAN,
     _MISSING_KNOWLEDGE_GUARD,
     _NO_MECHANICS,
+    _STEPS_CONVERSATION_FIRST,
     _STEPS_HANGING_NOTE,
     LEAD_PULL_OVERRIDES,
     LEAD_REPEAT_INTRO,
@@ -484,6 +485,49 @@ def test_шапка_с_висящими_и_образцом_одним_пром�
     assert "Висящий шаг" not in content
     assert "новый вопрос" not in content
     assert "уже спрашивали, ответа нет" not in content
+
+
+def test_требование_последовательности_разговора_в_промпте_хода(script):
+    """Требование «разговор важнее порядка шагов» есть в собранном промпте хода."""
+    messages = build_turn_messages(
+        script=script,
+        steps=[script.step("city"), script.step("who_studies")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )
+    content = messages[0].content
+    assert _STEPS_CONVERSATION_FIRST in content
+    steps_at = content.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
+    assert content.index(_STEPS_CONVERSATION_FIRST) > steps_at
+
+
+def test_требование_последовательности_разговора_несёт_три_смысла():
+    """Незаконченное, шаг как направление и продолжение разговора — все три в тексте."""
+    assert "Начатое доводится до конца" in _STEPS_CONVERSATION_FIRST
+    assert "через несколько реплик" in _STEPS_CONVERSATION_FIRST
+    assert "не брать его только потому, что он выдан" in _STEPS_CONVERSATION_FIRST
+    assert "продолжает разговор с того места, где он повис" in _STEPS_CONVERSATION_FIRST
+
+
+def test_требование_не_разрешает_пропускать_шаги():
+    """Оговорка про отложить-не-отменить на месте: молчать по сценарию нельзя."""
+    assert "Отложить — не значит отменить" in _STEPS_CONVERSATION_FIRST
+    assert "Молча пропускать шаги нельзя" in _STEPS_CONVERSATION_FIRST
+
+
+def test_требование_запрещает_делать_сделанное_дважды():
+    """Прощание по кругу закрыто прямым пунктом про уже сделанное."""
+    assert "не сделано ли по нему уже всё" in _STEPS_CONVERSATION_FIRST
+    assert "попрощался" in _STEPS_CONVERSATION_FIRST
+
+
+def test_требование_остаётся_при_одном_шаге_в_шапке(script):
+    """Один шаг в шапке — раздела незакрытых нет, требование всё равно есть."""
+    block = steps_block([script.step("city")], {}, {})
+    assert _STEPS_CONVERSATION_FIRST in block
+    assert _STEPS_HANGING_NOTE not in block
 
 
 def test_шапка_пуста_текст_завершения(script):

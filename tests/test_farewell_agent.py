@@ -275,7 +275,7 @@ async def test_флаг_переставляется_обратно_в_ложь(
     assert loaded.conversation_ended is False
 
 
-@pytest.mark.parametrize("turn_kind", ["continuation", "silence"])
+@pytest.mark.parametrize("turn_kind", ["continuation", "silence", "pull"])
 async def test_продолжение_и_молчание_агент_не_зовётся(
     script, monkeypatch, _offline_farewell, turn_kind: str
 ):
