@@ -54,8 +54,10 @@ from graph.log_fmt import (
 )
 from graph.progress import say, stage
 from graph.prompts import (
+    PULL_HISTORY_TURNS,
     TurnMode,
     build_filler_messages,
+    build_pull_messages,
     build_turn_messages,
     build_waiting_messages,
 )
@@ -639,6 +641,27 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     }
 
 
+def _turn_mode(*, state: CallState, turn_kind: str) -> TurnMode:
+    """Определяет характер хода по счётчику повторов и виду хода.
+
+    Args:
+        state: состояние звонка; читается счётчик ``lead_repeat``.
+        turn_kind: вид хода из состояния.
+
+    Returns:
+        ``repeat`` — ведущий шаг повторяется не меньше порога; ``pull`` —
+        ход вытаскивания; ``normal`` — штатный ход.
+    """
+    if (
+        settings.lead_repeat_threshold > 0
+        and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
+    ):
+        return "repeat"
+    if turn_kind == "pull":
+        return "pull"
+    return "normal"
+
+
 def _build_respond_messages(
     *,
     prompt_kind: str,
@@ -654,7 +677,13 @@ def _build_respond_messages(
     pending_fields: list[str],
     turn_kind: str,
 ) -> list[Any]:
-    """Собирает сообщения генератора для одной ступени."""
+    """Собирает сообщения генератора для одной ступени.
+
+    Ход вытаскивания идёт в свою короткую сборку: полный ход продажи ради
+    одной добивки не нужен. Приоритет повтора над вытаскиванием сохранён —
+    когда ведущий шаг не даёт ответа много ходов подряд, разговор вытягивают
+    полной сборкой в режиме ``repeat``.
+    """
     if prompt_kind == "waiting":
         return build_waiting_messages(
             script,
@@ -672,6 +701,18 @@ def _build_respond_messages(
             messages=history,
             history_limit=settings.filler_history_limit,
         )
+    turn_mode = _turn_mode(state=state, turn_kind=turn_kind)
+    if turn_mode == "pull":
+        return build_pull_messages(
+            script,
+            messages=history,
+            profile=profile,
+            pending_fields=pending_fields,
+            step=lead,
+            facts=facts,
+            history_limit=PULL_HISTORY_TURNS,
+            context_text=context_text,
+        )
     closed_steps = [
         script.steps[step_id]
         for step_id, status in (state.get("step_status") or {}).items()
@@ -681,14 +722,6 @@ def _build_respond_messages(
     next_step = (
         script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
     )
-    turn_mode: TurnMode = "normal"
-    if (
-        settings.lead_repeat_threshold > 0
-        and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
-    ):
-        turn_mode = "repeat"
-    elif turn_kind == "pull":
-        turn_mode = "pull"
     return build_turn_messages(
         script=script,
         steps=_lead_first(head, lead),
@@ -799,11 +832,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         system_len = len(messages[0].content) if messages else 0
         step_prefix = f"ступень {step}, " if step is not None else ""
         lead_count = int(state.get("lead_repeat") or 0)
-        turn_mode: TurnMode = "normal"
-        if settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
-            turn_mode = "repeat"
-        elif turn_kind == "pull":
-            turn_mode = "pull"
+        turn_mode = _turn_mode(state=state, turn_kind=turn_kind)
         if turn_mode == "pull":
             lead_hint = ", режим pull, вытаскивание"
         elif settings.lead_repeat_threshold > 0:

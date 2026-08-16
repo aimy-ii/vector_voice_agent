@@ -308,8 +308,12 @@ async def test_двигать_некуда_включается_повтор(sto
     assert LEAD_REPEAT_INTRO in messages[0].content
 
 
-def test_догон_с_единичным_счётчиком_остаётся_вытаскиванием(script, monkeypatch):
-    """На ``pull`` при ``lead_repeat=1`` в промпте вытаскивание, не повтор."""
+def test_догон_с_единичным_счётчиком_идёт_в_короткую_сборку(script, monkeypatch):
+    """На ``pull`` при ``lead_repeat=1`` собирается короткое вытаскивание.
+
+    Полная сборка с ``PULL_TASK`` осталась в файле, но со штатной точки
+    выбора больше не приходит: добивку собирает ``build_pull_messages``.
+    """
     from graph.prompts import LEAD_REPEAT_INTRO, PULL_TASK
 
     monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
@@ -329,7 +333,8 @@ def test_догон_с_единичным_счётчиком_остаётся_в
         turn_kind="pull",
     )
     content = messages[0].content
-    assert PULL_TASK in content
+    assert "Задача этого хода одна: вытянуть человека на ответ" in content
+    assert PULL_TASK not in content
     assert LEAD_REPEAT_INTRO not in content
 
 
