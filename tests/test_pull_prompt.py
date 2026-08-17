@@ -5,10 +5,10 @@
 поэтому промпт свой, а не полный ход продажи с заплатками.
 
 Промпт собран вокруг порядка рассуждения — прочитать разговор, найти
-незакрытое, взять тему из шагов сценария, сказать новое с вопросом.
+незакрытое, продолжить с последней реплики бота, сказать новое с вопросом.
 Шапка, закрытые шаги и следующий шаг приходят тем же путём, что в
-полную сборку. Запрет повтора и запрет подхвата — отдельные пункты
-рядом с требованием вопроса.
+полную сборку. Запрет повтора — отдельный пункт рядом с требованием
+вопроса.
 """
 
 from __future__ import annotations
@@ -24,8 +24,8 @@ from graph import nodes as nodes_module
 from graph.prompts import (
     _HARD_FACT_BAN,
     _PULL_BOUNDS,
+    _PULL_LAST_INTRO,
     _PULL_NEXT_INTRO,
-    _PULL_NO_CATCHUP,
     _PULL_NO_REPEAT,
     _PULL_QUESTION,
     _PULL_SITUATION,
@@ -123,52 +123,23 @@ def test_промпт_ведёт_по_порядку_рассуждения(scri
     content = _pull(script_v4)[0].content
     intro = content.index("Как рассуждать перед репликой")
     read = content.index("Прочитай разговор целиком")
-    hanging = content.index("Найди, на чём он повис")
-    topic = content.index("Тему для реплики бери из шагов сценария")
+    hanging = content.index("Найди, на чём разговор повис")
+    cont = content.index("Продолжай с последней своей реплики")
+    lead = content.index("Веди разговор к тому, что ещё не сделано")
     fresh = content.index("Скажи то, чего в этом разговоре ещё не было")
-    assert content.index(_PULL_SITUATION) < intro < read < hanging < topic < fresh
-    for number, opening in enumerate(("Прочитай", "Найди", "Тему", "Скажи"), start=1):
+    assert content.index(_PULL_SITUATION) < intro < read < hanging < cont < lead < fresh
+    for number, opening in enumerate(("Прочитай", "Найди", "Продолжай", "Веди", "Скажи"), start=1):
         assert f"{number}. {opening}" in content
 
 
 def test_тема_берётся_из_шагов_сценария(script_v4):
     """В порядке рассуждения — прямое указание брать тему из шагов, а не выдумывать."""
     content = _pull(script_v4)[0].content
-    topic = content[content.index("Тему для реплики бери из шагов сценария") :]
-    assert "из незакрытых или из следующего" in topic
+    topic = content[content.index("Веди разговор к тому, что ещё не сделано") :]
+    assert "к незакрытому шагу сценария из списка ниже или к следующему" in topic
     assert "Посторонних тем не бывает" in topic
     assert "либо шаг сценария, либо то, что человек сам поднял" in topic
-    assert "движется к тому, что ещё не сделано" in topic
     assert "Выдумывать тему нельзя" in topic
-
-
-def test_запрет_повтора_отдельным_пунктом_рядом_с_вопросом(script_v4):
-    """Повтор последней реплики бота запрещён отдельным пунктом, не внутри рассуждения."""
-    content = _pull(script_v4)[0].content
-    assert _PULL_NO_REPEAT in content
-    assert "не повторяет и не пересказывает последнюю реплику бота" in content
-    question = content.index(_PULL_QUESTION)
-    repeat = content.index(_PULL_NO_REPEAT)
-    catchup = content.index(_PULL_NO_CATCHUP)
-    assert question < repeat < catchup
-    thinking = content[content.index(_PULL_THINKING) : question]
-    assert _PULL_NO_REPEAT not in thinking
-
-
-def test_запрет_подхвата_отдельным_пунктом_с_примерами_из_звонка(script_v4):
-    """Подхват своей мысли запрещён отдельно; в тексте — три добивки из звонка."""
-    content = _pull(script_v4)[0].content
-    assert _PULL_NO_CATCHUP in content
-    assert "Реплика не начинается с подхвата собственной последней мысли" in content
-    for opening in ("«супер, тогда»", "«без проблем»", "«поняла, тогда»", "«хорошо, жду»"):
-        assert opening in content
-    assert "шапка про уже сказанное" in content
-    assert "Супер, тогда закрепляю за Вами филиал на Коломяжском" in content
-    assert "Без проблем, жду от Вас документы, когда будет удобно" in content
-    assert "Поняла, тогда ориентируюсь на Ваше сообщение" in content
-    question = content.index(_PULL_QUESTION)
-    thinking = content[content.index(_PULL_THINKING) : question]
-    assert "Реплика не начинается с подхвата собственной последней мысли" not in thinking
 
 
 def test_требование_вопроса_на_месте(script_v4):
@@ -183,18 +154,49 @@ def test_требование_вопроса_на_месте(script_v4):
     assert content.index(_PULL_THINKING) < content.index(_PULL_QUESTION)
 
 
-def test_запрет_повтора_и_подхвата_стоят_между_вопросом_и_запретом_фактов(script_v4):
-    """Вопрос, повтор, подхват, запрет фактов и границы идут подряд, без чужого текста."""
+def test_последняя_реплика_бота_стоит_выше_порядка_рассуждения(script_v4):
+    """Промпт добивки содержит последнюю реплику бота дословно, выше порядка рассуждения."""
+    last_reply = (
+        "Коломяжский проспект работает каждый день с десяти до восьми, перерыв с двух до трёх."
+    )
+    content = _pull(
+        script_v4,
+        messages=[
+            HumanMessage(content="Когда работает филиал?"),
+            AIMessage(content=last_reply),
+        ],
+    )[0].content
+    assert last_reply in content
+    assert content.index(_PULL_SITUATION) < content.index(_PULL_LAST_INTRO)
+    assert content.index(_PULL_LAST_INTRO) < content.index(last_reply)
+    assert content.index(last_reply) < content.index(_PULL_THINKING)
+
+
+def test_без_реплик_бота_раздел_последней_реплики_не_печатается(script_v4):
+    """Нет реплик бота — раздела нет, остальные части промпта на месте."""
+    content = _pull(
+        script_v4,
+        messages=[HumanMessage(content="Сколько стоит обучение?")],
+    )[0].content
+    assert _PULL_LAST_INTRO not in content
+    assert _PULL_SITUATION in content
+    assert _PULL_THINKING in content
+    assert _PULL_QUESTION in content
+    assert _PULL_NO_REPEAT in content
+    assert _HARD_FACT_BAN in content
+    assert _PULL_BOUNDS in content
+
+
+def test_запрет_пересказа_остался_запрета_подхвата_нет(script_v4):
+    """Запрет пересказа в промпте на месте, запрета подхвата больше нет."""
     content = _pull(script_v4)[0].content
+    assert _PULL_NO_REPEAT in content
     question = content.index(_PULL_QUESTION)
     repeat = content.index(_PULL_NO_REPEAT)
-    catchup = content.index(_PULL_NO_CATCHUP)
     ban = content.index(_HARD_FACT_BAN)
-    bounds = content.index(_PULL_BOUNDS)
-    assert question < repeat < catchup < ban < bounds
-    assert content[question:bounds] == (
-        f"{_PULL_QUESTION}\n{_PULL_NO_REPEAT}\n{_PULL_NO_CATCHUP}\n{_HARD_FACT_BAN}\n"
-    )
+    assert question < repeat < ban
+    assert content[question:ban] == f"{_PULL_QUESTION}\n{_PULL_NO_REPEAT}\n"
+    assert "подхвата собственной последней мысли" not in content
 
 
 def test_ограничения_по_числу_слов_в_промпте_нет(script_v4):
@@ -536,9 +538,7 @@ def test_шапки_нет_но_указание_откуда_брать_тем�
     assert "Основной:" not in content
     assert "Незакрытые темы:" not in content
     assert "Если шагов сценария ниже нет" in content
-    assert content.index("Тему для реплики бери из шагов сценария") < content.index(
-        _PULL_STEPS_NONE
-    )
+    assert content.index("Если шагов сценария ниже нет") < content.index(_PULL_STEPS_NONE)
 
 
 def test_полная_сборка_на_пустой_шапке_не_изменилась(script_v4):

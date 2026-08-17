@@ -22,6 +22,7 @@ from graph.farewell_agent import (
     _format_history,
     decide_farewell,
 )
+from graph.prompts import _INITIATIVE_BLOCK
 from graph.schemas import TurnResult
 from script.store import ScriptProgress, progress_to_state
 
@@ -707,3 +708,24 @@ async def test_пустая_реплика_с_историей_идёт_в_мо�
 
     assert called is True
     assert result.conversation_ended is True
+
+
+def test_системное_сообщение_граница_темы_и_разговора():
+    """Отказ от темы в ответ на вопрос бота — не конец; смотреть на реплику бота."""
+    assert "отказ обсуждать тему сейчас в ответ на вопрос бота" in FAREWELL_SYSTEM
+    assert "Реплика бота перед ответом видна в диалоге ниже" in FAREWELL_SYSTEM
+    assert "по ней и смотреть, на что человек отвечает" in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_без_неудобно_говорить_как_признака_конца():
+    """«неудобно говорить» больше не признак конца; отказ продолжать разговор на месте."""
+    assert "неудобно говорить" not in FAREWELL_SYSTEM
+    assert "«мне пора»" in FAREWELL_SYSTEM
+    assert "«перезвоните позже»" in FAREWELL_SYSTEM
+
+
+def test_инициатива_запрещает_разрешение_на_переход_к_теме():
+    """В блоке инициативы нельзя спрашивать разрешение перейти к теме."""
+    assert "Разрешения на переход к теме тоже спрашивать нельзя" in _INITIATIVE_BLOCK
+    assert "«Если хотите, расскажу подробнее?»" in _INITIATIVE_BLOCK
+    assert "«Готова рассказать, если интересно?»" in _INITIATIVE_BLOCK
