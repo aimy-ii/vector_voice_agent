@@ -51,12 +51,14 @@ class NearbyResult(BaseModel):
         text: блок для контекста; либо перечень с правилами, либо строка
             о том, что место не опознано.
         branch_slugs: слаги подобранных филиалов в порядке близости.
+        branch_cards: подобранные филиалы целиком, в том же порядке.
         found: удалось ли подобрать хоть один филиал.
     """
 
     key: str
     text: str
     branch_slugs: list[str] = Field(default_factory=list)
+    branch_cards: list[dict[str, Any]] = Field(default_factory=list)
     found: bool = False
 
 
@@ -255,7 +257,12 @@ def format_found(place: str, items: Sequence[Mapping[str, Any]]) -> str:
         address = str(item.get("address") or "").strip()
         landmark = str(item.get("landmark") or "").strip()
         tail = f" ({landmark})" if landmark else ""
-        lines.append(f"{number}. {address} — {_km(item.get('distance_km'))} км{tail}")
+        hours = str(item.get("working_hours") or "").strip()
+        pause = str(item.get("break_time") or "").strip()
+        schedule = f", работает {hours}" if hours else ""
+        if hours and pause:
+            schedule += f", перерыв {pause}"
+        lines.append(f"{number}. {address} — {_km(item.get('distance_km'))} км{tail}{schedule}")
     lines.append("Первый — ближайший, о нём и речь. Остальные — только если первый не подошёл.")
     lines.append(
         "Человек засомневался, замялся или спросил, есть ли ближе, — назвать "
@@ -371,6 +378,7 @@ async def lookup_nearby(
         key=key,
         text=format_found(place, items),
         branch_slugs=[slug for slug in slugs if slug],
+        branch_cards=[dict(item) for item in items],
         found=True,
     )
 

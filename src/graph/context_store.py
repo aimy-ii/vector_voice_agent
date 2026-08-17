@@ -29,6 +29,7 @@ CONTEXT_FIELDS_STATIC: frozenset[str] = frozenset(
         "city_name",
         "branch_slug",
         "branch_candidates",
+        "branch_cards",
         "city_faq",
         "frozen",
     }
