@@ -566,7 +566,8 @@ def test_порядок_блоков_персона_профиль_шапка(sc
     ctx_i = content.index("# КОНТЕКСТ")
     steps_i = content.index("# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ")
     form_i = content.index("# ФОРМА ОТВЕТА")
-    assert how_i < rules_i < ctx_i < steps_i < form_i
+    initiative_i = content.index("# ИНИЦИАТИВА")
+    assert how_i < rules_i < ctx_i < steps_i < form_i < initiative_i
     assert content.index("Дарья") > how_i
     assert content.index("Что уже известно") > ctx_i
 
@@ -1833,6 +1834,7 @@ _TOP_LEVEL_SECTIONS: tuple[str, ...] = (
     "# ЕЩЁ НЕ ЗАКРЫТО",
     "# ЧТО ДАЛЬШЕ",
     "# ФОРМА ОТВЕТА",
+    "# ИНИЦИАТИВА",
 )
 
 
@@ -2074,6 +2076,7 @@ def test_короткие_сборки_без_разметки_разделов(
         assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" not in content
         assert "# ЕЩЁ НЕ ЗАКРЫТО" not in content
         assert "# ШАГИ В РАБОТЕ" not in content
+        assert "# ИНИЦИАТИВА" not in content
 
 
 def test_текущий_шаг_в_сейчас_с_требованиями_и_примерами(script_v4):
@@ -2839,3 +2842,133 @@ def test_полная_сборка_содержит_оба_изменённых_
     content = messages[0].content
     assert RULE_NO_OPEN_QUESTIONS in content
     assert _rule_no_permission() in content
+
+
+#: Правила 14, 15 и 17 — дословно, без изменений.
+_RULE_14_VERBATIM = RULE_NO_OPEN_QUESTIONS
+_RULE_15_VERBATIM = (
+    "Разрешения продолжать не спрашивают: есть что рассказать — рассказывают. "
+    "Запрещён весь класс: любой вопрос или приглашение спросить, которым агент "
+    "просит согласия говорить дальше или отдаёт выбор темы собеседнику, какими "
+    "бы словами это ни было сказано. Примеры, не весь перечень: «рассказать "
+    "подробнее?», «интересно узнать подробнее?», «могу назвать?», "
+    "«продолжать?», «продолжим?». Это не запрет на вопросы вообще, а запрет "
+    "перекладывать на собеседника решение, говорить ли дальше."
+)
+_RULE_17_VERBATIM = RULE_MOVE_ON
+
+#: Примеры запрещённых оборотов из боевых звонков — в разделе инициативы.
+_INITIATIVE_CALL_EXAMPLES: tuple[str, ...] = (
+    "«Если хотите, расскажу подробнее?»",
+    "«Готова рассказать, если интересно?»",
+)
+
+
+def test_правила_14_15_17_не_изменились():
+    """Правила 14, 15 и 17 в SPEECH_RULES остались дословно прежними."""
+    assert SPEECH_RULES[14] == _RULE_14_VERBATIM
+    assert SPEECH_RULES[15] == _RULE_15_VERBATIM
+    assert SPEECH_RULES[17] == _RULE_17_VERBATIM
+
+
+def test_инициатива_последний_раздел_полной_сборки(script):
+    """Раздел «ИНИЦИАТИВА» есть в полной сборке и стоит после «ФОРМА ОТВЕТА»."""
+    content = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )[0].content
+    form_i = content.index("# ФОРМА ОТВЕТА")
+    initiative_i = content.index("# ИНИЦИАТИВА")
+    assert form_i < initiative_i
+    assert content[initiative_i:].startswith("# ИНИЦИАТИВА")
+    after_initiative = content[initiative_i + len("# ИНИЦИАТИВА") :]
+    assert not re.search(r"^# [^#\n]", after_initiative, flags=re.MULTILINE)
+
+
+def test_инициатива_короткий_раздел(script):
+    """Раздел «ИНИЦИАТИВА» — несколько строк, не длинный перечень."""
+    content = build_turn_messages(
+        script=script,
+        steps=[script.step("city")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )[0].content
+    body = _top_section(content, "ИНИЦИАТИВА").strip()
+    lines = [line for line in body.splitlines() if line.strip()]
+    assert 1 <= len(lines) <= 5
+
+
+def test_инициатива_требования_и_запрет_разрешений(script):
+    """В разделе инициативы — вопрос по делу и запрет спрашивать разрешения."""
+    body = _top_section(
+        build_turn_messages(
+            script=script,
+            steps=[script.step("city")],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )[0].content,
+        "ИНИЦИАТИВА",
+    ).lower()
+    assert "вопросом, который двигает дело" in body
+    assert "выбор" in body
+    assert "решение" in body
+    assert "недостающие данные" in body
+    assert "спрашивать разрешения рассказать" in body
+    assert "работа по сценарию" in body
+
+
+def test_инициатива_примеры_из_звонков(script):
+    """В разделе инициативы есть примеры запрещённых оборотов из боевых звонков."""
+    body = _top_section(
+        build_turn_messages(
+            script=script,
+            steps=[script.step("city")],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )[0].content,
+        "ИНИЦИАТИВА",
+    )
+    assert "Примеры, не весь перечень:" in body
+    for example in _INITIATIVE_CALL_EXAMPLES:
+        assert example in body
+
+
+def test_короткие_сборки_без_раздела_инициативы(script):
+    """Вытаскивание, заглушка и реплика ожидания не содержат раздел «ИНИЦИАТИВА»."""
+    from graph.prompts import (
+        build_filler_messages,
+        build_pull_messages,
+        build_waiting_messages,
+    )
+
+    filler = build_filler_messages(script, messages=[HumanMessage(content="?")], history_limit=2)[
+        0
+    ].content
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("city"),
+        history_limit=2,
+    )[0].content
+    pull = build_pull_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        profile={},
+        step=script.step("city"),
+    )[0].content
+    for content in (filler, waiting, pull):
+        assert "# ИНИЦИАТИВА" not in content
+        for example in _INITIATIVE_CALL_EXAMPLES:
+            assert example not in content
