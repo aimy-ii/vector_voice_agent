@@ -1975,10 +1975,10 @@ async def test_commit_флаг_из_контекста_ставит_conversation
     assert "разговор закончен=True" in commit_msgs[0]
 
 
-async def test_commit_без_флага_в_контексте_ставит_ложь(
+async def test_commit_без_флага_в_контексте_сохраняет_поднятый_флаг_состояния(
     spoken, store, checker, kb, resolvers, model, use_v2, script, ctx_store
 ):
-    """В контексте False — в состояние уходит False, ответ модели не читаем."""
+    """В контексте False, в состоянии True — признак не опускается."""
     from graph.context import ConversationContext
     from graph.state import new_state_defaults
     from script.store import ScriptProgress
@@ -2001,13 +2001,13 @@ async def test_commit_без_флага_в_контексте_ставит_ло�
         "conversation_context": {},
     }
     out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
-    assert out.get("conversation_ended") is False
+    assert out.get("conversation_ended") is True
 
 
-async def test_commit_флаг_переставляется_из_контекста(
+async def test_commit_флаг_не_опускается_из_состояния(
     spoken, store, checker, kb, resolvers, model, monkeypatch, use_v2, ctx_store, caplog
 ):
-    """Флаг из контекста переставляет состояние, в том числе обратно в False."""
+    """Признак в состоянии True не опускается ложным значением из контекста."""
     import logging
 
     from graph.context import ConversationContext
@@ -2031,14 +2031,14 @@ async def test_commit_флаг_переставляется_из_контекс�
     with caplog.at_level(logging.INFO):
         out = await nodes_module.commit_node(state, None)  # type: ignore[arg-type]
 
-    assert out.get("conversation_ended") is False
+    assert out.get("conversation_ended") is True
     commit_msgs = [
         r.message
         for r in caplog.records
         if r.name == "graph.progress" and r.levelno == logging.INFO and "[commit|" in r.message
     ]
     assert commit_msgs
-    assert "разговор закончен=False" in commit_msgs[0]
+    assert "разговор закончен=True" in commit_msgs[0]
 
 
 async def test_commit_продолжение_не_трогает_флаг(

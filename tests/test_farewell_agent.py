@@ -245,12 +245,47 @@ async def test_длинный_диалог_агент_пишет_флаг(script
     assert ctx.get("conversation_ended") is True
 
 
-async def test_флаг_переставляется_обратно_в_ложь(script, monkeypatch, _offline_farewell):
-    """Агент вернул ложь — флаг снова False, необратимости нет."""
+async def test_флаг_остаётся_поднятым_если_агент_вернул_ложь(
+    script, monkeypatch, _offline_farewell
+):
+    """Агент вернул ложь — признак конца разговора не опускается."""
     await _offline_farewell.save(
         "local",
         ConversationContext(conversation_ended=True),
     )
+
+    async def fake_decide(reply, *, history=(), agent=None):
+        return FarewellDecision(conversation_ended=False)
+
+    monkeypatch.setattr("graph.checker_graph.decide_farewell", fake_decide)
+
+    text = "а ещё вопрос про рассрочку пожалуйста"
+    state = _live_state(script, partial=text, messages=_long_history(6))
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", _FakeChecker()),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert out["conversation_context"]["conversation_ended"] is True
+    loaded = await _offline_farewell.load("local")
+    assert loaded is not None
+    assert loaded.conversation_ended is True
+
+
+async def test_флаг_не_поднимается_если_агент_вернул_ложь(script, monkeypatch, _offline_farewell):
+    """Признак не был поднят — ложный вердикт агента его не поднимает."""
+    await _offline_farewell.save("local", ConversationContext(conversation_ended=False))
 
     async def fake_decide(reply, *, history=(), agent=None):
         return FarewellDecision(conversation_ended=False)

@@ -31,7 +31,13 @@ from langgraph.runtime import Runtime
 
 from core.config import settings
 from graph.checker import CheckerClient, check_pass
-from graph.context import DYN_NONE, DYN_SEARCHING, DYN_WORKING, merge_static
+from graph.context import (
+    DYN_NONE,
+    DYN_SEARCHING,
+    DYN_WORKING,
+    merge_static,
+    raise_conversation_ended,
+)
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import reply_hash, run_contexter
 from graph.facts import knowledge_of, needs_of
@@ -176,18 +182,17 @@ def agent_replies_to_check(
     *,
     checked_entry_id: str,
 ) -> list[TranscriptEntry]:
-    """Реплики бота, рождённые на ходах без реплики человека и не разобранные.
+    """Реплики бота после последней фразы человека, ещё не разобранные судьёй.
 
-    Служебный проход запускает бот, пока говорит человек, поэтому судья
-    видит только реплики человека. Реплики бота с ходов ``continuation`` /
-    ``silence`` / ``pull`` не получал никто — и шаг, который такая реплика
-    отработала, оставался открытым.
+    Служебный проход запускается, пока говорит человек, поэтому судья
+    видит только его реплику. Ответ бота на этот ход попадает в историю
+    позже — на следующем служебном проходе. Шаги речи («сказать»,
+    «предложить»), которые бот выполняет в ответ человеку, закрываются
+    именно его репликой, а не словами клиента — их тоже берём на разбор.
 
-    Вид хода в истории не хранится, но выводится однозначно: фразу человека
-    дописывает ``ingest_node`` только на ходе с репликой, значит реплика
-    бота сразу за другой репликой бота — это и есть ход без человека.
-    Берётся хвост истории после последней фразы человека; первая реплика
-    хвоста — ответ на неё, её судья уже разобрал по реплике человека.
+    На ходах ``continuation`` / ``silence`` / ``pull`` после последней
+    фразы человека идут только реплики бота — их тоже включаем. Подряд
+    идущие реплики бота судья получает одним блоком в ``check_agent_replies``.
 
     Args:
         entries: полная история звонка из кеша контекста.
@@ -202,7 +207,7 @@ def agent_replies_to_check(
         if entry.role == ROLE_CLIENT:
             last_client = index
     tail = list(entries[last_client + 1 :])
-    pending = [entry for entry in tail[1:] if entry.role == ROLE_AGENT and entry.text.strip()]
+    pending = [entry for entry in tail if entry.role == ROLE_AGENT and entry.text.strip()]
     if not checked_entry_id:
         return pending
     for index, entry in enumerate(pending):
@@ -369,7 +374,7 @@ async def check_agent_replies(
             f"реплик бота на разбор {len(pending_entries)}, закрывать нечего",
             "state",
         )
-        return progress, [], marker
+        return progress, [], ""
 
     # Подряд идущие реплики бота — одна его речь: судье уходят одним блоком,
     # чтобы разбор стоил один круг вызовов, а не круг на каждую реплику.
@@ -691,7 +696,10 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             if decision is None:
                 farewell_note = "ошибка агента, флаг не тронут"
             else:
-                ended = bool(decision.conversation_ended)
+                ended = raise_conversation_ended(
+                    ctx.conversation_ended,
+                    bool(decision.conversation_ended),
+                )
                 ctx = ctx.model_copy(update={"conversation_ended": ended})
                 farewell_note = f"закончен={ended}"
 

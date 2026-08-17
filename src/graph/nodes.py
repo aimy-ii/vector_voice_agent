@@ -34,6 +34,7 @@ from graph.context import (
     ConversationContext,
     context_from_state,
     missing_needs,
+    raise_conversation_ended,
 )
 from graph.context_store import (
     CONTEXT_FIELDS_TURN,
@@ -1182,7 +1183,10 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     if not no_client_reply or spoken_text:
         ctx = await _load_context(state)
         if not no_client_reply:
-            conversation_ended = bool(ctx.conversation_ended)
+            conversation_ended = raise_conversation_ended(
+                conversation_ended,
+                bool(ctx.conversation_ended),
+            )
             patch["conversation_ended"] = conversation_ended
         if spoken_text:
             updates: dict[str, Any] = {
@@ -1195,9 +1199,9 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             }
             fields = CONTEXT_FIELDS_TURN
             if bot_farewell:
-                conversation_ended = True
-                patch["conversation_ended"] = True
-                updates["conversation_ended"] = True
+                conversation_ended = raise_conversation_ended(conversation_ended, True)
+                patch["conversation_ended"] = conversation_ended
+                updates["conversation_ended"] = conversation_ended
                 fields = CONTEXT_FIELDS_TURN | frozenset({"conversation_ended"})
             ctx = ctx.model_copy(update=updates)
             ctx_patch = await _save_context(ctx, fields=fields)

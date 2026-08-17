@@ -83,7 +83,7 @@ class ConversationContext(BaseModel):
             затирала найденные адреса.
         city_faq: FAQ меты города (вопрос → ответ) для ``CityFaqTool``.
         conversation_ended: разговор закончен по решению фонового агента
-            прощания; переставляется на каждом ходу с репликой человека.
+            прощания; поднимается необратимо и держится до конца звонка.
         frozen: статика уже зафиксирована и не пересобирается.
         transcript: полная история звонка. Пишет основной ход: свои реплики
             в момент генерации, чужие — из снимка бота. Читают оба графа,
@@ -462,6 +462,22 @@ def context_from_state(data: Mapping[str, Any] | None) -> ConversationContext:
     if not data:
         return ConversationContext()
     return ConversationContext.model_validate(dict(data))
+
+
+def raise_conversation_ended(current: bool, decision: bool) -> bool:
+    """Поднимает признак конца разговора необратимо.
+
+    Агент прощания смотрит каждую реплику человека заново; без этой
+    функции ложный «не конец» мог бы опустить уже поднятый признак.
+
+    Args:
+        current: значение в контексте или состоянии до решения.
+        decision: новое решение агента или локальной проверки.
+
+    Returns:
+        True, если признак уже был поднят или решение его поднимает.
+    """
+    return current or decision
 
 
 def _city_known(

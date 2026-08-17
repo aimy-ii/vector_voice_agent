@@ -205,10 +205,10 @@ async def test_реплика_бота_на_вытаскивании_закры�
     assert out["last_checked_agent_entry"] == entries[-1].entry_id
     agent_calls = client.calls_of("agent")
     assert [call["step_id"] for call in agent_calls] == ["closing"]
-    assert agent_calls[0]["client_reply"] == PULL_REPLY
-    # Разбираемая реплика уходит отдельным блоком, в срез истории не попадает.
+    assert agent_calls[0]["client_reply"] == f"{ANSWER_REPLY}\n{PULL_REPLY}"
+    # Разбираемые реплики уходят отдельным блоком, в срез истории не попадают.
     assert PULL_REPLY not in agent_calls[0]["history_slice"]
-    assert ANSWER_REPLY in agent_calls[0]["history_slice"]
+    assert ANSWER_REPLY not in agent_calls[0]["history_slice"]
 
 
 async def test_шаг_с_ответом_человека_репликой_бота_не_закрывается(script, _offline_context):
@@ -323,7 +323,34 @@ async def test_допродажа_и_приглашение_закрываютс
     assert out["last_checked_agent_entry"] == entries[-1].entry_id
     agent_calls = client.calls_of("agent")
     assert [call["step_id"] for call in agent_calls] == ["upsell", "referral"]
+    assert agent_calls[0]["client_reply"] == f"{ANSWER_REPLY}\n{SALES_PULL_REPLY}"
+
+
+async def test_допродажа_в_ответ_человеку_закрывается_на_следующем_ходе(
+    script_v4, _offline_context
+):
+    """Шаги речи в ответе на реплику человека закрываются его же репликой бота."""
+    entries = append_agent([], turn=1, text="Добрый день! Как к Вам обращаться?")
+    entries = append_client(entries, turn=2, text="Андрей, записывайте")
+    entries = append_agent(entries, turn=2, text=SALES_PULL_REPLY)
+    await _offline_context.save("local", ConversationContext(transcript=entries))
+    progress = _sales_progress()
+    client = SpeakerChecker({"agent": {"upsell", "referral", "city"}})
+
+    out = await _run_live(
+        script_v4,
+        _state(script_v4, partial="Хорошо, понял, спасибо", progress=progress),
+        progress,
+        client,
+    )
+
+    assert out["step_status"]["upsell"] == "closed"
+    assert out["step_status"]["referral"] == "closed"
+    assert out["last_checked_agent_entry"] == entries[-1].entry_id
+    agent_calls = client.calls_of("agent")
+    assert [call["step_id"] for call in agent_calls] == ["upsell", "referral"]
     assert agent_calls[0]["client_reply"] == SALES_PULL_REPLY
+    assert client.calls_of("client")
 
 
 async def test_шаг_добычи_репликой_бота_не_закрывается(script_v4, _offline_context):
@@ -361,16 +388,20 @@ async def test_разбор_реплики_человека_в_сценарии_
     assert out["last_checked_partial"] == partial
 
 
-def test_на_разбор_идут_только_реплики_после_ответа_человеку():
-    """Первая реплика хвоста — ответ человеку; на разбор идут следующие."""
+def test_на_разбор_идут_реплики_бота_после_последней_фразы_человека():
+    """Хвост после человека — ответ ему и ходы без реплики; всё идёт судье."""
     entries = _transcript()
     pending = agent_replies_to_check(entries, checked_entry_id="")
-    assert [entry.text for entry in pending] == [PULL_REPLY]
+    assert [entry.text for entry in pending] == [ANSWER_REPLY, PULL_REPLY]
 
     # Ещё один ход без человека — на разбор идут обе реплики.
     entries = append_agent(entries, turn=4, text="Если удобнее вечером, тоже подстроимся.")
     pending = agent_replies_to_check(entries, checked_entry_id="")
-    assert [entry.text for entry in pending] == [PULL_REPLY, entries[-1].text]
+    assert [entry.text for entry in pending] == [
+        ANSWER_REPLY,
+        PULL_REPLY,
+        entries[-1].text,
+    ]
 
     # Разобранное отсекается по отметке.
     pending = agent_replies_to_check(entries, checked_entry_id=entries[-2].entry_id)
@@ -378,15 +409,17 @@ def test_на_разбор_идут_только_реплики_после_от�
     assert agent_replies_to_check(entries, checked_entry_id=entries[-1].entry_id) == []
 
 
-def test_ответ_человеку_на_разбор_не_идёт():
-    """Реплика бота сразу после фразы человека разбирается по реплике человека."""
+def test_ответ_человеку_тоже_идёт_на_разбор_реплики_бота():
+    """Реплика бота сразу после фразы человека закрывает шаги речи."""
     entries = append_client([], turn=1, text="Здравствуйте")
     entries = append_agent(entries, turn=1, text="Добрый день!")
-    assert agent_replies_to_check(entries, checked_entry_id="") == []
+    pending = agent_replies_to_check(entries, checked_entry_id="")
+    assert [entry.text for entry in pending] == ["Добрый день!"]
     # Новая фраза человека обнуляет хвост.
     entries = append_client(entries, turn=2, text="Записывайте")
     entries = append_agent(entries, turn=2, text="Записываю.")
-    assert agent_replies_to_check(entries, checked_entry_id="") == []
+    pending = agent_replies_to_check(entries, checked_entry_id="")
+    assert [entry.text for entry in pending] == ["Записываю."]
 
 
 def test_шаги_с_ответом_человека_реплике_бота_недоступны(script, script_v4):
