@@ -2901,7 +2901,7 @@ def test_инициатива_короткий_раздел(script):
     )[0].content
     body = _top_section(content, "ИНИЦИАТИВА").strip()
     lines = [line for line in body.splitlines() if line.strip()]
-    assert 1 <= len(lines) <= 5
+    assert 1 <= len(lines) <= 8
 
 
 def test_инициатива_требования_и_запрет_разрешений(script):
@@ -2972,3 +2972,83 @@ def test_короткие_сборки_без_раздела_инициатив�
         assert "# ИНИЦИАТИВА" not in content
         for example in _INITIATIVE_CALL_EXAMPLES:
             assert example not in content
+
+
+def test_инициатива_признак_негодного_вопроса_и_прежние_примеры(script):
+    """В разделе инициативы есть признак негодного вопроса; примеры про «расскажу подробнее» на месте."""
+    body = _top_section(
+        build_turn_messages(
+            script=script,
+            steps=[script.step("city")],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )[0].content,
+        "ИНИЦИАТИВА",
+    )
+    assert "про сам разговор, а не про дело" in body
+    assert "Интересно узнать, как проходит вождение?" in body
+    assert "Хотите узнать, когда стартует группа?" in body
+    assert "Хотели бы узнать подробнее?" in body
+    for example in _INITIATIVE_CALL_EXAMPLES:
+        assert example in body
+
+
+def test_инициатива_вопрос_по_делу_даже_если_нет(script):
+    """В разделе инициативы вопрос по делу годится, даже если на него можно ответить «нет»."""
+    body = _top_section(
+        build_turn_messages(
+            script=script,
+            steps=[script.step("city")],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )[0].content,
+        "ИНИЦИАТИВА",
+    )
+    assert "даже если на него можно ответить «нет»" in body
+    assert "нельзя спрашивать, говорить ли" in body
+    assert "спрашивать, что решаем" in body
+
+
+def test_инициатива_не_закругляться_держанием_связи(script):
+    """Пока шаги незакрыты, нельзя заканчивать держанием связи; прощаться по смыслу можно."""
+    body = _top_section(
+        build_turn_messages(
+            script=script,
+            steps=[script.step("city")],
+            profile={},
+            facts={},
+            history=[],
+            asides_done=[],
+        )[0].content,
+        "ИНИЦИАТИВА",
+    )
+    assert "незакрытые шаги" in body
+    assert "держанием связи" in body
+    assert "«всегда на связи»" in body
+    assert "«если что — пишите»" in body
+    assert "«дайте знать»" in body
+    assert "«напомню за день»" in body
+    assert "сам простился" in body
+    assert "не нужно" in body
+
+
+def test_добивка_без_новых_строк_инициативы(script):
+    """Промпт добивки не содержит новых строк раздела инициативы."""
+    from graph.prompts import build_pull_messages
+
+    pull = build_pull_messages(
+        script,
+        messages=[HumanMessage(content="?")],
+        profile={},
+        step=script.step("city"),
+    )[0].content
+    assert "про сам разговор, а не про дело" not in pull
+    assert "Признак негодного вопроса" not in pull
+    assert "Вопрос по делу годится всегда" not in pull
+    assert "держанием связи" not in pull
+    assert "«всегда на связи»" not in pull
+    assert "«напомню за день»" not in pull
