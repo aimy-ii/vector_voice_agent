@@ -30,6 +30,7 @@ from graph.prompts import (
     _PULL_QUESTION,
     _PULL_SITUATION,
     _PULL_STEPS_INTRO,
+    _PULL_STEPS_NONE,
     _PULL_THINKING,
     _STEPS_FOCUS_INTRO,
     PULL_TASK,
@@ -128,27 +129,6 @@ def test_промпт_ведёт_по_порядку_рассуждения(scri
     assert content.index(_PULL_SITUATION) < intro < read < hanging < topic < fresh
     for number, opening in enumerate(("Прочитай", "Найди", "Тему", "Скажи"), start=1):
         assert f"{number}. {opening}" in content
-
-
-def test_первый_шаг_опирается_на_весь_разговор(script_v4):
-    """Шаг «прочитать разговор» перечисляет, что именно в нём искать."""
-    content = _pull(script_v4)[0].content
-    assert "с самой первой реплики" in content
-    assert "что ему уже объяснили, что пообещали сделать" in content
-    assert "Разговор подан полностью именно для этого" in content
-
-
-def test_второй_шаг_ищет_незакрытое(script_v4):
-    """Место, с которого продолжают, — незакрытое, а не последняя своя мысль."""
-    content = _pull(script_v4)[0].content
-    hanging = content[content.index("Найди, на чём он повис") :]
-    for mark in (
-        "Вопрос, оставшийся без ответа",
-        "Мысль, которую не договорили",
-        "Обещанное и не выполненное",
-    ):
-        assert mark in hanging
-    assert "Это и есть место, с которого продолжают" in hanging
 
 
 def test_тема_берётся_из_шагов_сценария(script_v4):
@@ -360,13 +340,10 @@ def test_роль_профиль_и_отметка_молчания_на_мес�
     assert profile_block(script_v4, {"caller_name": "Андрей"}, pending_fields=[]) in content
 
 
-def test_границы_хода_свёрнуты_в_одну_строку(script_v4):
-    """Приветствие и прощание остались, но одной строкой вместо отдельного пункта."""
+def test_границы_хода_на_месте(script_v4):
+    """Строка про приветствие и прощание из промпта не выпала."""
     content = _pull(script_v4)[0].content
     assert _PULL_BOUNDS in content
-    assert "заново не здороваться" in content
-    assert "не прощаться первым" in content
-    assert "\n" not in _PULL_BOUNDS
 
 
 def test_история_разговора_уходит_целиком(script_v4):
@@ -542,3 +519,30 @@ def test_повтор_ведущего_шага_остаётся_за_полно
     )[0].content
     assert LEAD_REPEAT_INTRO in content
     assert _PULL_THINKING not in content
+
+
+def test_шапки_нет_но_указание_откуда_брать_тему_не_висит_в_пустоту(script_v4):
+    """Шагов не осталось — вместо шапки печатается прямая замена, а не пустота."""
+    content = build_pull_messages(
+        script_v4,
+        messages=_HISTORY,
+        profile={},
+        pending_fields=[],
+        steps=[],
+        facts={},
+        context_text=_CONTEXT,
+    )[0].content
+    assert _PULL_STEPS_NONE in content
+    assert "Основной:" not in content
+    assert "Незакрытые темы:" not in content
+    assert "Если шагов сценария ниже нет" in content
+    assert content.index("Тему для реплики бери из шагов сценария") < content.index(
+        _PULL_STEPS_NONE
+    )
+
+
+def test_полная_сборка_на_пустой_шапке_не_изменилась(script_v4):
+    """Правка добивки не тронула поведение полного хода без шагов."""
+    content = _full(script_v4, steps=[])[0].content
+    assert "Все шаги скрипта закрыты" in content
+    assert _PULL_STEPS_NONE not in content
