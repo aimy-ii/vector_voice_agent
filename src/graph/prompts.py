@@ -2,9 +2,10 @@
 
 Системное сообщение полной сборки — разделы верхнего уровня
 (``КАК РАБОТАТЬ``, ``КУДА ВЕДЁМ РАЗГОВОР``, ``ПРАВИЛА РЕЧИ``, ``КОНТЕКСТ``,
-``СЕЙЧАС ГОВОРИМ ОБ ЭТОМ``, ``ЕЩЁ НЕ ЗАКРЫТО``, ``ЧТО ДАЛЬШЕ``,
-``ФОРМА ОТВЕТА``). Пустой раздел не выводится. Перечень городов в промпт
-не попадает никогда.
+``РЕПЛИКА ПРЕРВАНА``, ``СЕЙЧАС ГОВОРИМ ОБ ЭТОМ``, ``ЕЩЁ НЕ ЗАКРЫТО``,
+``ЧТО ДАЛЬШЕ``, ``ФОРМА ОТВЕТА``). Пустой раздел не выводится. Перечень
+городов в промпт не попадает никогда. ``РЕПЛИКА ПРЕРВАНА`` выводится
+только если человек перебил бота на полуслове.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import json
 import re
 from typing import Any, Literal, Mapping, Sequence
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from core.config import settings
 from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING
@@ -1182,6 +1183,66 @@ def dynamic_status_block(*, status: str, searching_retry: bool = False) -> str:
     return ""
 
 
+def interrupted_reply_block(interrupted_reply: str | None) -> str:
+    """Собирает раздел про обрыв предыдущей реплики бота.
+
+    Пустое значение и ``None`` — реплика договорена, раздела нет.
+    Раздел не предписывает договаривать: решение по смыслу разговора.
+
+    Args:
+        interrupted_reply: услышанная часть прерванной реплики.
+
+    Returns:
+        Текст раздела или пустая строка.
+    """
+    heard = (interrupted_reply or "").strip()
+    if not heard:
+        return ""
+    return (
+        "Предыдущая реплика была прервана: человек начал говорить, не дослушав.\n"
+        f"Вот что он услышал:\n{heard}\n"
+        "Остального он не слышал.\n"
+        "Договаривать оборванное или нет — решать по разговору. "
+        "Тема ещё нужна — довести мысль до конца, начиная с того места, "
+        "где оборвалось. Человек своим вопросом или ответом уже снял тему — "
+        "не возвращаться к ней. Правило доводить начатое до конца здесь "
+        "само не решает: смотреть, снял ли человек тему своей репликой."
+    )
+
+
+def _history_without_interrupted_echo(
+    history: Sequence[BaseMessage],
+    interrupted_reply: str | None,
+) -> list[BaseMessage]:
+    """Убирает из хвоста истории услышанный кусок, если он уже в разделе обрыва.
+
+    История в состоянии не меняется. В запрос к модели кусок не кладётся
+    второй раз: в разделе обрыва он помечен как недоговорённый, а как
+    обычная реплика бота выглядел бы законченным.
+
+    Args:
+        history: история звонка для промпта.
+        interrupted_reply: услышанная часть прерванной реплики.
+
+    Returns:
+        Копия истории без последнего сообщения бота, совпадающего
+        с услышанным куском или продолжающего его.
+    """
+    heard = (interrupted_reply or "").strip()
+    if not heard:
+        return list(history)
+    messages = list(history)
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        text = str(message.content or "").strip()
+        if text == heard or text.startswith(heard):
+            del messages[index]
+            break
+    return messages
+
+
 def continuation_block(*, turn_kind: str) -> str:
     """Факт хода, на котором реплики человека не было.
 
@@ -1387,6 +1448,7 @@ def build_pull_messages(
     step: AnyStep | None,
     facts: Mapping[str, Any] | None = None,
     context_text: str = "",
+    interrupted_reply: str = "",
 ) -> list[BaseMessage]:
     """Собирает укороченный запрос к генератору для хода вытаскивания.
 
@@ -1406,7 +1468,8 @@ def build_pull_messages(
 
     История разговора уходит целиком, как в полной сборке: на ней держится
     первый шаг рассуждения — по хвосту из нескольких сообщений не видно, что
-    уже сказано и обещано.
+    уже сказано и обещано. Исключение — услышанный кусок прерванной реплики:
+    он уходит в раздел обрыва, а не второй раз хвостом истории.
 
     Args:
         script: скомпилированный скрипт (нужен для формы разговора).
@@ -1417,6 +1480,8 @@ def build_pull_messages(
         facts: факты хода; в промпт не выводятся, нужны для подстановки
             в опорные формулировки шага.
         context_text: уже добытый контекст (статика и динамика).
+        interrupted_reply: услышанная часть прерванной реплики бота;
+            пустая строка — раздела обрыва нет.
 
     Returns:
         Список сообщений: одно системное и полная история.
@@ -1435,6 +1500,9 @@ def build_pull_messages(
     ctx = context_block(context_text)
     if ctx:
         lines.append(ctx)
+    interrupted = interrupted_reply_block(interrupted_reply)
+    if interrupted:
+        lines.append(interrupted)
     if step is not None:
         lines.append(
             f"{_PULL_STEP_INTRO}\n"
@@ -1447,7 +1515,7 @@ def build_pull_messages(
         )
     lines.append(profile_block(script, profile, pending_fields=pending_fields))
 
-    tail = list(messages)
+    tail = _history_without_interrupted_echo(messages, interrupted_reply)
     if not tail:
         tail = [HumanMessage(content="(клиент молчит)")]
     return [SystemMessage(content="\n".join(lines)), *tail]
@@ -1485,6 +1553,7 @@ def build_turn_messages(
     turn_kind: str = "client",
     closed_steps: Sequence[AnyStep] = (),
     mode: TurnMode = "normal",
+    interrupted_reply: str = "",
 ) -> list[BaseMessage]:
     """Собирает сообщения запроса к генератору.
 
@@ -1498,7 +1567,9 @@ def build_turn_messages(
         step: текущий шаг (совместимость).
         profile: собранный профиль.
         facts: факты хода.
-        history: история звонка без системных сообщений; уходит целиком.
+        history: история звонка без системных сообщений; уходит целиком,
+            кроме услышанного куска прерванной реплики — он только
+            в разделе обрыва.
         asides_done: отработанные возражения.
         next_step: следующий шаг; раздел «ЧТО ДАЛЬШЕ», без примеров.
         context_text: документ контекста.
@@ -1507,6 +1578,8 @@ def build_turn_messages(
         turn_kind: ``client`` или ``continuation``.
         closed_steps: шаги, уже закрытые к этому ходу.
         mode: режим сборки правил и раздела шага.
+        interrupted_reply: услышанная часть прерванной реплики бота;
+            пустая строка — раздела обрыва нет.
 
     Returns:
         Список сообщений: одно системное и полная история.
@@ -1568,6 +1641,10 @@ def build_turn_messages(
         if ctx_section:
             sections.append(ctx_section)
 
+    interrupted = _section("РЕПЛИКА ПРЕРВАНА", interrupted_reply_block(interrupted_reply))
+    if interrupted:
+        sections.append(interrupted)
+
     steps_text = steps_block(head, profile, facts, context_text=ctx_for_steps, mode=mode)
     if steps_text:
         sections.append(steps_text)
@@ -1589,7 +1666,7 @@ def build_turn_messages(
     if form:
         sections.append(form)
 
-    tail = list(history)
+    tail = _history_without_interrupted_echo(history, interrupted_reply)
     if not tail:
         tail = [HumanMessage(content="(клиент молчит)")]
     return [SystemMessage(content="\n\n".join(sections)), *tail]

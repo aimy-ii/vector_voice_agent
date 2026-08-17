@@ -69,7 +69,14 @@ from graph.resolvers import (
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
-from graph.transcript import append_agent, append_client, reconcile_last_agent, to_messages
+from graph.transcript import (
+    ROLE_AGENT,
+    TranscriptEntry,
+    append_agent,
+    append_client,
+    reconcile_last_agent,
+    to_messages,
+)
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -421,6 +428,40 @@ async def _save_context(
     return {"conversation_context": to_save.model_dump()}
 
 
+def _sync_interrupted_history(
+    entries: Sequence[TranscriptEntry],
+    *,
+    interrupted_reply: str,
+    turn: int,
+) -> list[TranscriptEntry]:
+    """Приводит последнюю реплику бота к услышанному фрагменту обрыва.
+
+    Сверка со снимком уже могла урезать или снять запись. Здесь источник
+    правды — то, что человек слышал: полная недоговорённая реплика
+    урезается, пропавшая при сверке возвращается.
+
+    Args:
+        entries: история после сверки со снимком.
+        interrupted_reply: услышанный кусок; пустой — не трогать.
+        turn: номер текущего хода; восстановленная запись относится
+            к предыдущему.
+
+    Returns:
+        История, где последняя реплика бота равна услышанному куску.
+    """
+    heard = interrupted_reply.strip()
+    if not heard:
+        return list(entries)
+    body = list(entries)
+    if body and body[-1].role == ROLE_AGENT:
+        if body[-1].text == heard:
+            return body
+        body[-1] = body[-1].model_copy(update={"text": heard})
+        return body
+    previous_turn = turn - 1 if turn > 1 else turn
+    return append_agent(body, turn=previous_turn, text=heard)
+
+
 def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]:
     """Сливает профиль состояния с профилем из кеша прогресса."""
     merged = dict(state.get("profile") or {})
@@ -453,7 +494,11 @@ def call_summary(state: CallState) -> dict[str, Any]:
 
 
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое."""
+    """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое.
+
+    Услышанный кусок прерванной реплики читается из параметров запуска
+    и кладётся в состояние; история приводится к тому, что человек слышал.
+    """
     ctx: CallContext = runtime.context or {}
     patch: dict[str, Any] = {
         key: value for key, value in new_state_defaults().items() if key not in state
@@ -470,6 +515,8 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     # ниже проверке доставки, а история копится своя.
     snapshot = strip_system(state.get("messages") or [])
     turn_now = int(state.get("turn") or 0) + 1
+    heard = str(ctx.get("interrupted_reply") or "").strip()
+    patch["interrupted_reply"] = heard
     ctx_in = await _load_context(state)
     before = list(ctx_in.transcript)
     entries = reconcile_last_agent(before, aired=agent_texts(snapshot))
@@ -481,6 +528,11 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             len(entries[-1].text),
             len(before[-1].text),
         )
+    if heard:
+        synced = _sync_interrupted_history(entries, interrupted_reply=heard, turn=turn_now)
+        if synced != entries:
+            log.info("[transcript] последняя реплика бота приведена к услышанному обрыву")
+        entries = synced
     if not _no_client_reply(_turn_kind()):
         entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
     if entries != ctx_in.transcript:
@@ -704,8 +756,10 @@ def _build_respond_messages(
     Ход вытаскивания идёт в свою короткую сборку: полный ход продажи ради
     одной добивки не нужен. Приоритет повтора над вытаскиванием сохранён —
     когда ведущий шаг не даёт ответа много ходов подряд, разговор вытягивают
-    полной сборкой в режиме ``repeat``.
+    полной сборкой в режиме ``repeat``. Услышанный кусок обрыва читается
+    из состояния: его кладёт ``ingest_node`` из параметров запуска.
     """
+    interrupted_reply = str(state.get("interrupted_reply") or "").strip()
     if prompt_kind == "waiting":
         return build_waiting_messages(
             script,
@@ -733,6 +787,7 @@ def _build_respond_messages(
             step=lead,
             facts=facts,
             context_text=context_text,
+            interrupted_reply=interrupted_reply,
         )
     closed_steps = [
         script.steps[step_id]
@@ -757,6 +812,7 @@ def _build_respond_messages(
         turn_kind=turn_kind,
         closed_steps=closed_steps,
         mode=turn_mode,
+        interrupted_reply=interrupted_reply,
     )
 
 
