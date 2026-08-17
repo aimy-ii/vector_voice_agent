@@ -1,8 +1,14 @@
 """Короткая сборка хода вытаскивания и точка её выбора в ``nodes``.
 
 Ход вытаскивания включается, когда предыдущая реплика бота вопроса не
-содержала и человек после неё молчит. Нужна одна добивка с вопросом,
+содержала и человек после неё молчит. Нужна следующая реплика разговора,
 поэтому промпт свой, а не полный ход продажи с заплатками.
+
+Промпт собран вокруг порядка рассуждения — прочитать разговор, найти
+незакрытое, сказать новое с вопросом, — а не вокруг перечня запретов:
+на перечне модель выдавала пересказ своей же последней мысли с вопросом
+на конце, формально не нарушая ни одного пункта. Тесты держат этот порядок
+и два оставшихся требования.
 """
 
 from __future__ import annotations
@@ -13,12 +19,19 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from core.config import settings
 from graph import nodes as nodes_module
 from graph.prompts import (
     _HARD_FACT_BAN,
+    _PULL_BOUNDS,
+    _PULL_QUESTION,
+    _PULL_SITUATION,
+    _PULL_STEP_INTRO,
+    _PULL_THINKING,
     _STEPS_FOCUS_INTRO,
     PULL_TASK,
     SPEECH_RULES,
+    _gender_speech_rule,
     build_filler_messages,
     build_pull_messages,
     build_turn_messages,
@@ -95,80 +108,141 @@ def test_вытаскивание_кратно_короче_полного_хо�
     assert len(pull) * 3 < len(full)
 
 
-def test_вытаскивание_требует_вопроса_в_конце(script_v4):
-    """Главное требование — вопрос — стоит до прочих и назван браком."""
+def test_промпт_ведёт_по_порядку_рассуждения(script_v4):
+    """Ядро промпта — последовательность действий, и шаги идут в своём порядке."""
     content = _pull(script_v4)[0].content
-    assert "реплика заканчивается вопросом со знаком вопроса" in content
-    assert "Реплика без вопроса — брак" in content
-    assert "требует выбора, решения или конкретных данных" in content
-    # Проверка понимания и согласие слушать дальше вопросом не считаются.
-    assert "«всё понятно?»" in content
-    assert "«продолжим?»" in content
+    intro = content.index("Как рассуждать перед репликой")
+    read = content.index("Прочитай разговор целиком")
+    hanging = content.index("Найди, на чём он повис")
+    fresh = content.index("Скажи то, чего в этом разговоре ещё не было")
+    assert content.index(_PULL_SITUATION) < intro < read < hanging < fresh
+    # Каждый шаг пронумерован: это порядок действий, а не перечень пунктов.
+    for number, opening in enumerate(("Прочитай", "Найди", "Скажи"), start=1):
+        assert f"{number}. {opening}" in content
+
+
+def test_первый_шаг_опирается_на_весь_разговор(script_v4):
+    """Шаг «прочитать разговор» перечисляет, что именно в нём искать."""
+    content = _pull(script_v4)[0].content
+    assert "с самой первой реплики" in content
+    assert "что ему уже объяснили, что пообещали сделать" in content
+    assert "Разговор подан полностью именно для этого" in content
+
+
+def test_второй_шаг_ищет_незакрытое(script_v4):
+    """Место, с которого продолжают, — незакрытое, а не последняя своя мысль."""
+    content = _pull(script_v4)[0].content
+    hanging = content[content.index("Найди, на чём он повис") :]
+    for mark in (
+        "Вопрос, оставшийся без ответа",
+        "Мысль, которую не договорили",
+        "Обещанное и не выполненное",
+    ):
+        assert mark in hanging
+    assert "Это и есть место, с которого продолжают" in hanging
+
+
+def test_запрет_повтора_живёт_в_порядке_а_не_отдельным_пунктом(script_v4):
+    """Пункты «ГЛАВНОЕ» и «ВТОРОЕ ГЛАВНОЕ» сняты, повтор закрывает третий шаг.
+
+    Прежний промпт запрещал пересказ отдельным требованием, и модель обходила
+    запрет: подхватывала собственную мысль и приделывала вопрос. Теперь того
+    же добивается порядок — сказать надо то, чего в разговоре ещё не было.
+    """
+    content = _pull(script_v4)[0].content
+    assert "ГЛАВНОЕ:" not in content
+    assert "последнюю мысль не повторять" not in content
+    assert "Человек это слышал — потому и молчит" not in content
+    assert "Скажи то, чего в этом разговоре ещё не было" in content
+
+
+def test_подхват_своей_мысли_свёрнут_в_третий_шаг(script_v4):
+    """Связка-шапка закрыта, но как часть описания реплики, а не пунктом списка."""
+    content = _pull(script_v4)[0].content
+    third = content[content.index("Скажи то, чего в этом разговоре ещё не было") :]
+    assert "Начинай сразу с нового" in third
+    assert "«как и сказала»" in third
+    assert "шапка про уже сказанное" in third
+    # Отдельного пункта с разбором плохого примера из звонка больше нет.
+    assert "Реплика не начинается с подхвата собственной последней мысли" not in content
+    assert "Поняла, отправляю всё в Max" not in content
+
+
+def test_требование_вопроса_на_месте(script_v4):
+    """Реплика заканчивается вопросом; пустые вопросы отсечены поимённо."""
+    content = _pull(script_v4)[0].content
+    assert _PULL_QUESTION in content
+    assert "требует от человека выбора, решения или конкретных данных" in content
+    for empty in ("«всё понятно?»", "«остались вопросы?»", "«продолжим?»", "«что скажете?»"):
+        assert empty in content
     assert "вопросом не считаются" in content
-    task_index = content.index("Задача этого хода одна")
-    demand_index = content.index("ГЛАВНОЕ:")
-    assert task_index < demand_index < content.index(_HARD_FACT_BAN)
+    # Требования проверяют готовую реплику, поэтому идут после порядка.
+    assert content.index(_PULL_THINKING) < content.index(_PULL_QUESTION)
 
 
-def test_запрет_повтора_стоит_среди_первых_требований(script_v4):
-    """Запрет пересказа — второе главное требование, сразу за требованием вопроса."""
+def test_требований_к_реплике_осталось_два(script_v4):
+    """Кроме вопроса и запрета фактов, требований в промпте нет.
+
+    Девять указаний подряд прошлой версии сведены к двум: между ними и
+    границами хода ничего постороннего не вклинивается.
+    """
     content = _pull(script_v4)[0].content
-    assert "последнюю мысль не повторять и не пересказывать другими словами" in content
-    assert "уже названное заново не перечислять" in content
-    task_index = content.index("Задача этого хода одна")
-    question_index = content.index("ГЛАВНОЕ:")
-    repeat_index = content.index("ВТОРОЕ ГЛАВНОЕ:")
-    fact_ban_index = content.index(_HARD_FACT_BAN)
-    assert task_index < question_index < repeat_index < fact_ban_index
-    # Рядом с требованием вопроса: между ними ничего постороннего не вклинилось.
-    between = content[question_index:repeat_index]
-    assert between.count("\n") == 1
-
-
-def test_запрет_подхватывать_свою_последнюю_мысль(script_v4):
-    """Отдельным пунктом закрыт вход через связку-пересказ, с примером из звонка."""
-    content = _pull(script_v4)[0].content
-    assert "Реплика не начинается с подхвата собственной последней мысли" in content
-    assert "«поняла»" in content
-    assert "«как и сказала»" in content
-    assert "тот же пересказ под новой шапкой" in content
-    assert "Поняла, отправляю всё в Max" in content
-    repeat_index = content.index("ВТОРОЕ ГЛАВНОЕ:")
-    pickup_index = content.index("Реплика не начинается с подхвата")
-    assert repeat_index < pickup_index < content.index(_HARD_FACT_BAN)
+    question = content.index(_PULL_QUESTION)
+    ban = content.index(_HARD_FACT_BAN)
+    bounds = content.index(_PULL_BOUNDS)
+    assert question < ban < bounds
+    assert content[question:bounds].count("\n") == 2
 
 
 def test_ограничения_по_числу_слов_в_промпте_нет(script_v4):
-    """Потолок длины убран: счёта слов и фраз в требованиях режима не осталось."""
+    """Потолок длины не вернулся: объём задан формой реплики, а не счётом слов."""
     content = _pull(script_v4)[0].content
     assert "двадцати пяти слов" not in content
     assert "одна-две короткие фразы" not in content
     assert re.search(r"(не длиннее|не больше|не более|максимум)[^.]{0,40}слов", content) is None
-    assert "сколько нужно, чтобы человек снова заговорил" in content
+    assert "Одна мысль и вопрос к ней" in content
+    assert "выкладывать три темы подряд не нужно" in content
 
 
 def test_предписаний_о_чём_говорить_нет(script_v4):
-    """Разбор случаев убран: чем растормошить, модель решает по всему разговору."""
+    """Ни разбора случаев, ни «выбор твой»: вместо них порядок рассуждения."""
     content = _pull(script_v4)[0].content
-    assert "продвинуть текущий шаг" not in content
-    assert "продвигать его" not in content
-    assert "взять другую тему разговора" not in content
-    assert "Чем растормошить — выбор твой" in content
-    assert "Прочитай весь разговор целиком" in content
-    assert "тоже твоё решение" in content
-    # Формулировка самодостаточна: ссылок на разделы, которых в промпте нет.
+    for prescription in (
+        "продвинуть текущий шаг",
+        "продвигать его",
+        "взять другую тему разговора",
+        "Чем растормошить — выбор твой",
+        "тоже твоё решение",
+    ):
+        assert prescription not in content
+    # Формулировки самодостаточны: ссылок на разделы, которых в промпте нет.
     for reference in ("перечисленных ниже", "из перечисленных", "ЕЩЁ НЕ ЗАКРЫТО", "раздел"):
         assert reference not in content
 
 
-def test_вытаскивание_держит_запрет_фактов_и_требования_шага(script_v4):
-    """Жёсткий запрет на факты и требования ведущего шага остаются."""
-    step = script_v4.step("terms")
+def test_жёсткий_запрет_фактов_на_месте(script_v4):
+    """Второе требование — не называть данных вне переданных — из промпта не выпало."""
     content = _pull(script_v4)[0].content
     assert _HARD_FACT_BAN in content
+
+
+def test_блок_шага_подчинён_порядку_рассуждения(script_v4):
+    """Требования шага на месте, но поданы ориентиром, а не текстом хода.
+
+    Блок шага конкретнее любого рассуждения и перетягивал ход на себя:
+    предыдущая реплика бота выросла из того же шага, и модель отрабатывала
+    его второй раз подряд. Врезка перед блоком ставит его на место.
+    """
+    step = script_v4.step("terms")
+    content = _pull(script_v4)[0].content
+    assert _PULL_STEP_INTRO in content
+    assert "не текст, который надо произнести сейчас" in content
+    assert "предыдущая твоя реплика выросла отсюда же" in content
     assert step.name in content
     assert step.requirements in content
-    assert "Шаг, который сейчас ведём:" in content
+    assert content.index(_PULL_STEP_INTRO) < content.index(step.requirements)
+    # Прежней командной шапки над блоком не осталось.
+    assert "Шаг, который сейчас ведём:" not in content
 
 
 def test_вытаскивание_без_правил_речи_сводки_и_шапки(script_v4):
@@ -195,12 +269,24 @@ def test_вытаскивание_без_повторяющихся_блоков
     assert full.count("**Не хватает данных**") > 1
 
 
-def test_профиль_и_запрет_прощаться_первым_на_месте(script_v4):
-    """Форма разговора и границы режима из промпта не выпали."""
+def test_роль_профиль_и_отметка_молчания_на_месте(script_v4):
+    """Роль, тон, «Вы», род, отметка молчания и форма разговора остаются как были."""
     content = _pull(script_v4)[0].content
+    assert content.startswith(f"Роль: {settings.agent_name}, {settings.agent_role}")
+    assert settings.agent_tone in content
+    assert "К клиенту только на «Вы», всегда." in content
+    assert _gender_speech_rule(settings.agent_gender) in content
+    assert "Реплики человека не было" in content
     assert profile_block(script_v4, {"caller_name": "Андрей"}, pending_fields=[]) in content
+
+
+def test_границы_хода_свёрнуты_в_одну_строку(script_v4):
+    """Приветствие и прощание остались, но одной строкой вместо отдельного пункта."""
+    content = _pull(script_v4)[0].content
+    assert _PULL_BOUNDS in content
+    assert "заново не здороваться" in content
     assert "не прощаться первым" in content
-    assert "Не здороваться заново" in content
+    assert "\n" not in _PULL_BOUNDS
 
 
 def test_история_разговора_уходит_целиком(script_v4):
@@ -278,7 +364,8 @@ def test_точка_выбора_на_pull_даёт_короткую_сборк�
     """При ``turn_kind="pull"`` собирается вытаскивание, а не полный ход."""
     monkeypatch.setattr(nodes_module.settings, "script_version", "4")
     content = _respond(script_v4, turn_kind="pull")[0].content
-    assert "Задача этого хода одна: растормошить человека" in content
+    assert _PULL_SITUATION in content
+    assert _PULL_THINKING in content
     assert PULL_TASK not in content
     assert "# ПРАВИЛА РЕЧИ" not in content
 
@@ -341,4 +428,4 @@ def test_повтор_ведущего_шага_остаётся_за_полно
         turn_kind="pull",
     )[0].content
     assert LEAD_REPEAT_INTRO in content
-    assert "Задача этого хода одна" not in content
+    assert _PULL_THINKING not in content

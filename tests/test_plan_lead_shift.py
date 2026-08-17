@@ -366,7 +366,7 @@ def test_догон_с_единичным_счётчиком_идёт_в_кор�
     Полная сборка с ``PULL_TASK`` осталась в файле, но со штатной точки
     выбора больше не приходит: добивку собирает ``build_pull_messages``.
     """
-    from graph.prompts import LEAD_REPEAT_INTRO, PULL_TASK
+    from graph.prompts import _PULL_THINKING, LEAD_REPEAT_INTRO, PULL_TASK
 
     monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
     step = script.step("city")
@@ -385,7 +385,7 @@ def test_догон_с_единичным_счётчиком_идёт_в_кор�
         turn_kind="pull",
     )
     content = messages[0].content
-    assert "Задача этого хода одна: растормошить человека" in content
+    assert _PULL_THINKING in content
     assert PULL_TASK not in content
     assert LEAD_REPEAT_INTRO not in content
 
