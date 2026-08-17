@@ -380,3 +380,84 @@ async def test_lookup_nearby_сохраняет_переданный_ключ() 
     key = "custom:key"
     result = await lookup_nearby(kb, city_slug="perm", place="X", key=key)
     assert result.key == key
+
+
+def test_format_found_печатает_часы_и_перерыв() -> None:
+    """Блок ближайших печатает часы работы и перерыв, когда справочник их прислал."""
+    items = [
+        {
+            "slug": "a",
+            "address": "ул. Чернышевского, 4",
+            "landmark": "ТРК Нарва",
+            "distance_km": 0.4,
+            "working_hours": "09:00–21:00",
+            "break_time": "13:00–14:00",
+        },
+        {
+            "slug": "b",
+            "address": "пр. Ленина, 10",
+            "landmark": "",
+            "distance_km": 1.2,
+            "working_hours": "10:00–19:00",
+            "break_time": "",
+        },
+    ]
+    text = format_found("Солнечный", items)
+    lines = text.split("\n")
+    assert lines[1] == (
+        "1. ул. Чернышевского, 4 — 0,4 км (ТРК Нарва), работает 09:00–21:00, перерыв 13:00–14:00"
+    )
+    assert lines[2] == "2. пр. Ленина, 10 — 1,2 км, работает 10:00–19:00"
+
+
+def test_format_found_без_часов_строка_как_раньше() -> None:
+    """Без часов в ответе справочника строка филиала совпадает со старым форматом."""
+    items = [
+        {
+            "slug": "a",
+            "address": "ул. Чернышевского, 4",
+            "landmark": "ТРК Нарва",
+            "distance_km": 0.4,
+        },
+        {
+            "slug": "b",
+            "address": "пр. Ленина, 10",
+            "landmark": "",
+            "distance_km": 1.2,
+        },
+    ]
+    text = format_found("Солнечный", items)
+    lines = text.split("\n")
+    assert lines[1] == "1. ул. Чернышевского, 4 — 0,4 км (ТРК Нарва)"
+    assert lines[2] == "2. пр. Ленина, 10 — 1,2 км"
+
+
+async def test_lookup_nearby_несёт_филиалы_целиком() -> None:
+    """Результат несёт филиалы целиком; слаги те же и в том же порядке."""
+    items = [
+        {
+            "slug": "perm_a",
+            "address": "ул. А, 1",
+            "landmark": "Дом быта",
+            "district": "Солнечный",
+            "place_type": "филиал",
+            "status": "открыт",
+            "working_hours": "09:00–21:00",
+            "break_time": "13:00–14:00",
+            "phone": "+7 342 000-00-01",
+            "distance_km": 0.4,
+        },
+        {
+            "slug": "perm_b",
+            "address": "ул. Б, 2",
+            "landmark": "",
+            "distance_km": 1.0,
+        },
+    ]
+    kb = FakeNearbyKB(point=(58.01, 56.25), items=items)
+    result = await lookup_nearby(kb, city_slug="perm", place="Солнечный", key="perm:солнечный")
+
+    assert result.found is True
+    assert result.branch_slugs == ["perm_a", "perm_b"]
+    assert result.branch_cards == items
+    assert [card.get("slug") for card in result.branch_cards] == result.branch_slugs

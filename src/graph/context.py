@@ -71,6 +71,8 @@ class ConversationContext(BaseModel):
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
         branch_candidates: слаги филиалов, отобранные инструментом ``branches``.
+        branch_cards: подобранные филиалы целиком — адрес, ориентир, часы,
+            перерыв, тип и статус. Пусто у звонков, начатых до появления поля.
         nearby_text: блок ближайших филиалов по названному человеком месту:
             либо строка о том, что подбор идёт, либо перечень адресов, либо
             строка о том, что место не опознано. Хранится отдельно от
@@ -106,6 +108,7 @@ class ConversationContext(BaseModel):
     city_name: str | None = None
     branch_slug: str | None = None
     branch_candidates: list[str] = Field(default_factory=list)
+    branch_cards: list[dict[str, Any]] = Field(default_factory=list)
     nearby_text: str = ""
     nearby_key: str = ""
     nearby_found: bool = False
@@ -438,6 +441,7 @@ class ContextState(BaseModel):
     city_name: str | None = None
     branch_slug: str | None = None
     branch_candidates: list[str] = Field(default_factory=list)
+    branch_cards: list[dict[str, Any]] = Field(default_factory=list)
     nearby_text: str = ""
     nearby_key: str = ""
     nearby_found: bool = False

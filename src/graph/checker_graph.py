@@ -741,6 +741,7 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             )
             if nearby_result.branch_slugs:
                 ctx.branch_candidates = nearby_result.branch_slugs
+                ctx.branch_cards = nearby_result.branch_cards
 
         ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
         patch.update(ctx_patch)
