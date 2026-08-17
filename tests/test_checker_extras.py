@@ -42,6 +42,7 @@ async def test_шаг_на_пороге_закрывается_диалогом_
             attempts: int = 0,
             age: int = 0,
             in_work: bool = False,
+            speaker: str = "client",
         ):
             return CheckerVerdict(
                 reply_usable=True,
@@ -78,6 +79,7 @@ async def test_шаг_на_пороге_без_закрытия_моделью_�
             attempts: int = 0,
             age: int = 0,
             in_work: bool = False,
+            speaker: str = "client",
         ):
             return CheckerVerdict(
                 reply_usable=True,
@@ -116,6 +118,7 @@ async def test_признак_asks_inform_из_чекера(script):
             attempts: int = 0,
             age: int = 0,
             in_work: bool = False,
+            speaker: str = "client",
         ):
             return CheckerVerdict(
                 reply_usable=True,

@@ -14,7 +14,7 @@ import logging
 from typing import Any, Protocol
 
 from core.config import settings
-from graph.context import ConversationContext
+from graph.context import ConversationContext, raise_conversation_ended
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +84,9 @@ def merge_context_fields(
         if name not in overlay_data:
             continue
         value = overlay_data[name]
+        if name == "conversation_ended":
+            data[name] = raise_conversation_ended(bool(data.get(name)), bool(value))
+            continue
         if name in CONTEXT_FIELDS_STATIC and isinstance(value, str) and not value.strip():
             existing = data.get(name)
             if isinstance(existing, str) and existing.strip():

@@ -234,3 +234,11 @@ def test_merge_динамики_затирает_nearby_пустой_строк�
     assert merged.nearby_key == ""
     assert merged.nearby_found is False
     assert merged.static_text == "Город: Пермь"
+
+
+def test_merge_динамики_не_опускает_conversation_ended() -> None:
+    """Слияние динамики не опускает уже поднятый признак конца разговора."""
+    base = ConversationContext(conversation_ended=True)
+    overlay = ConversationContext(conversation_ended=False)
+    merged = merge_context_fields(base, overlay, CONTEXT_FIELDS_DYNAMIC)
+    assert merged.conversation_ended is True

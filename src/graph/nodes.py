@@ -16,6 +16,7 @@ Plan читает закрытия из Redis-кеша и не ждёт лайв
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -33,6 +34,7 @@ from graph.context import (
     ConversationContext,
     context_from_state,
     missing_needs,
+    raise_conversation_ended,
 )
 from graph.context_store import (
     CONTEXT_FIELDS_TURN,
@@ -56,6 +58,7 @@ from graph.progress import say, stage
 from graph.prompts import (
     TurnMode,
     build_filler_messages,
+    build_pull_messages,
     build_turn_messages,
     build_waiting_messages,
 )
@@ -67,7 +70,14 @@ from graph.resolvers import (
 from graph.schemas import TURN_SCHEMA_NAME, TurnResult
 from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
-from graph.transcript import append_agent, append_client, reconcile_last_agent, to_messages
+from graph.transcript import (
+    ROLE_AGENT,
+    TranscriptEntry,
+    append_agent,
+    append_client,
+    reconcile_last_agent,
+    to_messages,
+)
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep
 from script.planner import (
@@ -419,6 +429,40 @@ async def _save_context(
     return {"conversation_context": to_save.model_dump()}
 
 
+def _sync_interrupted_history(
+    entries: Sequence[TranscriptEntry],
+    *,
+    interrupted_reply: str,
+    turn: int,
+) -> list[TranscriptEntry]:
+    """Приводит последнюю реплику бота к услышанному фрагменту обрыва.
+
+    Сверка со снимком уже могла урезать или снять запись. Здесь источник
+    правды — то, что человек слышал: полная недоговорённая реплика
+    урезается, пропавшая при сверке возвращается.
+
+    Args:
+        entries: история после сверки со снимком.
+        interrupted_reply: услышанный кусок; пустой — не трогать.
+        turn: номер текущего хода; восстановленная запись относится
+            к предыдущему.
+
+    Returns:
+        История, где последняя реплика бота равна услышанному куску.
+    """
+    heard = interrupted_reply.strip()
+    if not heard:
+        return list(entries)
+    body = list(entries)
+    if body and body[-1].role == ROLE_AGENT:
+        if body[-1].text == heard:
+            return body
+        body[-1] = body[-1].model_copy(update={"text": heard})
+        return body
+    previous_turn = turn - 1 if turn > 1 else turn
+    return append_agent(body, turn=previous_turn, text=heard)
+
+
 def _merge_profile(state: CallState, progress: ScriptProgress) -> dict[str, str]:
     """Сливает профиль состояния с профилем из кеша прогресса."""
     merged = dict(state.get("profile") or {})
@@ -451,7 +495,11 @@ def call_summary(state: CallState) -> dict[str, Any]:
 
 
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое."""
+    """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое.
+
+    Услышанный кусок прерванной реплики читается из параметров запуска
+    и кладётся в состояние; история приводится к тому, что человек слышал.
+    """
     ctx: CallContext = runtime.context or {}
     patch: dict[str, Any] = {
         key: value for key, value in new_state_defaults().items() if key not in state
@@ -468,6 +516,8 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
     # ниже проверке доставки, а история копится своя.
     snapshot = strip_system(state.get("messages") or [])
     turn_now = int(state.get("turn") or 0) + 1
+    heard = str(ctx.get("interrupted_reply") or "").strip()
+    patch["interrupted_reply"] = heard
     ctx_in = await _load_context(state)
     before = list(ctx_in.transcript)
     entries = reconcile_last_agent(before, aired=agent_texts(snapshot))
@@ -479,6 +529,11 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             len(entries[-1].text),
             len(before[-1].text),
         )
+    if heard:
+        synced = _sync_interrupted_history(entries, interrupted_reply=heard, turn=turn_now)
+        if synced != entries:
+            log.info("[transcript] последняя реплика бота приведена к услышанному обрыву")
+        entries = synced
     if not _no_client_reply(_turn_kind()):
         entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
     if entries != ctx_in.transcript:
@@ -533,11 +588,24 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     не трогаем.
 
     Если ведущий снова совпал с шагом прошлого хода — берём следующий
-    открытый из шапки на любом виде хода (шапка сама не меняется).
-    Так не ведём повторно шаг, который судья ещё не успел закрыть.
+    открытый из шапки (шапка сама не меняется). Так не ведём повторно шаг,
+    который судья ещё не успел закрыть. Исключение — ход ``silence``: бот
+    задал вопрос, человек молчит, тема поднята и ответа ждут именно по ней;
+    уехать с неё на другую — то самое перескакивание, которого не должно
+    быть. На ``pull`` и на обычном ходе сдвиг работает как прежде.
 
     Счётчик ``lead_repeat`` считает подряд идущие ходы с одним ведущим
-    шагом; на сдвиге сбрасывается. Сами шаги не закрываются и не открываются.
+    шагом; на сдвиге сбрасывается. Без сдвига на молчании он растёт — и
+    по достижении порога промпт сам переходит в режим «вывести человека
+    на реплику». Сами шаги не закрываются и не открываются.
+
+    Args:
+        state: состояние хода после ``ingest_node``.
+        runtime: рантайм LangGraph; здесь не используется.
+
+    Returns:
+        Правки ``CallState``: зеркало прогресса, профиль, ведущий шаг,
+        счётчик повторов, следующий шаг, шапка и новый шаг хода.
     """
     script = _script_of(state)
     progress = await _load_progress(state)
@@ -571,12 +639,21 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
 
     head, step = _lead_from_progress(state, progress=progress, profile=profile)
 
-    # Повтор ведущего прошлого хода на реплике клиента — сдвиг по шапке.
+    # Повтор ведущего прошлого хода — сдвиг по шапке. На молчании после
+    # вопроса не сдвигаем: тема поднята, ответа ждут по ней, а не по
+    # следующей. Счётчик повторов при этом растёт — режим промпта сменится
+    # сам, темы разговора смена не касается.
     prev_step_id = state.get("current_step")
     shifted_from: str | None = None
     lead_repeat = int(state.get("lead_repeat") or 0)
     lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
-    if step is not None and prev_step_id and step.id == prev_step_id and len(head) > 1:
+    if (
+        turn_kind != "silence"
+        and step is not None
+        and prev_step_id
+        and step.id == prev_step_id
+        and len(head) > 1
+    ):
         shifted_from = step.id
         step = head[1]
         lead_repeat = 1
@@ -639,6 +716,27 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     }
 
 
+def _turn_mode(*, state: CallState, turn_kind: str) -> TurnMode:
+    """Определяет характер хода по счётчику повторов и виду хода.
+
+    Args:
+        state: состояние звонка; читается счётчик ``lead_repeat``.
+        turn_kind: вид хода из состояния.
+
+    Returns:
+        ``repeat`` — ведущий шаг повторяется не меньше порога; ``pull`` —
+        ход вытаскивания; ``normal`` — штатный ход.
+    """
+    if (
+        settings.lead_repeat_threshold > 0
+        and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
+    ):
+        return "repeat"
+    if turn_kind == "pull":
+        return "pull"
+    return "normal"
+
+
 def _build_respond_messages(
     *,
     prompt_kind: str,
@@ -654,7 +752,17 @@ def _build_respond_messages(
     pending_fields: list[str],
     turn_kind: str,
 ) -> list[Any]:
-    """Собирает сообщения генератора для одной ступени."""
+    """Собирает сообщения генератора для одной ступени.
+
+    Ход вытаскивания идёт в свою короткую сборку: полный ход продажи ради
+    одной добивки не нужен. В короткую сборку уходят шапка шагов, закрытые
+    шаги и следующий шаг — тем же путём, что в полную: без них модели
+    не из чего брать тему. Приоритет повтора над вытаскиванием сохранён —
+    когда ведущий шаг не даёт ответа много ходов подряд, разговор вытягивают
+    полной сборкой в режиме ``repeat``. Услышанный кусок обрыва читается
+    из состояния: его кладёт ``ingest_node`` из параметров запуска.
+    """
+    interrupted_reply = str(state.get("interrupted_reply") or "").strip()
     if prompt_kind == "waiting":
         return build_waiting_messages(
             script,
@@ -672,6 +780,29 @@ def _build_respond_messages(
             messages=history,
             history_limit=settings.filler_history_limit,
         )
+    turn_mode = _turn_mode(state=state, turn_kind=turn_kind)
+    if turn_mode == "pull":
+        closed_steps = [
+            script.steps[step_id]
+            for step_id, status in (state.get("step_status") or {}).items()
+            if status == "closed" and step_id in script.steps
+        ]
+        next_step_id = state.get("next_step")
+        next_step = (
+            script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
+        )
+        return build_pull_messages(
+            script,
+            messages=history,
+            profile=profile,
+            pending_fields=pending_fields,
+            steps=_lead_first(head, lead),
+            facts=facts,
+            context_text=context_text,
+            interrupted_reply=interrupted_reply,
+            closed_steps=closed_steps,
+            next_step=next_step,
+        )
     closed_steps = [
         script.steps[step_id]
         for step_id, status in (state.get("step_status") or {}).items()
@@ -681,14 +812,6 @@ def _build_respond_messages(
     next_step = (
         script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
     )
-    turn_mode: TurnMode = "normal"
-    if (
-        settings.lead_repeat_threshold > 0
-        and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
-    ):
-        turn_mode = "repeat"
-    elif turn_kind == "pull":
-        turn_mode = "pull"
     return build_turn_messages(
         script=script,
         steps=_lead_first(head, lead),
@@ -703,6 +826,7 @@ def _build_respond_messages(
         turn_kind=turn_kind,
         closed_steps=closed_steps,
         mode=turn_mode,
+        interrupted_reply=interrupted_reply,
     )
 
 
@@ -799,11 +923,7 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
         system_len = len(messages[0].content) if messages else 0
         step_prefix = f"ступень {step}, " if step is not None else ""
         lead_count = int(state.get("lead_repeat") or 0)
-        turn_mode: TurnMode = "normal"
-        if settings.lead_repeat_threshold > 0 and lead_count >= settings.lead_repeat_threshold:
-            turn_mode = "repeat"
-        elif turn_kind == "pull":
-            turn_mode = "pull"
+        turn_mode = _turn_mode(state=state, turn_kind=turn_kind)
         if turn_mode == "pull":
             lead_hint = ", режим pull, вытаскивание"
         elif settings.lead_repeat_threshold > 0:
@@ -949,8 +1069,86 @@ def _safe_result(raw: dict[str, Any]) -> TurnResult:
         return TurnResult(reply=reply if isinstance(reply, str) else "")
 
 
+#: Обороты, которыми разговор заканчивают, и ничем другим они не бывают.
+#: Перечень намеренно узкий: «на связи», «жду Вас», «напомню», «пишите» и
+#: прочие обещания продолжения сюда не входят — после них разговор живёт.
+#: «до связи» от «всегда на связи» отличает предлог, поэтому сравнение идёт
+#: по целым словам, а не по вхождению подстроки. «до встречи» не в перечне
+#: намеренно: это оборот договорённости о встрече, а она концом разговора
+#: не считается — ни здесь, ни у агента прощания.
+_FAREWELL_MARKERS: tuple[str, ...] = (
+    "до свидания",
+    "до связи",
+    "до скорого",
+    "всего доброго",
+    "всего хорошего",
+    "всего наилучшего",
+    "хорошего дня",
+    "хорошего вечера",
+    "приятного дня",
+    "спасибо за звонок",
+    "счастливо",
+    "прощайте",
+)
+
+#: Сколько последних предложений реплики проверяется на прощание. Прощаются
+#: в конце реплики; те же слова раньше — часть другой мысли («спасибо за
+#: звонок, я всё записала», а дальше про сроки и оплату).
+_FAREWELL_TAIL_SENTENCES = 2
+
+#: Границы предложений и всё, что не буква и не цифра: сравнение идёт по
+#: целым словам приведённого текста.
+_SENTENCE_SPLIT = re.compile(r"[.!?…\n]+")
+_NON_WORD = re.compile(r"[^0-9a-zа-я]+")
+
+
+def is_farewell_reply(text: str) -> bool:
+    """Прощается ли бот в собственной реплике.
+
+    Дешёвая локальная проверка вместо ещё одного вызова модели: флаг конца
+    разговора бот читает через миллисекунды после того, как реплика
+    договорена, а живой агент прощания отвечает секундами — он к этому
+    моменту не успевает.
+
+    Совпадение ищется по целым словам в последних предложениях реплики.
+    Реплика с вопросом в конце прощанием не считается ни при каких словах:
+    вопрос ждёт ответа, и разговор продолжается.
+
+    Args:
+        text: произнесённая репликой бота строка.
+
+    Returns:
+        ``True`` — реплика заканчивается прощанием; иначе ``False``.
+    """
+    body = (text or "").strip()
+    if not body or body.endswith("?"):
+        return False
+    sentences = [part.strip() for part in _SENTENCE_SPLIT.split(body) if part.strip()]
+    if not sentences:
+        return False
+    tail = " ".join(sentences[-_FAREWELL_TAIL_SENTENCES:]).lower().replace("ё", "е")
+    words = _NON_WORD.sub(" ", tail)
+    padded = f" {' '.join(words.split())} "
+    return any(f" {marker} " in padded for marker in _FAREWELL_MARKERS)
+
+
 async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
-    """Раскладывает разобранное по состоянию; в конце звонка — слепок в тред."""
+    """Раскладывает разобранное по состоянию; в конце звонка — слепок в тред.
+
+    Флаг конца разговора приезжает из кеша контекста — его ставит фоновый
+    агент прощания по реплике человека. Прощание самого бота через агента не
+    проходит, поэтому реплика хода проверяется здесь локально
+    (``is_farewell_reply``): распознали — флаг поднимается и уходит и в
+    состояние, и в кеш, на любом виде хода.
+
+    Args:
+        state: состояние хода после ``respond_node``.
+        runtime: рантайм LangGraph; здесь не используется.
+
+    Returns:
+        Правки ``CallState``: зеркало прогресса, история, профиль, признаки
+        доставки и флаг конца разговора.
+    """
     script = _script_of(state)
     step = _current_step(state)
     progress = await _load_progress(state)
@@ -990,25 +1188,36 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
 
     # Разговор закончен — по флагу из кеша контекста (фоновый агент прощания).
     # На продолжении и молчании флаг не трогаем: реплики человека не было.
+    # Исключение — прощание в собственной реплике: его агент не видит вообще,
+    # и распознаётся оно здесь, на любом виде хода.
     conversation_ended = bool(state.get("conversation_ended"))
     conversation_context = state.get("conversation_context") or {}
+    bot_farewell = is_farewell_reply(spoken_text)
     if not no_client_reply or spoken_text:
         ctx = await _load_context(state)
         if not no_client_reply:
-            conversation_ended = bool(ctx.conversation_ended)
+            conversation_ended = raise_conversation_ended(
+                conversation_ended,
+                bool(ctx.conversation_ended),
+            )
             patch["conversation_ended"] = conversation_ended
         if spoken_text:
-            ctx = ctx.model_copy(
-                update={
-                    "last_agent_reply": spoken_text,
-                    "transcript": append_agent(
-                        ctx.transcript,
-                        turn=int(state.get("turn") or 0),
-                        text=spoken_text,
-                    ),
-                }
-            )
-            ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_TURN)
+            updates: dict[str, Any] = {
+                "last_agent_reply": spoken_text,
+                "transcript": append_agent(
+                    ctx.transcript,
+                    turn=int(state.get("turn") or 0),
+                    text=spoken_text,
+                ),
+            }
+            fields = CONTEXT_FIELDS_TURN
+            if bot_farewell:
+                conversation_ended = raise_conversation_ended(conversation_ended, True)
+                patch["conversation_ended"] = conversation_ended
+                updates["conversation_ended"] = conversation_ended
+                fields = CONTEXT_FIELDS_TURN | frozenset({"conversation_ended"})
+            ctx = ctx.model_copy(update=updates)
+            ctx_patch = await _save_context(ctx, fields=fields)
             conversation_context = ctx_patch["conversation_context"]
 
     # Пустой эфир — pending не ставим. Без реплики клиента шаги не трогаем.
@@ -1034,12 +1243,13 @@ async def commit_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             "expect_continuation": expect_continuation,
         }
     )
+    farewell_note = ", прощание в реплике бота" if bot_farewell else ""
     stage(
         "commit",
         (
             f"сгенерировано {len(spoken_text)} симв.: «{format_spoken_preview(spoken_text)}», "
             f"ожидание продолжения={expect_continuation}, "
-            f"разговор закончен={conversation_ended}"
+            f"разговор закончен={conversation_ended}{farewell_note}"
             if spoken_text
             else (
                 f"шаг {step.id if step else '—'}, в эфир ничего не ушло, "

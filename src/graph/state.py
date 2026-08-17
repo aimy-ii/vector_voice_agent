@@ -55,11 +55,17 @@ def merge_dicts(
 
 
 class CallContext(TypedDict, total=False):
-    """Параметры запуска, приходящие снаружи на каждый ход."""
+    """Параметры запуска, приходящие снаружи на каждый ход.
+
+    ``interrupted_reply`` — часть реплики бота, которую человек успел
+    услышать до перебивания. Нет ключа или пустая строка — реплика
+    договорена целиком.
+    """
 
     script_id: str
     script_version: str
     city_slug: str
+    interrupted_reply: str
 
 
 class CallState(TypedDict, total=False):
@@ -88,6 +94,8 @@ class CallState(TypedDict, total=False):
         turn_kind: ``client`` — обычный ход по реплике клиента;
             ``continuation`` — продолжение собственной речи бота;
             ``silence`` — человек молчит, бот мягко возвращает в разговор.
+        interrupted_reply: услышанная часть прерванной реплики бота;
+            пустая строка — реплика прошлого хода договорена целиком.
         branch_candidates: отобранные резолвером слаги филиалов.
         partial_reply: накопленный распознанный текст текущей реплики
             клиента; вход служебного графа ``vector_checker``.
@@ -99,6 +107,9 @@ class CallState(TypedDict, total=False):
             (порог прироста внутри текущей реплики).
         last_checked_utterance_id: ``partial_utterance_id``, к которому
             относится ``last_checked_partial``.
+        last_checked_agent_entry: ``entry_id`` последней реплики бота,
+            которую служебный канал уже отдал судье. Реплики бота с ходов
+            без реплики человека разбираются один раз — этим полем.
     """
 
     messages: Annotated[list[BaseMessage], replace_messages]
@@ -147,11 +158,13 @@ class CallState(TypedDict, total=False):
     expect_continuation: bool
     conversation_ended: bool
     turn_kind: str
+    interrupted_reply: str
     partial_reply: str
     partial_utterance_id: str
     partial_is_final: bool
     last_checked_partial: str
     last_checked_utterance_id: str
+    last_checked_agent_entry: str
 
 
 def new_state_defaults() -> dict[str, Any]:
@@ -192,9 +205,11 @@ def new_state_defaults() -> dict[str, Any]:
         "expect_continuation": False,
         "conversation_ended": False,
         "turn_kind": "client",
+        "interrupted_reply": "",
         "partial_reply": "",
         "partial_utterance_id": "",
         "partial_is_final": False,
         "last_checked_partial": "",
         "last_checked_utterance_id": "",
+        "last_checked_agent_entry": "",
     }

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Sequence
 from unittest.mock import patch
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from graph.checker import CheckerVerdict
 from graph.checker_graph import live_check_node
@@ -15,9 +15,11 @@ from graph.context import ConversationContext
 from graph.context_agent import ContextDecision
 from graph.context_store import MemoryContextStore
 from graph.farewell_agent import (
+    _HISTORY_TAIL,
     FAREWELL_SYSTEM,
     FarewellDecision,
     LlmFarewellAgent,
+    _format_history,
     decide_farewell,
 )
 from graph.schemas import TurnResult
@@ -37,9 +39,13 @@ class _FakeFarewell:
         self.error = error
         self.calls = 0
         self.reply_seen: str = ""
-        self.history_seen: list = []
+        self.history_seen: list[BaseMessage] = []
 
-    async def decide(self, reply: str, history=()) -> FarewellDecision:
+    async def decide(
+        self,
+        reply: str,
+        history: Sequence[BaseMessage] = (),
+    ) -> FarewellDecision:
         self.calls += 1
         self.reply_seen = reply
         self.history_seen = list(history)
@@ -239,12 +245,47 @@ async def test_длинный_диалог_агент_пишет_флаг(script
     assert ctx.get("conversation_ended") is True
 
 
-async def test_флаг_переставляется_обратно_в_ложь(script, monkeypatch, _offline_farewell):
-    """Агент вернул ложь — флаг снова False, необратимости нет."""
+async def test_флаг_остаётся_поднятым_если_агент_вернул_ложь(
+    script, monkeypatch, _offline_farewell
+):
+    """Агент вернул ложь — признак конца разговора не опускается."""
     await _offline_farewell.save(
         "local",
         ConversationContext(conversation_ended=True),
     )
+
+    async def fake_decide(reply, *, history=(), agent=None):
+        return FarewellDecision(conversation_ended=False)
+
+    monkeypatch.setattr("graph.checker_graph.decide_farewell", fake_decide)
+
+    text = "а ещё вопрос про рассрочку пожалуйста"
+    state = _live_state(script, partial=text, messages=_long_history(6))
+
+    async def fake_warmup(*args, **kwargs):
+        return kwargs["ctx"]
+
+    with (
+        patch("graph.checker_graph._checker_client", _FakeChecker()),
+        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
+        patch("graph.checker_graph.settings") as mock_settings,
+    ):
+        mock_settings.checker_min_growth_chars = 10
+        mock_settings.farewell_min_messages = 5
+        mock_settings.script_id = script.id
+        mock_settings.script_version = script.version
+        mock_settings.pending_steps_soft_cap = 4
+        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
+
+    assert out["conversation_context"]["conversation_ended"] is True
+    loaded = await _offline_farewell.load("local")
+    assert loaded is not None
+    assert loaded.conversation_ended is True
+
+
+async def test_флаг_не_поднимается_если_агент_вернул_ложь(script, monkeypatch, _offline_farewell):
+    """Признак не был поднят — ложный вердикт агента его не поднимает."""
+    await _offline_farewell.save("local", ConversationContext(conversation_ended=False))
 
     async def fake_decide(reply, *, history=(), agent=None):
         return FarewellDecision(conversation_ended=False)
@@ -275,7 +316,7 @@ async def test_флаг_переставляется_обратно_в_ложь(
     assert loaded.conversation_ended is False
 
 
-@pytest.mark.parametrize("turn_kind", ["continuation", "silence"])
+@pytest.mark.parametrize("turn_kind", ["continuation", "silence", "pull"])
 async def test_продолжение_и_молчание_агент_не_зовётся(
     script, monkeypatch, _offline_farewell, turn_kind: str
 ):
@@ -360,11 +401,22 @@ async def test_ошибка_агента_не_роняет_узел(script, monk
     assert "прощание: ошибка агента" in done_msgs[0]
 
 
-def test_системное_сообщение_прощание_бота_и_ответ_или_молчание():
-    """Прощание бота засчитывается только с ответом или молчанием собеседника."""
-    assert "попрощался бот" in FAREWELL_SYSTEM
-    assert "ответил тем же" in FAREWELL_SYSTEM
-    assert "или молчит" in FAREWELL_SYSTEM
+def test_системное_сообщение_два_случая_конца():
+    """Конец — только прощание или отказ продолжать, других случаев нет."""
+    assert "Ты решаешь, закончил ли собеседник разговор" in FAREWELL_SYSTEM
+    assert "Два случая, других нет" in FAREWELL_SYSTEM
+    assert "Он попрощался" in FAREWELL_SYSTEM
+    assert "«до свидания»" in FAREWELL_SYSTEM
+    assert "Он сказал, что дальше говорить не будет" in FAREWELL_SYSTEM
+    assert "«мне пора»" in FAREWELL_SYSTEM
+    assert "«я уже отвечал»" in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_прощание_парное():
+    """Прощание бота даёт конец только если собеседник ответил прощанием."""
+    assert "Прощание в телефонном разговоре парное" in FAREWELL_SYSTEM
+    assert "ответил прощанием — конец" in FAREWELL_SYSTEM
+    assert "молчит или говорит о другом — не конец" in FAREWELL_SYSTEM
     assert "не намерен" not in FAREWELL_SYSTEM
 
 
@@ -376,6 +428,14 @@ def test_системное_сообщение_без_дал_понять():
 def test_системное_сообщение_отказ_не_конец():
     """Отказ от предложения явно перечислен среди того, что не конец."""
     assert "отказ от предложения" in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_вопросов_нет_не_конец():
+    """«вопросов нет» прямо названо ответом на вопрос бота, а не концом."""
+    assert "Не конец разговора, даже если звучит похоже" in FAREWELL_SYSTEM
+    assert "«вопросов нет»" in FAREWELL_SYSTEM
+    assert "«нет вопросов»" in FAREWELL_SYSTEM
+    assert "ответы на вопрос бота, а не завершение разговора" in FAREWELL_SYSTEM
 
 
 def test_системное_сообщение_сомневаешься_не_конец():
@@ -451,6 +511,173 @@ async def test_пустая_реплика_и_пустая_история_без
 
     assert result.conversation_ended is False
     assert called is False
+
+
+#: Хвост с прощанием бота: конец только если собеседник ответил прощанием.
+_ХВОСТ_ПРОЩАНИЕ_БОТА = [
+    AIMessage(content="Тогда всего доброго, хорошего дня."),
+]
+
+#: Середина презентации: бот спросил про практику, цены и записи ещё не было.
+_СЕРЕДИНА_ПРЕЗЕНТАЦИИ = [
+    AIMessage(content="Учиться будете сами или узнаёте для кого-то?"),
+    HumanMessage(content="Сам."),
+    AIMessage(content="Практика проходит на учебной площадке. Вопросы есть?"),
+]
+
+
+class _CapturingLlm:
+    """Заглушка контекстного менеджера get_llm."""
+
+    async def __aenter__(self) -> _CapturingLlm:
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        return None
+
+
+async def _decide_offline(
+    reply: str,
+    history: Sequence[BaseMessage],
+    *,
+    verdict: bool,
+) -> tuple[FarewellDecision | None, str]:
+    """Гоняет агента через ``decide_farewell`` офлайн с подменённой моделью.
+
+    Args:
+        reply: текущая реплика собеседника.
+        history: хвост диалога.
+        verdict: что возвращает подменённая модель.
+
+    Returns:
+        Решение агента и текст запроса, ушедшего в модель.
+    """
+    captured: list[BaseMessage] = []
+
+    async def fake_astream_structured(
+        llm: object,
+        messages: Sequence[BaseMessage],
+        **kwargs: object,
+    ) -> dict[str, bool]:
+        captured.extend(messages)
+        return {"conversation_ended": verdict}
+
+    with (
+        patch("graph.farewell_agent.get_llm", return_value=_CapturingLlm()),
+        patch("graph.farewell_agent.astream_structured", side_effect=fake_astream_structured),
+    ):
+        decision = await decide_farewell(reply, history=history)
+    human = str(captured[-1].content) if captured else ""
+    return decision, human
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "до свидания",
+        "Мне пора, извините.",
+        "Я уже отвечал.",
+    ],
+)
+async def test_реплика_и_хвост_доходят_до_модели_признак_возвращается(reply: str):
+    """Реплика и хвост уходят в модель, решение модели становится признаком."""
+    decision, human = await _decide_offline(
+        reply,
+        _ХВОСТ_ПРОЩАНИЕ_БОТА,
+        verdict=True,
+    )
+
+    assert decision is not None
+    assert decision.conversation_ended is True
+    assert reply in human
+    assert "всего доброго" in human
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Давайте на среду в три",
+        "Записывайте меня",
+        "А рассрочка без процентов?",
+        "Вторая категория мне не нужна",
+    ],
+)
+async def test_деловые_реплики_концом_не_становятся(reply: str):
+    """Договорённость, запись, вопрос и отказ признак не поднимают."""
+    decision, human = await _decide_offline(
+        reply,
+        _СЕРЕДИНА_ПРЕЗЕНТАЦИИ,
+        verdict=False,
+    )
+
+    assert decision is not None
+    assert decision.conversation_ended is False
+    assert reply in human
+
+
+async def test_вопросов_нету_в_середине_презентации_не_конец():
+    """«Вопросов нету» — ответ на вопрос бота, не завершение разговора."""
+    decision, human = await _decide_offline(
+        "Вопросов нету.",
+        _СЕРЕДИНА_ПРЕЗЕНТАЦИИ,
+        verdict=False,
+    )
+
+    assert decision is not None
+    assert decision.conversation_ended is False
+    assert "Вопросов нету." in human
+    assert "Вопросы есть?" in human
+
+
+async def test_ошибка_модели_даёт_none():
+    """Исключение модели → None: признак не выдумываем."""
+
+    async def fake_astream_structured(*args: object, **kwargs: object) -> dict[str, bool]:
+        raise RuntimeError("таймаут модели")
+
+    with (
+        patch("graph.farewell_agent.get_llm", return_value=_CapturingLlm()),
+        patch("graph.farewell_agent.astream_structured", side_effect=fake_astream_structured),
+    ):
+        result = await decide_farewell(
+            "до свидания",
+            history=[HumanMessage(content="до свидания")],
+        )
+
+    assert result is None
+
+
+def test_системное_сообщение_описывает_конец_без_прощания():
+    """Отказ продолжать — второй случай конца; домыслов о состоянии нет."""
+    assert "дальше говорить не будет" in FAREWELL_SYSTEM
+    assert "«я уже отвечал»" in FAREWELL_SYSTEM
+    assert "всё уже узнал" not in FAREWELL_SYSTEM
+    assert "отвечает односложно, сам ничего не спрашивает" not in FAREWELL_SYSTEM
+    assert "не подхватывает" not in FAREWELL_SYSTEM
+    assert "тяготит" not in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_держит_границу_живого_разговора():
+    """Живой разговор дороже пропущенного прощания; исчерпанность — не критерий."""
+    assert "Оборвать живой разговор дороже, чем пропустить прощание" in FAREWELL_SYSTEM
+    assert "Сколько тем у бота осталось впереди — не твоё дело" in FAREWELL_SYSTEM
+    assert "исчерпанн" not in FAREWELL_SYSTEM
+
+
+def test_системное_сообщение_без_реплик_образцов():
+    """Образцы в кавычках — признаки, не список для дословного сравнения."""
+    assert "Это признаки, а не список для дословного сравнения" in FAREWELL_SYSTEM
+    assert "те же мысли другими словами — тоже конец" in FAREWELL_SYSTEM
+
+
+def test_хвост_диалога_длиннее_середины_звонка():
+    """Хвост — двенадцать последних сообщений, обрезается с начала."""
+    assert _HISTORY_TAIL == 12
+    history = [HumanMessage(content=f"реплика {i}") for i in range(20)]
+    lines = _format_history(history).splitlines()
+    assert len(lines) == 12
+    assert lines[0] == "клиент: реплика 8"
+    assert lines[-1] == "клиент: реплика 19"
 
 
 async def test_пустая_реплика_с_историей_идёт_в_модель():

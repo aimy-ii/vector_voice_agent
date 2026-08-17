@@ -4,6 +4,12 @@
 или накопленный ``partial_reply`` служебного графа — одна и та же механика.
 Три части в промпт идут раздельно: срез истории, реплика, шаг.
 
+Чья это реплика, судье говорят явно (``speaker``). Шаги, которым нужен ответ
+человека, до судьи с репликой бота не доходят — их отбирает вызывающий
+(``closable_by_agent_reply``): шаг «Выявление города» закрывает названный
+город, а не заданный вопрос. Судья на реплике бота отвечает на оставшийся
+вопрос: выполнил ли агент требование шага этой самой репликой.
+
 Закрывает только судья: по диалогу или потому что дальше спрашивать
 бессмысленно. ``inform`` чекеру не отдаём — его закрывает
 ``close_delivered_inform`` по факту доставки. Модель не ответила —
@@ -13,7 +19,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, Protocol, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -29,6 +35,9 @@ from script.store import ScriptProgress, progress_from_state
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
 
 log = logging.getLogger(__name__)
+
+#: Чья реплика уходит судье отдельным блоком.
+Speaker = Literal["client", "agent"]
 
 #: Критерий закрытия по виду шага — и в промпт, и в код.
 _KIND_CRITERIA: dict[str, str] = {
@@ -84,22 +93,28 @@ class CheckerClient(Protocol):
         attempts: int = 0,
         age: int = 0,
         in_work: bool = False,
+        speaker: Speaker = "client",
     ) -> CheckerVerdict | None:
         """Оценивает один шаг. None — модель не ответила."""
 
 
-def checker_system_prompt(*, in_work: bool) -> str:
+def checker_system_prompt(*, in_work: bool, speaker: Speaker = "client") -> str:
     """Системная часть промпта чекера.
 
     Args:
         in_work: шаг уже отдан генератору (взят в работу).
+        speaker: чья реплика проверяется. ``client`` — прежний промпт слово
+            в слово; ``agent`` — судят реплику самого бота, и к промпту
+            добавляется запрет закрывать ею шаги, которым нужен ответ
+            человека.
 
     Returns:
         Текст системного сообщения под ветку.
     """
+    reply_block = "реплика агента" if speaker == "agent" else "реплика клиента"
     lines = [
         "Ты проверяешь, закрылся ли шаг скрипта телефонного разговора.",
-        "Тебе даны ТРИ РАЗДЕЛЬНЫХ блока: срез истории, реплика клиента и шаг.",
+        f"Тебе даны ТРИ РАЗДЕЛЬНЫХ блока: срез истории, {reply_block} и шаг.",
         "Не склеивай их мысленно как один текст: реплика — отдельный блок.",
         (
             "Ответь только по схеме: reply_usable, step_closed,"
@@ -161,6 +176,37 @@ def checker_system_prompt(*, in_work: bool) -> str:
             " в любой момент разговора — засчитывай упоминание по смыслу"
             " где угодно в срезе истории."
         )
+    if speaker == "agent":
+        lines.extend(
+            [
+                (
+                    "ВАЖНО: проверяемая реплика принадлежит самому агенту,"
+                    " клиент в ней не говорит. Всё, что сказал клиент,"
+                    " есть только в срезе истории."
+                ),
+                (
+                    "step_closed=true только тогда, когда требование шага"
+                    " выполняет сам агент: рассказал, назвал, предложил,"
+                    " проговорил договорённость."
+                ),
+                (
+                    "Такое требование выполняет сама реплика: вопрос в её конце"
+                    " закрытию не мешает. Смотри, чего требует шаг, а не чем"
+                    " кончилась реплика."
+                ),
+                (
+                    "Если по требованию шага нужен ответ, согласие, выбор или"
+                    " данные от клиента, а в срезе истории их нет —"
+                    " step_closed=false."
+                ),
+                (
+                    "asking_pointless=false всегда: по собственной реплике"
+                    " агента шаг безнадёжным не признают."
+                ),
+                "client_asks_inform=false всегда: клиент здесь не говорил.",
+                "reply_usable=true, если реплика агента законченная, а не обрывок.",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -199,15 +245,17 @@ class LlmCheckerClient:
         attempts: int = 0,
         age: int = 0,
         in_work: bool = False,
+        speaker: Speaker = "client",
     ) -> CheckerVerdict | None:
         """Вызывает модель; при сбое возвращает None."""
         criterion = closure_criterion(step)
-        system = checker_system_prompt(in_work=in_work)
+        system = checker_system_prompt(in_work=in_work, speaker=speaker)
         age_line = _age_line(in_work=in_work, age=age, attempts=attempts)
+        reply_heading = "Реплика агента" if speaker == "agent" else "Реплика клиента"
         if isinstance(step, SalesStep):
             human_parts = [
                 f"### Срез истории\n{history_slice or '(пусто)'}",
-                f"### Реплика клиента\n{client_reply or '(пусто)'}",
+                f"### {reply_heading}\n{client_reply or '(пусто)'}",
                 "### Шаг",
                 f"id (служебно, не возвращай): {step.id}",
                 f"Название: {step.name}",
@@ -218,7 +266,7 @@ class LlmCheckerClient:
         else:
             human_parts = [
                 f"### Срез истории\n{history_slice or '(пусто)'}",
-                f"### Реплика клиента\n{client_reply or '(пусто)'}",
+                f"### {reply_heading}\n{client_reply or '(пусто)'}",
                 "### Шаг",
                 f"id (служебно, не возвращай): {step.id}",
                 f"Вид: {step.kind}",
@@ -316,6 +364,7 @@ async def check_pass(
     judge: CheckerClient | None = None,
     progress: ScriptProgress | None = None,
     attempt_limit: int | None = None,
+    speaker: Speaker = "client",
 ) -> tuple[ScriptProgress, list[tuple[str, str]], bool]:
     """Один проход чекера по заданному тексту реплики.
 
@@ -332,6 +381,9 @@ async def check_pass(
         judge: клиент модели; пусто — боевой.
         progress: прогресс; пусто — из зеркала состояния.
         attempt_limit: устаревший порог; игнорируется.
+        speaker: чья реплика в ``reply``. ``agent`` — судят реплику самого
+            бота; какие шаги ей вообще позволено закрывать, решает
+            вызывающий, отбирая ``in_work``.
 
     Returns:
         Обновлённый прогресс, список закрытий ``(step_id, основание)``
@@ -415,6 +467,7 @@ async def check_pass(
                 attempts=int(updated.attempts.get(step.id, 0)),
                 age=age,
                 in_work=True,
+                speaker=speaker,
             )
             if verdict is None:
                 # Модель не ответила — шаги не трогаем, ход продолжается.
