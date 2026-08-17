@@ -67,6 +67,7 @@ class FakeChecker:
         attempts: int = 0,
         age: int = 0,
         in_work: bool = False,
+        speaker: str = "client",
     ):
         self.calls.append(
             {
@@ -77,6 +78,7 @@ class FakeChecker:
                 "attempts": attempts,
                 "age": age,
                 "in_work": in_work,
+                "speaker": speaker,
             }
         )
         if not self.verdicts:

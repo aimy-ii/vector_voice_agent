@@ -5,6 +5,10 @@ r"""Служебный граф чекера в реальном времени.
 не пишет, реплик в эфир не выдаёт. Ошибка только в лог — ход генератора
 не роняет.
 
+Проход запускает бот, пока говорит человек, поэтому реплики самого бота
+с ходов без реплики человека судья не видел вовсе. Их разбирает тот же
+проход следом за репликой человека — ``check_agent_replies``.
+
 Политика запусков (на стороне клиента SDK, см. настройки)::
 
     vector_checker  → multitask_strategy="interrupt"
@@ -20,13 +24,13 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Sequence
 
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 
 from core.config import settings
-from graph.checker import check_pass
+from graph.checker import CheckerClient, check_pass
 from graph.context import DYN_NONE, DYN_SEARCHING, DYN_WORKING, merge_static
 from graph.context_store import CONTEXT_FIELDS_DYNAMIC, CONTEXT_FIELDS_STATIC
 from graph.contexter import reply_hash, run_contexter
@@ -56,12 +60,14 @@ from graph.profile_form import rewritable_keys
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
-from graph.transcript import to_messages
+from graph.transcript import ROLE_AGENT, ROLE_CLIENT, TranscriptEntry, to_messages
 from kb.client import vector_kb
+from script.build import AnyStep
+from script.models import Step
 from script.planner import peek_next_step, pick_step
 from script.price import price_line, price_line_from_kb
 from script.source import registry
-from script.store import PROGRESS_FIELDS_CHECKER
+from script.store import PROGRESS_FIELDS_CHECKER, ScriptProgress
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +171,163 @@ def _lead_knowledge(
     return knowledge_of(lead)
 
 
+def agent_replies_to_check(
+    entries: Sequence[TranscriptEntry],
+    *,
+    checked_entry_id: str,
+) -> list[TranscriptEntry]:
+    """Реплики бота, рождённые на ходах без реплики человека и не разобранные.
+
+    Служебный проход запускает бот, пока говорит человек, поэтому судья
+    видит только реплики человека. Реплики бота с ходов ``continuation`` /
+    ``silence`` / ``pull`` не получал никто — и шаг, который такая реплика
+    отработала, оставался открытым.
+
+    Вид хода в истории не хранится, но выводится однозначно: фразу человека
+    дописывает ``ingest_node`` только на ходе с репликой, значит реплика
+    бота сразу за другой репликой бота — это и есть ход без человека.
+    Берётся хвост истории после последней фразы человека; первая реплика
+    хвоста — ответ на неё, её судья уже разобрал по реплике человека.
+
+    Args:
+        entries: полная история звонка из кеша контекста.
+        checked_entry_id: ``entry_id`` последней разобранной реплики бота;
+            пусто — разбора ещё не было.
+
+    Returns:
+        Реплики бота на разбор, в порядке разговора; пусто — разбирать нечего.
+    """
+    last_client = -1
+    for index, entry in enumerate(entries):
+        if entry.role == ROLE_CLIENT:
+            last_client = index
+    tail = list(entries[last_client + 1 :])
+    pending = [entry for entry in tail[1:] if entry.role == ROLE_AGENT and entry.text.strip()]
+    if not checked_entry_id:
+        return pending
+    for index, entry in enumerate(pending):
+        if entry.entry_id == checked_entry_id:
+            return pending[index + 1 :]
+    return pending
+
+
+def closable_by_agent_reply(step: AnyStep | None) -> bool:
+    """Может ли реплика самого бота закрыть шаг.
+
+    У старого формата вид шага и есть критерий закрытия: у ``question`` и
+    ``inform_check`` это дословно «клиент ответил», и реплика бота такой шаг
+    не закрывает — бот спросил про город, а закрывает шаг названный человеком
+    город. ``inform`` закрывает доставка, до судьи он не доходит. Остаётся
+    ``action``: его критерий — результат в диалоге, и договорённость,
+    проговорённая ботом, этот результат даёт.
+
+    У шага продаж вида нет, критерий закрытия — свободный текст требований,
+    и различить кодом «спросить город» и «договориться о следующем шаге»
+    нечем. Там решает судья: ему сказано, что реплика принадлежит агенту, и
+    запрещено закрывать ею шаг, которому нужен ответ человека.
+
+    Args:
+        step: шаг скрипта; ``None`` — шага нет в скрипте.
+
+    Returns:
+        True — шаг можно отдать судье с репликой бота.
+    """
+    if step is None:
+        return False
+    if isinstance(step, Step):
+        return step.kind == "action"
+    return True
+
+
+async def check_agent_replies(
+    state: CallState,
+    *,
+    progress: ScriptProgress,
+    profile: dict[str, str],
+    entries: Sequence[TranscriptEntry],
+    judge: CheckerClient | None = None,
+) -> tuple[ScriptProgress, list[tuple[str, str]], str]:
+    """Прогоняет судью по репликам бота с ходов без реплики человека.
+
+    Отдельного прохода под это нет: разбор идёт тем же служебным проходом,
+    что и реплика человека, и после неё — реплика человека не должна ждать
+    чужую работу. Новых запусков служебного канала не появляется, поэтому
+    накладываться друг на друга проходам не на чем.
+
+    Шаги, которым нужен ответ человека, до судьи не доходят вовсе: список
+    ``in_work`` для этого разбора урезан ``closable_by_agent_reply``. Из
+    вердиктов принимается только закрытие по диалогу — «спрашивать
+    бессмысленно» по собственной реплике бота не решают. Признак
+    «клиент просит рассказать» из этого разбора тоже не берётся: клиент
+    в нём не говорил.
+
+    Счётчики попыток и пометки взятия в работу не трогаются: закрытие
+    пишется в ``status``, а ``attempts`` и ``in_work`` — поля канала
+    генератора.
+
+    Args:
+        state: состояние звонка.
+        progress: прогресс из кеша; закрытия проставляются в него.
+        profile: слитый профиль.
+        entries: полная история звонка из кеша контекста.
+        judge: клиент модели; пусто — боевой.
+
+    Returns:
+        Прогресс, список закрытий ``(step_id, основание)`` и ``entry_id``
+        последней разобранной реплики бота (пусто — разбирать было нечего).
+    """
+    pending_entries = agent_replies_to_check(
+        entries,
+        checked_entry_id=str(state.get("last_checked_agent_entry") or ""),
+    )
+    if not pending_entries:
+        return progress, [], ""
+
+    marker = pending_entries[-1].entry_id
+    script = _script_of_state(state)
+    allowed = [
+        step_id
+        for step_id in progress.in_work
+        if closable_by_agent_reply(script.steps.get(step_id))
+    ]
+    if not allowed:
+        stage(
+            "live-check",
+            f"реплик бота на разбор {len(pending_entries)}, закрывать нечего",
+            "state",
+        )
+        return progress, [], marker
+
+    # Подряд идущие реплики бота — одна его речь: судье уходят одним блоком,
+    # чтобы разбор стоил один круг вызовов, а не круг на каждую реплику.
+    reply = "\n".join(entry.text for entry in pending_entries)
+    limited = ScriptProgress.from_mapping(progress.to_dict())
+    limited.in_work = allowed
+    history_entries = list(entries)[: len(entries) - len(pending_entries)]
+    state_for_check: dict[str, Any] = {
+        **state,
+        "profile": profile,
+        "messages": to_messages(history_entries),
+    }
+    updated, closures, _asks = await check_pass(
+        state_for_check,
+        reply=reply,
+        judge=judge,
+        progress=limited,
+        speaker="agent",
+    )
+    accepted = [(step_id, reason) for step_id, reason in closures if reason == "диалог"]
+    for step_id, _reason in accepted:
+        progress.status[step_id] = updated.status.get(step_id, "closed")
+    stage(
+        "live-check",
+        f"реплик бота на разбор {len(pending_entries)}, шагов {len(allowed)}: "
+        f"{format_check_done(accepted) if accepted else 'ничего'}",
+        "state",
+    )
+    return progress, accepted, marker
+
+
 async def _warmup_next_step(
     state: CallState,
     *,
@@ -259,6 +422,11 @@ async def _warmup_next_step(
 
 async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Один служебный проход: контекстер → чекер → профиль → прощание → прогрев.
+
+    Чекер работает дважды: сначала по реплике человека — слово в слово как
+    раньше, — потом по репликам бота, произнесённым на ходах без реплики
+    человека (``check_agent_replies``). Второй разбор бывает редко, новых
+    запусков служебного канала не создаёт и в цикл хода не лезет.
 
     Первым делом ставит статус «в работе» с хешем реплики — ход видит,
     что фон уже взял реплику, ещё до профиля и контекстера. Контекстер
@@ -383,6 +551,25 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         }
         if utterance_id:
             patch["last_checked_utterance_id"] = utterance_id
+
+        # Реплика человека разобрана — теперь то, что бот наговорил на ходах
+        # без неё. Порядок именно такой: разбор человека не ждёт чужую работу
+        # и не теряется, если проход отменят новой репликой. Сбой добавки
+        # уходит в лог: разбор человека к этому моменту уже сделан.
+        try:
+            progress, agent_closures, agent_marker = await check_agent_replies(
+                state,
+                progress=progress,
+                profile=profile,
+                entries=ctx.transcript,
+                judge=_checker_client,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Разбор реплик бота не удался: %s", exc)
+            agent_closures, agent_marker = [], ""
+        if agent_marker:
+            patch["last_checked_agent_entry"] = agent_marker
+        closures = closures + agent_closures
 
         # Слаги из статики контекстера — в патч состояния (не в форму профиля).
         if ctx.city_slug and not state.get("city_slug"):

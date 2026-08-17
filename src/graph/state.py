@@ -99,6 +99,9 @@ class CallState(TypedDict, total=False):
             (порог прироста внутри текущей реплики).
         last_checked_utterance_id: ``partial_utterance_id``, к которому
             относится ``last_checked_partial``.
+        last_checked_agent_entry: ``entry_id`` последней реплики бота,
+            которую служебный канал уже отдал судье. Реплики бота с ходов
+            без реплики человека разбираются один раз — этим полем.
     """
 
     messages: Annotated[list[BaseMessage], replace_messages]
@@ -152,6 +155,7 @@ class CallState(TypedDict, total=False):
     partial_is_final: bool
     last_checked_partial: str
     last_checked_utterance_id: str
+    last_checked_agent_entry: str
 
 
 def new_state_defaults() -> dict[str, Any]:
@@ -197,4 +201,5 @@ def new_state_defaults() -> dict[str, Any]:
         "partial_is_final": False,
         "last_checked_partial": "",
         "last_checked_utterance_id": "",
+        "last_checked_agent_entry": "",
     }
