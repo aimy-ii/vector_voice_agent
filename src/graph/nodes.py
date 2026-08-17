@@ -755,7 +755,9 @@ def _build_respond_messages(
     """Собирает сообщения генератора для одной ступени.
 
     Ход вытаскивания идёт в свою короткую сборку: полный ход продажи ради
-    одной добивки не нужен. Приоритет повтора над вытаскиванием сохранён —
+    одной добивки не нужен. В короткую сборку уходят шапка шагов, закрытые
+    шаги и следующий шаг — тем же путём, что в полную: без них модели
+    не из чего брать тему. Приоритет повтора над вытаскиванием сохранён —
     когда ведущий шаг не даёт ответа много ходов подряд, разговор вытягивают
     полной сборкой в режиме ``repeat``. Услышанный кусок обрыва читается
     из состояния: его кладёт ``ingest_node`` из параметров запуска.
@@ -780,15 +782,26 @@ def _build_respond_messages(
         )
     turn_mode = _turn_mode(state=state, turn_kind=turn_kind)
     if turn_mode == "pull":
+        closed_steps = [
+            script.steps[step_id]
+            for step_id, status in (state.get("step_status") or {}).items()
+            if status == "closed" and step_id in script.steps
+        ]
+        next_step_id = state.get("next_step")
+        next_step = (
+            script.steps[next_step_id] if next_step_id and next_step_id in script.steps else None
+        )
         return build_pull_messages(
             script,
             messages=history,
             profile=profile,
             pending_fields=pending_fields,
-            step=lead,
+            steps=_lead_first(head, lead),
             facts=facts,
             context_text=context_text,
             interrupted_reply=interrupted_reply,
+            closed_steps=closed_steps,
+            next_step=next_step,
         )
     closed_steps = [
         script.steps[step_id]
