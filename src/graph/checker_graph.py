@@ -63,7 +63,7 @@ from graph.tools_registry import build_context_tools
 from graph.transcript import ROLE_AGENT, ROLE_CLIENT, TranscriptEntry, to_messages
 from kb.client import vector_kb
 from script.build import AnyStep
-from script.models import Step
+from script.models import SalesStep, Step
 from script.planner import peek_next_step, pick_step
 from script.price import price_line, price_line_from_kb
 from script.source import registry
@@ -211,6 +211,77 @@ def agent_replies_to_check(
     return pending
 
 
+#: Слова, которыми в требованиях шага записана добыча ответа у человека.
+#:
+#: Ищутся только в первой фразе требований и в условии закрытия — там, где
+#: сказано, что шаг обязывает сделать. Дальше по тексту те же слова стоят в
+#: оговорках про самого бота («уточнить срок при оформлении») и про клиента
+#: («перечень — только если человек сам спросит»), и по ним шаг записывать в
+#: требующие ответа нельзя.
+_ASK_MARKERS: tuple[str, ...] = ("спрос", "спраш", "узнать", "уточнить", "выбрать", "выбор")
+
+#: Кем в условии закрытия названа сторона, чей ответ шаг ждёт.
+_HUMAN_WORDS: tuple[str, ...] = ("человек", "клиент", "собеседник")
+
+
+def _requirement_sentences(requirements: str) -> list[str]:
+    """Фразы требований шага без разделов «Зачем» и «Нельзя».
+
+    Требования шага продаж написаны по одному образцу: сначала что сделать,
+    следом необязательное условие закрытия, а «Зачем» и «Нельзя» — пояснение
+    и запреты. Для решения о закрытии годятся только первые две части:
+    в запретах перечислено то, чего на шаге не делают вовсе.
+
+    Args:
+        requirements: текст требований шага продаж.
+
+    Returns:
+        Фразы в нижнем регистре, в порядке текста.
+    """
+    sentences: list[str] = []
+    for line in requirements.splitlines():
+        text = line.strip()
+        if not text or text.startswith(("Зачем:", "Нельзя:")):
+            continue
+        sentences.extend(part.strip().lower() for part in text.split(". ") if part.strip())
+    return sentences
+
+
+def _needs_client_answer(step: SalesStep) -> bool:
+    """Нужен ли шагу продаж ответ человека, или бот закрывает его сам.
+
+    Вида у шага продаж нет, но требования написаны единообразно, и по ним
+    два рода шагов различаются. Шаг добычи открывается глаголом получения:
+    спросить, узнать, уточнить, дать выбрать — «Выявление города» закрывает
+    названный город, а не заданный вопрос. Шаг речи открывается глаголом
+    высказывания: сказать, рассказать, назвать, предложить, попросить —
+    «Допродажа второй категории» и «Приглашение знакомых» требуют от бота
+    один раз произнести своё, и вопросительная концовка реплики этого не
+    отменяет. Смотрим первую фразу: дальше в тексте те же глаголы стоят в
+    оговорках, к закрытию отношения не имеющих.
+
+    Отдельно читается условие закрытия «Шаг закрыт, когда...»: где оно
+    названо через человека, шаг ждёт именно человека, даже если требование
+    начиналось с высказывания («Предложить закрепить условия» закрывает
+    согласие).
+
+    Args:
+        step: шаг скрипта продаж.
+
+    Returns:
+        True — закрыть шаг может только ответ человека.
+    """
+    sentences = _requirement_sentences(step.requirements)
+    if not sentences:
+        return True
+    if any(marker in sentences[0] for marker in _ASK_MARKERS):
+        return True
+    return any(
+        sentence.startswith("шаг закрыт") and any(word in sentence for word in _HUMAN_WORDS)
+        for sentence in sentences
+    )
+
+
 def closable_by_agent_reply(step: AnyStep | None) -> bool:
     """Может ли реплика самого бота закрыть шаг.
 
@@ -221,10 +292,12 @@ def closable_by_agent_reply(step: AnyStep | None) -> bool:
     ``action``: его критерий — результат в диалоге, и договорённость,
     проговорённая ботом, этот результат даёт.
 
-    У шага продаж вида нет, критерий закрытия — свободный текст требований,
-    и различить кодом «спросить город» и «договориться о следующем шаге»
-    нечем. Там решает судья: ему сказано, что реплика принадлежит агенту, и
-    запрещено закрывать ею шаг, которому нужен ответ человека.
+    У шага продаж вида нет, и раньше сюда проходили все такие шаги: решал
+    один судья, а он на реплике бота держит запрет закрывать шаг, которому
+    нужен ответ человека, и под запрет попадали шаги речи — бот своё сказал,
+    но кончил вопросом. Теперь род шага код читает из требований
+    (``_needs_client_answer``), а судья остаётся второй проверкой: выполнена
+    ли требуемая речь этой самой репликой.
 
     Args:
         step: шаг скрипта; ``None`` — шага нет в скрипте.
@@ -236,7 +309,7 @@ def closable_by_agent_reply(step: AnyStep | None) -> bool:
         return False
     if isinstance(step, Step):
         return step.kind == "action"
-    return True
+    return not _needs_client_answer(step)
 
 
 async def check_agent_replies(

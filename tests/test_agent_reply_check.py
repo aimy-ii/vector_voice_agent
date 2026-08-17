@@ -23,6 +23,12 @@ from script.store import ScriptProgress, progress_to_state
 PULL_REPLY = "Тогда жду Вас завтра в три часа дня в офисе на Ленина, паспорт и СНИЛС с собой."
 #: Реплика бота в ответ на человека — её судья уже разобрал по реплике человека.
 ANSWER_REPLY = "Отлично, тогда оформим обучение."
+#: Реплика бота на ходе без человека в сценарии продаж: вторая категория
+#: предложена, знакомых пригласили. Ответа человека ни то, ни другое не ждёт.
+SALES_PULL_REPLY = (
+    "И на всякий случай: у нас можно параллельно учиться на вторую категорию. "
+    "А если кто-то из знакомых соберётся — условия для них ровно те же."
+)
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +112,24 @@ def _progress() -> ScriptProgress:
         attempts={"name": 2, "closing": 1},
         taken_turn={"name": 1, "closing": 3},
         in_work=["name", "closing"],
+    )
+
+
+def _sales_transcript() -> list[TranscriptEntry]:
+    """История звонка продаж: ответ человеку, а следом ход без человека."""
+    entries = append_agent([], turn=1, text="Добрый день! Как к Вам обращаться?")
+    entries = append_client(entries, turn=2, text="Андрей, записывайте")
+    entries = append_agent(entries, turn=2, text=ANSWER_REPLY)
+    return append_agent(entries, turn=3, text=SALES_PULL_REPLY)
+
+
+def _sales_progress() -> ScriptProgress:
+    """Прогресс v4: в работе допродажа, приглашение знакомых и город."""
+    return ScriptProgress(
+        status={"upsell": "pending", "referral": "pending", "city": "pending"},
+        attempts={"upsell": 1, "referral": 1, "city": 2},
+        taken_turn={"upsell": 3, "referral": 3, "city": 1},
+        in_work=["upsell", "referral", "city"],
     )
 
 
@@ -279,6 +303,64 @@ async def test_счётчики_и_взятие_в_работу_не_меняю�
     assert progress.in_work == in_work_before
 
 
+async def test_допродажа_и_приглашение_закрываются_репликой_бота(script_v4, _offline_context):
+    """Бот проговорил своё, человек промолчал — шаги речи закрыты."""
+    entries = _sales_transcript()
+    await _offline_context.save("local", ConversationContext(transcript=entries))
+    progress = _sales_progress()
+    # Заглушка закрывает всё, что ей дадут: отсекать должен код, а не вердикт.
+    client = SpeakerChecker({"agent": {"upsell", "referral", "city"}})
+
+    out = await _run_live(
+        script_v4,
+        _state(script_v4, partial="Ага, понятно, спасибо", progress=progress),
+        progress,
+        client,
+    )
+
+    assert out["step_status"]["upsell"] == "closed"
+    assert out["step_status"]["referral"] == "closed"
+    assert out["last_checked_agent_entry"] == entries[-1].entry_id
+    agent_calls = client.calls_of("agent")
+    assert [call["step_id"] for call in agent_calls] == ["upsell", "referral"]
+    assert agent_calls[0]["client_reply"] == SALES_PULL_REPLY
+
+
+async def test_шаг_добычи_репликой_бота_не_закрывается(script_v4, _offline_context):
+    """«Выявление города» судье с репликой бота не отдают вовсе."""
+    await _offline_context.save("local", ConversationContext(transcript=_sales_transcript()))
+    progress = _sales_progress()
+    client = SpeakerChecker({"agent": {"upsell", "referral", "city"}})
+
+    out = await _run_live(
+        script_v4,
+        _state(script_v4, partial="Ага, понятно, спасибо", progress=progress),
+        progress,
+        client,
+    )
+
+    assert out["step_status"]["city"] == "pending"
+    assert "city" not in [call["step_id"] for call in client.calls_of("agent")]
+
+
+async def test_разбор_реплики_человека_в_сценарии_продаж_не_изменился(script_v4, _offline_context):
+    """Человеку по-прежнему отдают все шаги в работе, включая шаги добычи."""
+    await _offline_context.save("local", ConversationContext(transcript=_sales_transcript()))
+    progress = _sales_progress()
+    partial = "Учиться буду в Перми"
+    client = SpeakerChecker({"client": {"city"}})
+
+    out = await _run_live(
+        script_v4, _state(script_v4, partial=partial, progress=progress), progress, client
+    )
+
+    client_calls = client.calls_of("client")
+    assert [call["step_id"] for call in client_calls] == ["city", "upsell", "referral"]
+    assert {call["client_reply"] for call in client_calls} == {partial}
+    assert out["step_status"]["city"] == "closed"
+    assert out["last_checked_partial"] == partial
+
+
 def test_на_разбор_идут_только_реплики_после_ответа_человеку():
     """Первая реплика хвоста — ответ человеку; на разбор идут следующие."""
     entries = _transcript()
@@ -313,8 +395,42 @@ def test_шаги_с_ответом_человека_реплике_бота_н�
     assert not closable_by_agent_reply(script.steps["terms"])
     assert closable_by_agent_reply(script.steps["closing"])
     assert not closable_by_agent_reply(None)
-    # У шага продаж вида нет: критерий в требованиях, решает судья.
-    assert closable_by_agent_reply(script_v4.steps["city"])
+    # Шаг продаж, который добывает ответ, репликой бота тоже не закрыть:
+    # «Выявление города» закрывает названный город, а не заданный вопрос.
+    assert not closable_by_agent_reply(script_v4.steps["city"])
+
+
+def test_шаги_речи_бота_закрываются_его_репликой(script_v4):
+    """Требование «сказать, предложить, попросить» бот выполняет сам."""
+    assert closable_by_agent_reply(script_v4.steps["upsell"])
+    assert closable_by_agent_reply(script_v4.steps["referral"])
+
+
+def test_род_шага_читается_из_требований_сценария(script_v4):
+    """Раскладка всего сценария продаж на шаги речи и шаги добычи."""
+    by_agent = {
+        step_id
+        for step_id in script_v4.step_order
+        if closable_by_agent_reply(script_v4.steps[step_id])
+    }
+
+    assert by_agent == {
+        "terms",
+        "included",
+        "practice",
+        "price",
+        "tax_deduction",
+        "closing",
+        "upsell",
+        "referral",
+    }
+    # Оговорки в хвосте требований рода шага не меняют: «уточнить срок при
+    # оформлении» у сроков и «если человек сам спросит» у состава курса.
+    assert "уточнить" in script_v4.steps["terms"].requirements
+    assert "спросит" in script_v4.steps["included"].requirements
+    # Условие закрытия названо через человека — шаг ждёт человека, хотя
+    # требование начинается с «Предложить».
+    assert not closable_by_agent_reply(script_v4.steps["price_lock"])
 
 
 def test_промпт_судьи_на_реплике_бота_запрещает_чужие_закрытия():
@@ -324,6 +440,14 @@ def test_промпт_судьи_на_реплике_бота_запрещает
     assert "принадлежит самому агенту" in agent_prompt
     assert "нужен ответ, согласие, выбор или данные от клиента" in agent_prompt
     assert "asking_pointless=false всегда" in agent_prompt
+
+
+def test_промпт_судьи_не_срывает_закрытие_вопросом_в_конце():
+    """Шаг речи закрывает сама реплика: вопросительная концовка не мешает."""
+    agent_prompt = checker_system_prompt(in_work=True, speaker="agent")
+    assert "вопрос в её конце закрытию не мешает" in agent_prompt
+    assert "Агент спросил, а клиент не ответил" not in agent_prompt
+    assert "вопрос в её конце" not in checker_system_prompt(in_work=True)
 
 
 def test_промпт_судьи_на_реплике_человека_не_изменился():
