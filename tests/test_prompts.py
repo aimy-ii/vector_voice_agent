@@ -32,6 +32,7 @@ from graph.prompts import (
     RULE_NO_VERBATIM,
     RULE_QUESTION_MOVES,
     SPEECH_RULES,
+    SPOKEN_INTRO,
     _context_has_fact,
     _describe_step,
     aside_block,
@@ -1736,6 +1737,49 @@ def test_сборки_ожидания_и_основная_не_из_filler(scri
     assert "# ПРАВИЛА РЕЧИ" in full
     assert "ограничение длины" not in full.lower()
     assert filler.count("ограничение длины") == 1
+
+
+def test_build_turn_messages_начинается_с_spoken_intro(script):
+    """Полная сборка начинается с SPOKEN_INTRO до остальных разделов."""
+    full = build_turn_messages(
+        script=script,
+        steps=[script.step("price")],
+        profile={},
+        facts={},
+        history=[],
+        asides_done=[],
+    )[0].content
+
+    assert full.startswith(SPOKEN_INTRO)
+    assert full.index(SPOKEN_INTRO) < full.index("# КАК РАБОТАТЬ")
+
+
+def test_spoken_intro_не_попадает_в_добивку_и_ожидание(script):
+    """SPOKEN_INTRO только в полной сборке: pull/waiting без него и с прежними блоками."""
+    from graph.prompts import build_pull_messages, build_waiting_messages
+
+    waiting = build_waiting_messages(
+        script,
+        messages=[HumanMessage(content="сколько стоит?")],
+        profile={},
+        pending_fields=[],
+        step=script.step("price"),
+        history_limit=2,
+    )[0].content
+    pull = build_pull_messages(
+        script,
+        messages=[AIMessage(content="Стоимость обучения расскажу чуть позже.")],
+        profile={},
+        step=script.step("price"),
+    )[0].content
+
+    assert SPOKEN_INTRO not in waiting
+    assert "Реплика ожидания — одно короткое предложение" in waiting
+    assert "Ведущий шаг:" in waiting
+
+    assert SPOKEN_INTRO not in pull
+    assert "Ты сказала реплику, вопроса в ней не было, и человек молчит." in pull
+    assert "Как рассуждать перед репликой — по порядку, не пропуская шагов." in pull
 
 
 def test_waiting_содержит_запрет_фактов_вне_данных(script):
