@@ -121,6 +121,11 @@ def _install_worker(
     monkeypatch.setattr("graph.contexter_worker.run_contexter", _unchanged)
     monkeypatch.setattr("graph.contexter_worker.vector_kb", kb)
 
+    async def _no_profile(*_args: object, **_kwargs: object) -> ProfileGuess:
+        return ProfileGuess()
+
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
+
 
 async def test_профиль_с_местом_запускает_подбор(
     store: MemoryContextStore,
@@ -258,7 +263,7 @@ async def test_финальное_слияние_прохода_не_затир�
         return FarewellDecision(conversation_ended=False)
 
     monkeypatch.setattr("graph.checker_graph._enqueue_contexter", _queued)
-    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
     monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
 
     with (

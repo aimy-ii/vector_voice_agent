@@ -368,7 +368,7 @@ async def _run_live_check(script: Any, monkeypatch: pytest.MonkeyPatch) -> Memor
     async def _no_farewell(*_args: object, **_kwargs: object) -> FarewellDecision:
         return FarewellDecision(conversation_ended=False)
 
-    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
     monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
 
     with (

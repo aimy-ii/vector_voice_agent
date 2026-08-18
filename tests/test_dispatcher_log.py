@@ -59,7 +59,7 @@ async def _live_check_done_texts(
 
     monkeypatch.setattr("graph.checker_graph._enqueue_contexter", _enqueue)
     monkeypatch.setattr("graph.checker_graph.run_contexter", _counted)
-    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
     monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
 
     with (

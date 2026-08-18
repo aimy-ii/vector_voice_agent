@@ -53,7 +53,7 @@ def _offline_context(monkeypatch) -> MemoryContextStore:
         return FarewellDecision(conversation_ended=False)
 
     monkeypatch.setattr("graph.contexter.decide_context", _no_need)
-    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
     monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
     return mem
 

@@ -110,7 +110,7 @@ def _offline_farewell(monkeypatch):
         return ProfileGuess()
 
     monkeypatch.setattr("graph.contexter.decide_context", _no_need)
-    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
     return mem
 
 

@@ -45,7 +45,7 @@ def _offline_context(monkeypatch):
         return FarewellDecision(conversation_ended=False)
 
     monkeypatch.setattr("graph.contexter.decide_context", _no_need)
-    monkeypatch.setattr("graph.checker_graph.guess_profile", _no_profile)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", _no_profile)
     monkeypatch.setattr("graph.checker_graph.decide_farewell", _no_farewell)
     return mem
 
@@ -904,7 +904,7 @@ async def test_live_check_контекстер_не_пишет_город_и_ф�
         return ProfileGuess()
 
     monkeypatch.setattr("graph.checker_graph.run_contexter", fake_contexter)
-    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
+    monkeypatch.setattr("graph.contexter_worker.guess_profile", fake_guess)
 
     with (
         patch("graph.checker_graph._checker_client", FakeChecker([None])),
@@ -1047,45 +1047,6 @@ async def test_live_lookup_ошибка_даёт_missing(script, monkeypatch, _o
     loaded = await _offline_context.load("local")
     assert loaded is not None
     assert loaded.dynamic_reply_hash == reply_hash(text)
-
-
-async def test_live_профиль_попадает_в_кеш_чекера(script, monkeypatch, _offline_context):
-    """Разбор профиля после check_pass пишется набором PROGRESS_FIELDS_CHECKER."""
-    from graph.profile_agent import ProfileGuess, ProfileValue
-    from script.store import MemoryScriptStore
-
-    text = "Меня зовут Андрей Андреевич"
-    progress = _name_progress()
-    state = _state(script, partial=text, progress=progress, last_checked="")
-
-    mem = MemoryScriptStore()
-    await mem.save("local", progress)
-
-    async def fake_guess(reply, *, known, fields, history=(), agent=None, rewritable=frozenset()):
-        return ProfileGuess(values=[ProfileValue(key="caller_name", value="Андрей")])
-
-    async def fake_warmup(*args, **kwargs):
-        return kwargs["ctx"]
-
-    monkeypatch.setattr("graph.checker_graph.guess_profile", fake_guess)
-    monkeypatch.setattr("graph.nodes.script_store", mem)
-
-    with (
-        patch("graph.checker_graph._checker_client", FakeChecker([None])),
-        patch("graph.checker_graph._warmup_next_step", side_effect=fake_warmup),
-        patch("graph.checker_graph.settings") as mock_settings,
-    ):
-        mock_settings.checker_min_growth_chars = 10
-        mock_settings.farewell_min_messages = 5
-        mock_settings.script_id = script.id
-        mock_settings.script_version = script.version
-        mock_settings.pending_steps_soft_cap = 4
-        out = await live_check_node(state, runtime=None)  # type: ignore[arg-type]
-
-    assert out.get("profile", {}).get("caller_name") == "Андрей"
-    stored = await mem.load("local")
-    assert stored is not None
-    assert stored.profile.get("caller_name") == "Андрей"
 
 
 def _branch_pending_progress() -> ScriptProgress:

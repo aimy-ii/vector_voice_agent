@@ -62,8 +62,6 @@ from graph.nodes import (
     _save_context,
     _save_progress,
 )
-from graph.profile_agent import guess_profile, profile_fields_of
-from graph.profile_form import rewritable_keys
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
@@ -74,7 +72,7 @@ from script.models import SalesStep, Step
 from script.planner import peek_next_step, pick_step
 from script.price import price_line, price_line_from_kb
 from script.source import registry
-from script.store import PROGRESS_FIELDS_CHECKER, ScriptProgress
+from script.store import ScriptProgress
 
 log = logging.getLogger(__name__)
 
@@ -740,26 +738,9 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         if ctx.branch_slug and not state.get("branch_slug"):
             patch["branch_slug"] = ctx.branch_slug
 
-        fields = profile_fields_of(script)
-        rewritable = rewritable_keys()
-        guess = await guess_profile(
-            reply,
-            history=history,
-            known=profile,
-            fields=fields,
-            rewritable=rewritable,
-        )
-        for item in guess.values:
-            key = item.key
-            value = item.value
-            if not value:
-                continue
-            current = str(profile.get(key) or "").strip()
-            if current and (key not in rewritable or current == value.strip()):
-                continue
-            profile[key] = value
-        progress.profile = dict(profile)
-        progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
+        # Анкету разбирает фоновый воркер и пишет поле profile сам.
+        # Проход пишет только статус шагов.
+        progress_patch = await _save_progress(progress, fields=frozenset({"status"}))
         patch.update(progress_patch)
         patch["profile"] = profile
 

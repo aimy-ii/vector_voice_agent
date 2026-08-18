@@ -10,6 +10,9 @@
 Подбор ближайших филиалов тоже живёт здесь: в кеш звонка пишет один
 процесс, и результат подбора не может быть затёрт устаревшей копией
 служебного прохода.
+Анкета разбирается здесь же, после контекстера и до подбора ближайших:
+перебивание отменяет только служебный проход, а разбор реплики, анкета
+и подбор доводятся до конца в очереди.
 """
 
 from __future__ import annotations
@@ -30,10 +33,14 @@ from graph.context_store import (
 )
 from graph.contexter import reply_hash, run_contexter
 from graph.nearby import apply_result, format_searching, lookup_nearby, should_refresh
+from graph.profile_agent import guess_profile, profile_fields_of
+from graph.profile_form import rewritable_keys
 from graph.progress import stage
 from graph.tools_registry import build_context_tools
+from graph.transcript import to_messages
 from kb.client import vector_kb
 from script.source import registry
+from script.store import merge_progress_fields, script_store
 
 log = logging.getLogger(__name__)
 
@@ -129,10 +136,55 @@ async def contexter_task_node(state: ContexterTaskState) -> dict[str, Any]:
         updated.dynamic_status = DYN_READY if updated.dynamic_text.strip() else DYN_MISSING
         updated.situation_slug = None
 
+    # Анкета: разбор реплики тем же воркером, что и контекстер. Профиль
+    # читается свежим из прогресса (снимок задачи мог устареть), пишется
+    # точечно полем profile — статус шагов остаётся за служебным проходом.
+    progress = await script_store.load(call_id)
+    profile = dict(state.get("profile") or {})
+    if progress is not None:
+        merged_profile = dict(progress.profile or {})
+        for key, value in profile.items():
+            merged_profile.setdefault(key, value)
+        profile = merged_profile
+    rewritable = rewritable_keys()
+    try:
+        fields = profile_fields_of(script)
+        # Транскрипт свежим из кеша: основной ход мог дописать свою реплику,
+        # без неё короткий ответ клиента не к чему привязать.
+        fresh_for_history = await context_store.load(call_id)
+        history = to_messages((fresh_for_history or updated).transcript)
+        guess = await guess_profile(
+            reply,
+            history=history,
+            known=profile,
+            fields=fields,
+            rewritable=rewritable,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Воркер: анкета не разобралась: %s", exc)
+        guess = None
+    if guess is not None:
+        changed = False
+        for item in guess.values:
+            key = item.key
+            value = item.value
+            if not value:
+                continue
+            current = str(profile.get(key) or "").strip()
+            if current and (key not in rewritable or current == value.strip()):
+                continue
+            profile[key] = value
+            changed = True
+        if changed and progress is not None:
+            progress.profile = dict(profile)
+            cached = await script_store.load(call_id)
+            base = cached if cached is not None else progress
+            to_save = merge_progress_fields(base, progress, frozenset({"profile"}))
+            await script_store.save(call_id, to_save)
+
     # Подбор ближайших филиалов: решение принимает код по изменению поля
     # формы, а не агент. Живёт в воркере рядом с контекстером: писатель в
     # кеш один, и поздний искатель видит результат раннего.
-    profile = dict(state.get("profile") or {})
     nearby_place = str(profile.get("location_hint") or "").strip()
     nearby_city = (updated.city_slug or "").strip()
     nearby_key_new = should_refresh(
