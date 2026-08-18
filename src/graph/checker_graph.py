@@ -1,6 +1,7 @@
 r"""Служебный граф чекера в реальном времени.
 
-Лайв-канал: закрывает шаги, зовёт контекстер за данными, разбирает профиль,
+Лайв-канал: закрывает шаги, ставит разбор реплики фоновому контекстеру
+(при недоступной очереди разбирает синхронно), разбирает профиль,
 решает конец разговора, греет контекст под предстоящий шаг. В ``messages``
 не пишет, реплик в эфир не выдаёт. Ошибка только в лог — ход генератора
 не роняет.
@@ -13,6 +14,12 @@ r"""Служебный граф чекера в реальном времени.
 
     vector_checker  → multitask_strategy="interrupt"
         новый служебный проход отменяет предыдущий незавершённый;
+        разбор реплики контекстером при этом не теряется — он живёт
+        в очереди vector_contexter;
+
+    vector_contexter → multitask_strategy="enqueue"
+        фоновый контекстер: задачи копятся и доводятся до конца,
+        результат уходит в кеш контекста звонка;
 
     vector_agent    → multitask_strategy="enqueue"
         основной ход не ждёт служебный: перед стартом клиент отменяет
@@ -43,13 +50,7 @@ from graph.contexter import reply_hash, run_contexter
 from graph.facts import knowledge_of, needs_of
 from graph.farewell_agent import decide_farewell
 from graph.log_fmt import format_check_done, format_live_check_state
-from graph.nearby import (
-    apply_result,
-    format_searching,
-    is_searching,
-    lookup_nearby,
-    should_refresh,
-)
+from graph.nearby import is_searching
 from graph.nodes import (
     _call_id,
     _checker_client,
@@ -61,8 +62,6 @@ from graph.nodes import (
     _save_context,
     _save_progress,
 )
-from graph.profile_agent import guess_profile, profile_fields_of
-from graph.profile_form import rewritable_keys
 from graph.progress import stage
 from graph.state import CallContext, CallState
 from graph.tools_registry import build_context_tools
@@ -73,9 +72,14 @@ from script.models import SalesStep, Step
 from script.planner import peek_next_step, pick_step
 from script.price import price_line, price_line_from_kb
 from script.source import registry
-from script.store import PROGRESS_FIELDS_CHECKER, ScriptProgress
+from script.store import ScriptProgress
 
 log = logging.getLogger(__name__)
+
+#: Треды очереди контекстера по идентификатору звонка. Кеш процесса:
+#: тред создаётся платформой с её UUID, а привязка к звонку живёт в
+#: метаданных; повторный поиск на каждой реплике не нужен.
+_CONTEXTER_THREADS: dict[str, str] = {}
 
 
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
@@ -175,6 +179,68 @@ def _lead_knowledge(
     """
     _head, lead = _lead_from_progress(state, progress=progress, profile=profile)
     return knowledge_of(lead)
+
+
+async def _enqueue_contexter(
+    call_id: str,
+    *,
+    reply: str,
+    needs: list[str],
+    step_needs: list[str],
+    profile: dict[str, str],
+    state: CallState,
+) -> bool:
+    """Ставит разбор реплики фоновому контекстеру через очередь платформы.
+
+    Сервер принимает только UUID тредов, поэтому тред создаётся без
+    своего идентификатора: платформа выдаёт UUID, привязка к звонку
+    лежит в метаданных треда (``vector_call_id``), найденный тред
+    кешируется в памяти процесса. Стратегия enqueue: задачи копятся
+    в треде и доводятся до конца, отмена служебного прохода их не трогает.
+
+    Args:
+        call_id: идентификатор звонка.
+        reply: реплика клиента.
+        needs: потребности справочника по шапке хода.
+        step_needs: знания ведущего шага для агента.
+        profile: слитый профиль.
+        state: состояние прохода (идентификатор и версия скрипта).
+
+    Returns:
+        True — задача поставлена; False — не удалось, разбираем синхронно.
+    """
+    try:
+        from langgraph_sdk import get_client
+
+        client = get_client()
+        thread_id = _CONTEXTER_THREADS.get(call_id)
+        if not thread_id:
+            found = await client.threads.search(metadata={"vector_call_id": call_id}, limit=1)
+            if found:
+                thread_id = str(found[0]["thread_id"])
+            else:
+                created = await client.threads.create(metadata={"vector_call_id": call_id})
+                thread_id = str(created["thread_id"])
+            _CONTEXTER_THREADS[call_id] = thread_id
+        await client.runs.create(
+            thread_id,
+            "vector_contexter",
+            input={
+                "call_id": call_id,
+                "reply": reply,
+                "needs": needs,
+                "step_needs": step_needs,
+                "profile": profile,
+                "script_id": str(state.get("script_id") or ""),
+                "script_version": str(state.get("script_version") or ""),
+            },
+            multitask_strategy="enqueue",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _CONTEXTER_THREADS.pop(call_id, None)
+        log.warning("Очередь контекстера недоступна, разбираю синхронно: %s", exc)
+        return False
 
 
 def agent_replies_to_check(
@@ -597,16 +663,29 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         needs = _head_needs(state, progress=progress, profile=profile)
         step_needs = _lead_knowledge(state, progress=progress, profile=profile)
 
-        # Контекстер до check_pass: сам выставит статус и сходит за данными.
-        ctx = await run_contexter(
-            ctx,
+        # Диспетчер: разбор реплики уезжает фоновому контекстеру в очередь.
+        # Не встала задача — разбираем синхронно, как раньше (запасной путь).
+        queued = await _enqueue_contexter(
+            _call_id(),
             reply=reply,
-            tools=build_context_tools(script),
-            needs=needs,
-            step_needs=step_needs,
-            profile=profile,
-            objections=script.objections,
+            needs=list(needs),
+            step_needs=list(step_needs),
+            profile=dict(profile),
+            state=state,
         )
+        if queued:
+            ctx = ctx.model_copy(update={"dynamic_status": DYN_SEARCHING, "filler_spoken": False})
+            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+        else:
+            ctx = await run_contexter(
+                ctx,
+                reply=reply,
+                tools=build_context_tools(script),
+                needs=needs,
+                step_needs=step_needs,
+                profile=profile,
+                objections=script.objections,
+            )
 
         # История из кеша: у фона своего снимка нет. После контекстера
         # подтягиваем свежую — основной ход мог дописать реплики.
@@ -649,7 +728,9 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             patch["last_checked_agent_entry"] = agent_marker
         closures = closures + agent_closures
 
-        # Слаги из статики контекстера — в патч состояния (не в форму профиля).
+        # Слаги города/филиала — в патч состояния (не в форму профиля).
+        # При очереди они приезжают в кеш фоновым контекстером и попадают
+        # сюда со следующего прохода; при синхронном запасном пути — сразу.
         if ctx.city_slug and not state.get("city_slug"):
             patch["city_slug"] = ctx.city_slug
             if ctx.city_name:
@@ -657,26 +738,9 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         if ctx.branch_slug and not state.get("branch_slug"):
             patch["branch_slug"] = ctx.branch_slug
 
-        fields = profile_fields_of(script)
-        rewritable = rewritable_keys()
-        guess = await guess_profile(
-            reply,
-            history=history,
-            known=profile,
-            fields=fields,
-            rewritable=rewritable,
-        )
-        for item in guess.values:
-            key = item.key
-            value = item.value
-            if not value:
-                continue
-            current = str(profile.get(key) or "").strip()
-            if current and (key not in rewritable or current == value.strip()):
-                continue
-            profile[key] = value
-        progress.profile = dict(profile)
-        progress_patch = await _save_progress(progress, fields=PROGRESS_FIELDS_CHECKER)
+        # Анкету разбирает фоновый воркер и пишет поле profile сам.
+        # Проход пишет только статус шагов.
+        progress_patch = await _save_progress(progress, fields=frozenset({"status"}))
         patch.update(progress_patch)
         patch["profile"] = profile
 
@@ -711,38 +775,26 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             asks_inform=asks_inform,
         )
 
-        # Подбор ближайших филиалов: решение принимает код по изменению поля
-        # формы, а не агент. Модель поставляет только само место словами.
-        nearby_place = str(profile.get("location_hint") or "").strip()
-        nearby_city = (ctx.city_slug or str(state.get("city_slug") or "")).strip()
-        nearby_key_new = should_refresh(
-            city_slug=nearby_city or None,
-            place=nearby_place,
-            current_key=ctx.nearby_key,
-        )
-        if nearby_key_new:
-            previous_nearby_text = ctx.nearby_text
-            previous_nearby_found = ctx.nearby_found
-            ctx.nearby_key = nearby_key_new
-            ctx.nearby_text = format_searching(nearby_place)
-            # Отдельной записью до похода: ход идёт параллельно и должен
-            # увидеть, что подбор начат, а не пустоту.
-            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
-            nearby_result = await lookup_nearby(
-                vector_kb,
-                city_slug=nearby_city,
-                place=nearby_place,
-                key=nearby_key_new,
+        # Финальная запись — слияние со свежим кешем: пока проход работал,
+        # воркер мог доложить данные, и копия прохода не должна их накрыть.
+        fresh = await _load_context(state)
+        fresh_dynamic = (fresh.dynamic_text or "").strip()
+        if fresh_dynamic and fresh_dynamic not in (ctx.dynamic_text or ""):
+            local_dynamic = (ctx.dynamic_text or "").strip()
+            ctx.dynamic_text = (
+                f"{fresh_dynamic}\n{local_dynamic}".strip() if local_dynamic else fresh_dynamic
             )
-            ctx.nearby_text, ctx.nearby_found = apply_result(
-                previous_text=previous_nearby_text,
-                previous_found=previous_nearby_found,
-                result=nearby_result,
-            )
-            if nearby_result.branch_slugs:
-                ctx.branch_candidates = nearby_result.branch_slugs
-                ctx.branch_cards = nearby_result.branch_cards
-
+        for field in (
+            "nearby_text",
+            "nearby_key",
+            "nearby_found",
+            "branch_candidates",
+            "branch_cards",
+        ):
+            setattr(ctx, field, getattr(fresh, field))
+        if (fresh.city_slug or "").strip() and not (ctx.city_slug or "").strip():
+            ctx.city_slug = fresh.city_slug
+            ctx.city_name = fresh.city_name or ctx.city_name
         ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
         patch.update(ctx_patch)
 
@@ -753,9 +805,14 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         subject = (ctx.situation_slug or "").strip()
         subject_part = f", предмет «{subject}»" if subject else ""
+        contexter_part = (
+            f"контекстер: в очереди, статус {ctx.dynamic_status}"
+            if queued
+            else f"контекстер: статус {ctx.dynamic_status}"
+        )
         stage(
             "live-check",
-            f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
+            f"чекер: {checker_text}; {contexter_part}"
             f"{subject_part}; прощание: {farewell_note}; {elapsed_ms} мс",
             "done",
         )

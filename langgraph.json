@@ -3,7 +3,8 @@
   "dependencies": ["."],
   "graphs": {
     "vector_agent": "./src/graph/graph.py:graph",
-    "vector_checker": "./src/graph/checker_graph.py:graph"
+    "vector_checker": "./src/graph/checker_graph.py:graph",
+    "vector_contexter": "./src/graph/contexter_worker.py:graph"
   },
   "env": ".env",
   "python_version": "3.12",
