@@ -18,3 +18,9 @@ uv.lock
 *.log
 logs/
 agent.txt
+
+# local notes / patches
+STABLE-2026-08-03.md
+TREBOVANIYA.md
+script_dash_fix.patch
+script_dash_fix_2.patch
