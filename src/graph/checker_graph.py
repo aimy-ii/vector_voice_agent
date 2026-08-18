@@ -177,6 +177,61 @@ def _lead_knowledge(
     return knowledge_of(lead)
 
 
+async def _enqueue_contexter(
+    call_id: str,
+    *,
+    reply: str,
+    needs: list[str],
+    step_needs: list[str],
+    profile: dict[str, str],
+    state: CallState,
+) -> bool:
+    """Ставит разбор реплики фоновому контекстеру через очередь платформы.
+
+    Клиент без адреса изнутри сервера подключается к нему же по внутреннему
+    транспорту. Стратегия enqueue: задачи копятся и доводятся до конца,
+    отмена служебного прохода их не трогает.
+
+    Args:
+        call_id: идентификатор звонка.
+        reply: реплика клиента.
+        needs: потребности справочника по шапке хода.
+        step_needs: знания ведущего шага для агента.
+        profile: слитый профиль.
+        state: состояние прохода (идентификатор и версия скрипта).
+
+    Returns:
+        True — задача поставлена; False — не удалось, разбираем синхронно.
+    """
+    try:
+        from langgraph_sdk import get_client
+
+        client = get_client()
+        thread_id = f"{call_id}{settings.live_thread_suffix}-ctx"
+        try:
+            await client.threads.create(thread_id=thread_id, if_exists="do_nothing")
+        except Exception:  # noqa: BLE001
+            pass
+        await client.runs.create(
+            thread_id,
+            "vector_contexter",
+            input={
+                "call_id": call_id,
+                "reply": reply,
+                "needs": needs,
+                "step_needs": step_needs,
+                "profile": profile,
+                "script_id": str(state.get("script_id") or ""),
+                "script_version": str(state.get("script_version") or ""),
+            },
+            multitask_strategy="enqueue",
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Очередь контекстера недоступна, разбираю синхронно: %s", exc)
+        return False
+
+
 def agent_replies_to_check(
     entries: Sequence[TranscriptEntry],
     *,
@@ -597,16 +652,29 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         needs = _head_needs(state, progress=progress, profile=profile)
         step_needs = _lead_knowledge(state, progress=progress, profile=profile)
 
-        # Контекстер до check_pass: сам выставит статус и сходит за данными.
-        ctx = await run_contexter(
-            ctx,
+        # Диспетчер: разбор реплики уезжает фоновому контекстеру в очередь.
+        # Не встала задача — разбираем синхронно, как раньше (запасной путь).
+        queued = await _enqueue_contexter(
+            _call_id(),
             reply=reply,
-            tools=build_context_tools(script),
-            needs=needs,
-            step_needs=step_needs,
-            profile=profile,
-            objections=script.objections,
+            needs=list(needs),
+            step_needs=list(step_needs),
+            profile=dict(profile),
+            state=state,
         )
+        if queued:
+            ctx = ctx.model_copy(update={"dynamic_status": DYN_SEARCHING, "filler_spoken": False})
+            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
+        else:
+            ctx = await run_contexter(
+                ctx,
+                reply=reply,
+                tools=build_context_tools(script),
+                needs=needs,
+                step_needs=step_needs,
+                profile=profile,
+                objections=script.objections,
+            )
 
         # История из кеша: у фона своего снимка нет. После контекстера
         # подтягиваем свежую — основной ход мог дописать реплики.

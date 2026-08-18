@@ -79,41 +79,6 @@ def _call_id() -> str:
         return "local"
 
 
-async def _enqueue_city_task(call_id: str, probe: str) -> bool:
-    """Ставит фоновую задачу на данные города через очередь платформы.
-
-    Клиент без адреса изнутри сервера подключается к нему же по
-    внутреннему транспорту. Стратегия enqueue: задачи копятся и доводятся
-    до конца, отмена служебного прохода их не трогает.
-
-    Args:
-        call_id: идентификатор звонка.
-        probe: строка с названием города.
-
-    Returns:
-        True — задача поставлена; False — не удалось, идём синхронно.
-    """
-    try:
-        from langgraph_sdk import get_client
-
-        client = get_client()
-        thread_id = f"{call_id}-city"
-        try:
-            await client.threads.create(thread_id=thread_id, if_exists="do_nothing")
-        except Exception:  # noqa: BLE001
-            pass
-        await client.runs.create(
-            thread_id,
-            "vector_city_worker",
-            input={"call_id": call_id, "probe": probe},
-            multitask_strategy="enqueue",
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Очередь города недоступна, иду синхронно: %s", exc)
-        return False
-
-
 def _triggers_catalogue(
     items: Mapping[str, Objection],
 ) -> dict[str, Sequence[str]]:
@@ -330,24 +295,17 @@ async def _fulfill_needs(
     if not context.city_slug and "city_choices" in needs:
         city_tool = _tool_by_name(tools, "city")
         if city_tool is not None:
+            invoked = True
             probe = str((profile or {}).get("city") or "").strip() or (reply or "").strip()
-            if probe and await _enqueue_city_task(_call_id(), probe):
-                # Задача в очереди: проход не ждёт. Статус «в поиске» уже
-                # стоит, результат и итоговый статус придут из фонового графа.
-                invoked = True
-                context.situation_slug = "город и условия в нём"
-                record_empty_needs(context, [], found=False)
-            else:
-                invoked = True
-                found = await _run_tool(city_tool, probe, context, reply=probe)
-                got_city = bool((found or "").strip()) or (
-                    bool(context.city_slug) and context.city_slug != city_before
-                )
-                if (found or "").strip():
-                    _append_dynamic(context, found)
-                if got_city:
-                    got = True
-                record_empty_needs(context, ["city_choices"], found=got_city)
+            found = await _run_tool(city_tool, probe, context, reply=probe)
+            got_city = bool((found or "").strip()) or (
+                bool(context.city_slug) and context.city_slug != city_before
+            )
+            if (found or "").strip():
+                _append_dynamic(context, found)
+            if got_city:
+                got = True
+            record_empty_needs(context, ["city_choices"], found=got_city)
 
     fact_needs = [n for n in needs if n in FACT_NEEDS]
     if fact_needs:
