@@ -7,6 +7,9 @@
 динамики — без изменений) и сливает результат в кеш звонка, откуда его
 читают ход и следующий проход. Статус воркер доводит до итога сам:
 зависшего «в поиске» после завершения задачи не остаётся.
+Подбор ближайших филиалов тоже живёт здесь: в кеш звонка пишет один
+процесс, и результат подбора не может быть затёрт устаревшей копией
+служебного прохода.
 """
 
 from __future__ import annotations
@@ -26,8 +29,10 @@ from graph.context_store import (
     merge_context_fields,
 )
 from graph.contexter import reply_hash, run_contexter
+from graph.nearby import apply_result, format_searching, lookup_nearby, should_refresh
 from graph.progress import stage
 from graph.tools_registry import build_context_tools
+from kb.client import vector_kb
 from script.source import registry
 
 log = logging.getLogger(__name__)
@@ -123,6 +128,46 @@ async def contexter_task_node(state: ContexterTaskState) -> dict[str, Any]:
         # чтобы генератор не ждал то, что уже разобрано.
         updated.dynamic_status = DYN_READY if updated.dynamic_text.strip() else DYN_MISSING
         updated.situation_slug = None
+
+    # Подбор ближайших филиалов: решение принимает код по изменению поля
+    # формы, а не агент. Живёт в воркере рядом с контекстером: писатель в
+    # кеш один, и поздний искатель видит результат раннего.
+    profile = dict(state.get("profile") or {})
+    nearby_place = str(profile.get("location_hint") or "").strip()
+    nearby_city = (updated.city_slug or "").strip()
+    nearby_key_new = should_refresh(
+        city_slug=nearby_city or None,
+        place=nearby_place,
+        current_key=updated.nearby_key,
+    )
+    if nearby_key_new:
+        previous_nearby_text = updated.nearby_text
+        previous_nearby_found = updated.nearby_found
+        updated.nearby_key = nearby_key_new
+        updated.nearby_text = format_searching(nearby_place)
+        # Промежуточная запись до похода: ход идёт параллельно и должен
+        # увидеть, что подбор начат, а не пустоту.
+        interim = await context_store.load(call_id)
+        interim_merged = merge_context_fields(
+            interim if interim is not None else updated,
+            updated,
+            CONTEXT_FIELDS_DYNAMIC,
+        )
+        await context_store.save(call_id, interim_merged)
+        nearby_result = await lookup_nearby(
+            vector_kb,
+            city_slug=nearby_city,
+            place=nearby_place,
+            key=nearby_key_new,
+        )
+        updated.nearby_text, updated.nearby_found = apply_result(
+            previous_text=previous_nearby_text,
+            previous_found=previous_nearby_found,
+            result=nearby_result,
+        )
+        if nearby_result.branch_slugs:
+            updated.branch_candidates = nearby_result.branch_slugs
+            updated.branch_cards = nearby_result.branch_cards
 
     base = await context_store.load(call_id)
     if base is not None:

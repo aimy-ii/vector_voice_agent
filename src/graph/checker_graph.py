@@ -50,13 +50,7 @@ from graph.contexter import reply_hash, run_contexter
 from graph.facts import knowledge_of, needs_of
 from graph.farewell_agent import decide_farewell
 from graph.log_fmt import format_check_done, format_live_check_state
-from graph.nearby import (
-    apply_result,
-    format_searching,
-    is_searching,
-    lookup_nearby,
-    should_refresh,
-)
+from graph.nearby import is_searching
 from graph.nodes import (
     _call_id,
     _checker_client,
@@ -800,38 +794,26 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             asks_inform=asks_inform,
         )
 
-        # Подбор ближайших филиалов: решение принимает код по изменению поля
-        # формы, а не агент. Модель поставляет только само место словами.
-        nearby_place = str(profile.get("location_hint") or "").strip()
-        nearby_city = (ctx.city_slug or str(state.get("city_slug") or "")).strip()
-        nearby_key_new = should_refresh(
-            city_slug=nearby_city or None,
-            place=nearby_place,
-            current_key=ctx.nearby_key,
-        )
-        if nearby_key_new:
-            previous_nearby_text = ctx.nearby_text
-            previous_nearby_found = ctx.nearby_found
-            ctx.nearby_key = nearby_key_new
-            ctx.nearby_text = format_searching(nearby_place)
-            # Отдельной записью до похода: ход идёт параллельно и должен
-            # увидеть, что подбор начат, а не пустоту.
-            await _save_context(ctx, fields=CONTEXT_FIELDS_DYNAMIC)
-            nearby_result = await lookup_nearby(
-                vector_kb,
-                city_slug=nearby_city,
-                place=nearby_place,
-                key=nearby_key_new,
+        # Финальная запись — слияние со свежим кешем: пока проход работал,
+        # воркер мог доложить данные, и копия прохода не должна их накрыть.
+        fresh = await _load_context(state)
+        fresh_dynamic = (fresh.dynamic_text or "").strip()
+        if fresh_dynamic and fresh_dynamic not in (ctx.dynamic_text or ""):
+            local_dynamic = (ctx.dynamic_text or "").strip()
+            ctx.dynamic_text = (
+                f"{fresh_dynamic}\n{local_dynamic}".strip() if local_dynamic else fresh_dynamic
             )
-            ctx.nearby_text, ctx.nearby_found = apply_result(
-                previous_text=previous_nearby_text,
-                previous_found=previous_nearby_found,
-                result=nearby_result,
-            )
-            if nearby_result.branch_slugs:
-                ctx.branch_candidates = nearby_result.branch_slugs
-                ctx.branch_cards = nearby_result.branch_cards
-
+        for field in (
+            "nearby_text",
+            "nearby_key",
+            "nearby_found",
+            "branch_candidates",
+            "branch_cards",
+        ):
+            setattr(ctx, field, getattr(fresh, field))
+        if (fresh.city_slug or "").strip() and not (ctx.city_slug or "").strip():
+            ctx.city_slug = fresh.city_slug
+            ctx.city_name = fresh.city_name or ctx.city_name
         ctx_patch = await _save_context(ctx, fields=CONTEXT_FIELDS_STATIC | CONTEXT_FIELDS_DYNAMIC)
         patch.update(ctx_patch)
 
