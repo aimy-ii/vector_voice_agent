@@ -67,6 +67,9 @@ class ConversationContext(BaseModel):
         empty_needs: потребности, за которыми уже ходили и справочник
             вернул пусто. Повторно за ними не ходим до конца звонка:
             данных в справочнике нет, и следующая попытка ничего не изменит.
+        city_attempts: сколько раз ходили за городом без результата.
+            Обнуляется при успехе; после потолка попыток город попадает
+            в ``empty_needs`` как честное «в справочнике нет».
         city_slug: слаг города после фиксации.
         city_name: читаемое название города.
         branch_slug: слаг выбранного филиала.
@@ -104,6 +107,7 @@ class ConversationContext(BaseModel):
     dynamic_reply_hash: str = ""
     pending_fields: list[str] = Field(default_factory=list)
     empty_needs: list[str] = Field(default_factory=list)
+    city_attempts: int = 0
     city_slug: str | None = None
     city_name: str | None = None
     branch_slug: str | None = None
@@ -496,6 +500,32 @@ def _city_known(
     return False
 
 
+def city_data_missing(
+    context: ConversationContext,
+    profile: Mapping[str, str] | None,
+) -> bool:
+    """Город назван, а данных города в контексте нет.
+
+    Название в анкете или в контексте — повод идти в справочник, но не
+    признак, что данные добыты: данными считается только зафиксированный
+    слаг города.
+
+    Args:
+        context: текущий контекст разговора.
+        profile: форма разговора.
+
+    Returns:
+        True, когда пора ставить долг на данные города.
+    """
+    if (context.city_slug or "").strip():
+        return False
+    if "city_choices" in {str(n).strip() for n in (context.empty_needs or [])}:
+        return False
+    if (context.city_name or "").strip():
+        return True
+    return bool(profile and str(profile.get("city") or "").strip())
+
+
 def _has_city_static(context: ConversationContext) -> bool:
     """В контексте уже запечена статика города."""
     return bool((context.city_slug or "").strip() and (context.static_text or "").strip())
@@ -551,7 +581,7 @@ def missing_needs(
         if need in empty:
             continue
         if need == "city_choices":
-            if not city_known:
+            if not city_known or city_data_missing(context, profile):
                 missing.append(need)
         elif need == "city_meta":
             if city_known and not _has_city_static(context):
@@ -580,21 +610,33 @@ def record_empty_needs(
 
     Пустой ответ — потребности запоминаются: за ними больше не ходим.
     Данные получены — потребности из списка убираются, если были.
+    Город помечается пустым только после трёх безуспешных походов, потому
+    что обрыв или таймаут — не то же самое, что «города нет в справочнике».
 
     Args:
         context: контекст разговора; список меняется на месте.
         needs: потребности этого похода.
         found: инструмент вернул данные.
     """
-    cleaned = [str(n).strip() for n in needs if str(n).strip()]
-    if not cleaned:
+    CITY_ATTEMPT_LIMIT = 3
+    plain = [str(n).strip() for n in needs if str(n).strip()]
+    if "city_choices" in plain:
+        if found:
+            context.city_attempts = 0
+        else:
+            context.city_attempts += 1
+            if context.city_attempts >= CITY_ATTEMPT_LIMIT:
+                if "city_choices" not in (context.empty_needs or []):
+                    context.empty_needs = [*context.empty_needs, "city_choices"]
+        plain = [n for n in plain if n != "city_choices"]
+    if not plain:
         return
     if found:
-        drop = set(cleaned)
+        drop = set(plain)
         context.empty_needs = [n for n in context.empty_needs if n not in drop]
         return
     known = set(context.empty_needs)
-    for need in cleaned:
+    for need in plain:
         if need not in known:
             context.empty_needs.append(need)
             known.add(need)

@@ -22,6 +22,7 @@ from graph.context import (
     DYN_READY,
     DYN_SEARCHING,
     ConversationContext,
+    city_data_missing,
     missing_needs,
     record_empty_needs,
 )
@@ -269,6 +270,7 @@ async def _fulfill_needs(
     reply: str,
     needs: Sequence[str],
     tools: Sequence[ContextTool],
+    profile: Mapping[str, str] | None = None,
 ) -> tuple[bool, bool]:
     """Исполняет потребности шага без агента.
 
@@ -277,6 +279,8 @@ async def _fulfill_needs(
         reply: реплика клиента (для резолва города).
         needs: потребности справочника из ``missing_needs``.
         tools: реестр инструментов.
+        profile: форма разговора; из неё берётся название города,
+            если в реплике его нет.
 
     Returns:
         Пара ``(got, invoked)``: данные получены; был хотя бы один вызов.
@@ -288,11 +292,12 @@ async def _fulfill_needs(
     city_before = context.city_slug
     branch_before = context.branch_slug
 
-    if not context.city_slug and (reply or "").strip() and "city_choices" in needs:
+    if not context.city_slug and "city_choices" in needs:
         city_tool = _tool_by_name(tools, "city")
         if city_tool is not None:
             invoked = True
-            found = await _run_tool(city_tool, reply, context, reply=reply)
+            probe = str((profile or {}).get("city") or "").strip() or (reply or "").strip()
+            found = await _run_tool(city_tool, probe, context, reply=probe)
             got_city = bool((found or "").strip()) or (
                 bool(context.city_slug) and context.city_slug != city_before
             )
@@ -380,6 +385,10 @@ async def run_contexter(
 
     need_list = [str(n).strip() for n in needs if str(n).strip()]
     agent_step_needs = [str(n).strip() for n in step_needs if str(n).strip()]
+    # Долг на данные города не зависит от шапки шагов: город назван,
+    # данных нет — идём, на какой бы реплике это ни всплыло.
+    if city_data_missing(updated, profile) and "city_choices" not in need_list:
+        need_list = ["city_choices", *need_list]
     missing = missing_needs(updated, need_list, profile)
     marked_searching = False
     got = False
@@ -393,7 +402,9 @@ async def run_contexter(
         _mark_searching(updated, digest=digest)
         await _persist_dynamic(updated)
         marked_searching = True
-        got, invoked = await _fulfill_needs(updated, reply=reply, needs=missing, tools=tools)
+        got, invoked = await _fulfill_needs(
+            updated, reply=reply, needs=missing, tools=tools, profile=profile
+        )
 
     # Возражения — тактика разговора; к потребностям шага отношения не имеют.
     if objections and find_aside(reply, _triggers_catalogue(objections)):
