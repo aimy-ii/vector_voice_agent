@@ -84,6 +84,11 @@ from script.store import PROGRESS_FIELDS_CHECKER, ScriptProgress
 
 log = logging.getLogger(__name__)
 
+#: Треды очереди контекстера по идентификатору звонка. Кеш процесса:
+#: тред создаётся платформой с её UUID, а привязка к звонку живёт в
+#: метаданных; повторный поиск на каждой реплике не нужен.
+_CONTEXTER_THREADS: dict[str, str] = {}
+
 
 def growth_below_threshold(reply: str, previous: str, *, min_growth: int) -> bool:
     """Прирост текста меньше порога внутри текущей реплики.
@@ -195,9 +200,11 @@ async def _enqueue_contexter(
 ) -> bool:
     """Ставит разбор реплики фоновому контекстеру через очередь платформы.
 
-    Клиент без адреса изнутри сервера подключается к нему же по внутреннему
-    транспорту. Стратегия enqueue: задачи копятся и доводятся до конца,
-    отмена служебного прохода их не трогает.
+    Сервер принимает только UUID тредов, поэтому тред создаётся без
+    своего идентификатора: платформа выдаёт UUID, привязка к звонку
+    лежит в метаданных треда (``vector_call_id``), найденный тред
+    кешируется в памяти процесса. Стратегия enqueue: задачи копятся
+    в треде и доводятся до конца, отмена служебного прохода их не трогает.
 
     Args:
         call_id: идентификатор звонка.
@@ -214,11 +221,15 @@ async def _enqueue_contexter(
         from langgraph_sdk import get_client
 
         client = get_client()
-        thread_id = f"{call_id}{settings.live_thread_suffix}-ctx"
-        try:
-            await client.threads.create(thread_id=thread_id, if_exists="do_nothing")
-        except Exception:  # noqa: BLE001
-            pass
+        thread_id = _CONTEXTER_THREADS.get(call_id)
+        if not thread_id:
+            found = await client.threads.search(metadata={"vector_call_id": call_id}, limit=1)
+            if found:
+                thread_id = str(found[0]["thread_id"])
+            else:
+                created = await client.threads.create(metadata={"vector_call_id": call_id})
+                thread_id = str(created["thread_id"])
+            _CONTEXTER_THREADS[call_id] = thread_id
         await client.runs.create(
             thread_id,
             "vector_contexter",
@@ -235,6 +246,7 @@ async def _enqueue_contexter(
         )
         return True
     except Exception as exc:  # noqa: BLE001
+        _CONTEXTER_THREADS.pop(call_id, None)
         log.warning("Очередь контекстера недоступна, разбираю синхронно: %s", exc)
         return False
 
