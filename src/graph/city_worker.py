@@ -7,6 +7,9 @@
 
 Результат кладётся сразу в кеш контекста звонка (`context_store`), а не в
 состояние графа: оттуда его читают и служебный проход, и основной ход.
+
+Воркер управляет статусом сам: взял задачу — довёл до «готово» или
+«не нашлось». Зависшего «в поиске» после завершения задачи быть не должно.
 """
 
 from __future__ import annotations
@@ -18,7 +21,13 @@ from typing import Any, TypedDict
 from langgraph.graph import StateGraph
 
 from core.config import settings
-from graph.context import ConversationContext, record_empty_needs
+from graph.context import (
+    DYN_MISSING,
+    DYN_READY,
+    DYN_SEARCHING,
+    ConversationContext,
+    record_empty_needs,
+)
 from graph.context_store import (
     CONTEXT_FIELDS_DYNAMIC,
     CONTEXT_FIELDS_STATIC,
@@ -92,9 +101,19 @@ async def city_task_node(state: CityTaskState) -> dict[str, Any]:
     context = cached if cached is not None else ConversationContext()
     if (context.city_slug or "").strip():
         stage("city-worker", f"звонок {call_id}: город уже добыт, пропуск", "done")
+        if context.dynamic_status == DYN_SEARCHING:
+            cleared = context.model_copy(
+                update={"dynamic_status": DYN_READY, "situation_slug": None}
+            )
+            await context_store.save(call_id, cleared)
         return {}
     if "city_choices" in {str(n).strip() for n in (context.empty_needs or [])}:
         stage("city-worker", f"звонок {call_id}: попытки исчерпаны, пропуск", "done")
+        if context.dynamic_status == DYN_SEARCHING:
+            cleared = context.model_copy(
+                update={"dynamic_status": DYN_MISSING, "situation_slug": None}
+            )
+            await context_store.save(call_id, cleared)
         return {}
 
     script = await _load_script()
@@ -116,6 +135,15 @@ async def city_task_node(state: CityTaskState) -> dict[str, Any]:
     record_empty_needs(updated, ["city_choices"], found=got)
     if got and (found or "").strip() and found.strip() not in updated.dynamic_text:
         updated.dynamic_text = (updated.dynamic_text + "\n" + found.strip()).strip()
+
+    if got:
+        updated.dynamic_status = DYN_READY
+        updated.situation_slug = None
+        updated.filler_spoken = False
+    else:
+        updated.dynamic_status = DYN_MISSING
+        updated.situation_slug = None
+        updated.filler_spoken = False
 
     base = await context_store.load(call_id)
     if base is not None:

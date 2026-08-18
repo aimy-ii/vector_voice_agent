@@ -333,8 +333,9 @@ async def _fulfill_needs(
             probe = str((profile or {}).get("city") or "").strip() or (reply or "").strip()
             if probe and await _enqueue_city_task(_call_id(), probe):
                 # Задача в очереди: проход не ждёт. Статус «в поиске» уже
-                # стоит, результат придёт в кеш из фонового графа.
+                # стоит, результат и итоговый статус придут из фонового графа.
                 invoked = True
+                context.situation_slug = "город и условия в нём"
                 record_empty_needs(context, [], found=False)
             else:
                 invoked = True
