@@ -1,6 +1,7 @@
 r"""Служебный граф чекера в реальном времени.
 
-Лайв-канал: закрывает шаги, зовёт контекстер за данными, разбирает профиль,
+Лайв-канал: закрывает шаги, ставит разбор реплики фоновому контекстеру
+(при недоступной очереди разбирает синхронно), разбирает профиль,
 решает конец разговора, греет контекст под предстоящий шаг. В ``messages``
 не пишет, реплик в эфир не выдаёт. Ошибка только в лог — ход генератора
 не роняет.
@@ -13,6 +14,12 @@ r"""Служебный граф чекера в реальном времени.
 
     vector_checker  → multitask_strategy="interrupt"
         новый служебный проход отменяет предыдущий незавершённый;
+        разбор реплики контекстером при этом не теряется — он живёт
+        в очереди vector_contexter;
+
+    vector_contexter → multitask_strategy="enqueue"
+        фоновый контекстер: задачи копятся и доводятся до конца,
+        результат уходит в кеш контекста звонка;
 
     vector_agent    → multitask_strategy="enqueue"
         основной ход не ждёт служебный: перед стартом клиент отменяет
@@ -717,7 +724,9 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
             patch["last_checked_agent_entry"] = agent_marker
         closures = closures + agent_closures
 
-        # Слаги из статики контекстера — в патч состояния (не в форму профиля).
+        # Слаги города/филиала — в патч состояния (не в форму профиля).
+        # При очереди они приезжают в кеш фоновым контекстером и попадают
+        # сюда со следующего прохода; при синхронном запасном пути — сразу.
         if ctx.city_slug and not state.get("city_slug"):
             patch["city_slug"] = ctx.city_slug
             if ctx.city_name:
@@ -821,9 +830,14 @@ async def live_check_node(state: CallState, runtime: Runtime[CallContext]) -> di
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         subject = (ctx.situation_slug or "").strip()
         subject_part = f", предмет «{subject}»" if subject else ""
+        contexter_part = (
+            f"контекстер: в очереди, статус {ctx.dynamic_status}"
+            if queued
+            else f"контекстер: статус {ctx.dynamic_status}"
+        )
         stage(
             "live-check",
-            f"чекер: {checker_text}; контекстер: статус {ctx.dynamic_status}"
+            f"чекер: {checker_text}; {contexter_part}"
             f"{subject_part}; прощание: {farewell_note}; {elapsed_ms} мс",
             "done",
         )
