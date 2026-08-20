@@ -9,6 +9,7 @@ from graph.context import (
     DYN_SEARCHING,
     DYN_WORKING,
     ConversationContext,
+    _discount_lines,
     format_city_static,
     merge_static,
 )
@@ -177,6 +178,123 @@ def test_format_city_static_число_филиалов_и_без_адресов
     )
     assert "Филиалов в городе" not in without
     assert "подбирает контекстер" in without
+
+
+def _krasnoyarsk_card(**extra: object) -> dict:
+    """Карточка Красноярска для тестов скидок в статике."""
+    card: dict = {
+        "name": "Красноярск",
+        "branches_count": 15,
+        "categories": [{"code": "B", "duration": "2 месяца", "start_frequency": "каждые 15 дней"}],
+        "vehicles": {
+            "manual": ["Lada Granta"],
+            "automatic": ["Kia Rio"],
+            "fleet_age": "не старше 2023 г",
+        },
+        "theory_formats": ["очно", "дистанционно"],
+        "documents": [{"name": "Паспорт", "stage": "при договоре"}],
+        "payment": {"installment_no_overpay": True},
+        "messengers": ["Max"],
+        "call_hours": "С 7:30 до 23:00",
+    }
+    card.update(extra)
+    return card
+
+
+def test_format_city_static_со_скидками():
+    """Скидки печатаются одной строкой через «; » в исходном порядке."""
+    discounts = [
+        "студентам и школьникам скидка до 1000 рублей",
+        "молодым мамам скидка до 1000 рублей",
+        "именинникам скидка 1000 рублей на любой пакет обучения",
+    ]
+    text = format_city_static(
+        city_slug="krasnoyarsk",
+        city_name="Красноярск",
+        city_meta=_krasnoyarsk_card(discounts=discounts),
+        price_line="от 39 900",
+    )
+    expected = "Скидки и акции: " + "; ".join(discounts) + "."
+    assert expected in text
+    pos = text.index("Скидки и акции:")
+    assert text.index(discounts[0], pos) < text.index(discounts[1], pos)
+    assert text.index(discounts[1], pos) < text.index(discounts[2], pos)
+
+
+def test_format_city_static_без_ключа_discounts():
+    """Без ключа discounts — явная строка об отсутствии скидок."""
+    text = format_city_static(
+        city_slug="krasnoyarsk",
+        city_name="Красноярск",
+        city_meta=_krasnoyarsk_card(),
+        price_line="от 39 900",
+    )
+    assert "Скидки и акции: сейчас нет, действующих скидок в городе не заявлено." in text
+
+
+def test_format_city_static_с_пустым_списком_discounts():
+    """Пустой список discounts — та же строка об отсутствии."""
+    text = format_city_static(
+        city_slug="krasnoyarsk",
+        city_name="Красноярск",
+        city_meta=_krasnoyarsk_card(discounts=[]),
+        price_line="от 39 900",
+    )
+    assert "Скидки и акции: сейчас нет, действующих скидок в городе не заявлено." in text
+
+
+def test_format_city_static_скидки_фильтруют_мусор():
+    """Из списка скидок в строку уходят только непустые строки."""
+    text = format_city_static(
+        city_slug="krasnoyarsk",
+        city_name="Красноярск",
+        city_meta=_krasnoyarsk_card(discounts=["текст", None, 123, "  "]),
+        price_line="от 39 900",
+    )
+    assert "Скидки и акции: текст." in text
+    assert "None" not in text
+    assert "123" not in text
+
+
+def test_format_city_static_скидка_одной_строкой():
+    """Одна строка discounts тоже печатается."""
+    text = format_city_static(
+        city_slug="krasnoyarsk",
+        city_name="Красноярск",
+        city_meta=_krasnoyarsk_card(discounts="студентам скидка 1000 рублей"),
+        price_line="от 39 900",
+    )
+    assert "Скидки и акции: студентам скидка 1000 рублей." in text
+
+
+def test_format_city_static_регресс_без_скидок_прежние_строки():
+    """Без скидок прежние строки статики на месте, плюс строка об отсутствии."""
+    text = format_city_static(
+        city_slug="krasnoyarsk",
+        city_name="Красноярск",
+        city_meta=_krasnoyarsk_card(),
+        price_line="от 39 900",
+    )
+    assert "Категории: B — 2 месяца, набор: каждые 15 дней." in text
+    assert (
+        "Автопарк: механика: Lada Granta; автомат: Kia Rio; возраст парка: не старше 2023 г."
+    ) in text
+    assert "Форматы теории: очно, дистанционно." in text
+    assert "Документы: Паспорт." in text
+    assert "Мессенджеры: Max." in text
+    assert "Оплата: рассрочка без переплаты." in text
+    assert "Часы колл-центра: С 7:30 до 23:00." in text
+    assert "Цена (готовая фраза, произносить только так): от 39 900" in text
+    assert "Скидки и акции: сейчас нет, действующих скидок в городе не заявлено." in text
+
+
+def test_discount_lines_чистая_функция():
+    """_discount_lines нормализует список, строку, None и мусор."""
+    assert _discount_lines(["а", "б"]) == ["а", "б"]
+    assert _discount_lines([]) == []
+    assert _discount_lines(None) == []
+    assert _discount_lines("одна фраза") == ["одна фраза"]
+    assert _discount_lines(["текст", None, 123, "  "]) == ["текст"]
 
 
 def test_мета_филиала_после_выбора():

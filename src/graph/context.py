@@ -208,6 +208,29 @@ def _document_names(raw: Any) -> list[str]:
     return [n for n in names if n]
 
 
+def _discount_lines(raw: Any) -> list[str]:
+    """Приводит раздел скидок карточки города к списку готовых фраз.
+
+    Справочник отдаёт скидки плоским списком строк. Пустые значения и
+    нестроковые элементы отбрасываются: в промпт должен уйти только текст,
+    пригодный для произнесения вслух.
+
+    Args:
+        raw: поле ``discounts`` из меты города; может отсутствовать.
+
+    Returns:
+        Список непустых фраз в исходном порядке; пустой список, если скидок нет.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else []
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        return [str(item).strip() for item in raw if isinstance(item, str) and item.strip()]
+    return []
+
+
 def _payment_phrases(payment: Mapping[str, Any]) -> list[str]:
     """Переводит условия оплаты в русские формулировки."""
     phrases: list[str] = []
@@ -283,6 +306,9 @@ def format_city_static(
 ) -> str:
     """Собирает статику города без списка филиалов и сырых полей цены.
 
+    В блок входят скидки и акции города. Если раздел пуст или отсутствует,
+    печатается явное «сейчас нет», чтобы бот не домысливал скидки.
+
     Args:
         city_slug: слаг города.
         city_name: читаемое название.
@@ -337,6 +363,11 @@ def format_city_static(
         phrases = _payment_phrases(payment)
         if phrases:
             lines.append("Оплата: " + "; ".join(phrases) + ".")
+    discounts = _discount_lines(city_meta.get("discounts"))
+    if discounts:
+        lines.append("Скидки и акции: " + "; ".join(discounts) + ".")
+    else:
+        lines.append("Скидки и акции: сейчас нет, действующих скидок в городе не заявлено.")
     if city_meta.get("call_hours"):
         lines.append(f"Часы колл-центра: {city_meta['call_hours']}.")
     contacts = city_meta.get("contacts") or city_meta.get("phones") or {}
