@@ -461,3 +461,35 @@ async def test_lookup_nearby_несёт_филиалы_целиком() -> None:
     assert result.branch_slugs == ["perm_a", "perm_b"]
     assert result.branch_cards == items
     assert [card.get("slug") for card in result.branch_cards] == result.branch_slugs
+
+
+def test_format_missing_просит_улицу_метро_и_район() -> None:
+    """Блок просит ориентир, который геокодер умеет искать."""
+    text = format_missing("Солнечный")
+    assert "улицу" in text
+    assert "станцию метро" in text
+    assert "район города" in text
+
+
+def test_format_missing_закрывает_повтор_объекта() -> None:
+    """Блок прямо запрещает второй раз просить ориентир-объект."""
+    text = format_missing("Солнечный")
+    assert "второй раз их не просить" in text
+    assert "торговые центры" in text
+
+
+def test_format_missing_без_известным_зданием() -> None:
+    """Блок больше не предлагает называть здание."""
+    assert "известным зданием" not in format_missing("Солнечный")
+
+
+def test_format_missing_запрет_адреса_и_технеудачи() -> None:
+    """Не называть адрес по месту и не сообщать о технической неудаче."""
+    text = format_missing("Солнечный")
+    assert "Адрес по этому месту не называть" in text
+    assert "о технической неудаче не сообщать" in text
+
+
+def test_format_missing_обрезает_пробелы_места() -> None:
+    """Место с пробелами по краям попадает в кавычки без лишних пробелов."""
+    assert "«Солнечный»" in format_missing("  Солнечный  ")
