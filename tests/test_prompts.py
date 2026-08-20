@@ -19,6 +19,7 @@ from graph.facts import (
 )
 from graph.prompts import (
     _HARD_FACT_BAN,
+    _INITIATIVE_BLOCK,
     _MISSING_KNOWLEDGE_GUARD,
     _NO_MECHANICS,
     _STEPS_CONVERSATION_FIRST,
@@ -52,11 +53,13 @@ from graph.prompts import (
 )
 
 #: Число правил речи, включая пункт 0 про примеры и пункт про опору на диалог.
-_SPEECH_RULES_COUNT = 28
+_SPEECH_RULES_COUNT = 30
 
-#: Начала десяти правил про ведение разговора — подряд после «одна тема».
+#: Начала правил про ведение разговора — подряд после «одна тема».
 _LEAD_SPEECH_RULE_STARTS: tuple[str, ...] = (
     "Разговор ведёт агент:",
+    "Как вести разговор — агент решает молча",
+    "Свою внутреннюю работу вслух не проговаривать",
     "Реплика не заканчивается в никуда",
     "Реплика, которая ждёт ответа прямо сейчас",
     "Что пообещал рассказать — обязан рассказать:",
@@ -2599,9 +2602,9 @@ def test_pull_task_без_обещания_и_запрета_новой_темы
 
 
 def test_правило_17_pull_отличается_от_repeat():
-    """Правило 17 в ``pull`` своё; редакция ``repeat`` не изменилась."""
+    """Правило про переход в ``pull`` своё; редакция ``repeat`` не изменилась."""
     move_index = SPEECH_RULES.index(RULE_MOVE_ON)
-    assert move_index == 17
+    assert move_index == 19
     assert LEAD_REPEAT_OVERRIDES[RULE_MOVE_ON] == _REPEAT_MOVE_ON
     repeat_lines = speech_rules_block(mode="repeat").splitlines()
     pull_lines = speech_rules_block(mode="pull").splitlines()
@@ -2888,7 +2891,7 @@ def test_полная_сборка_содержит_оба_изменённых_
     assert _rule_no_permission() in content
 
 
-#: Правила 14, 15 и 17 — дословно, без изменений.
+#: Правила 16, 17 и 19 — дословно, без изменений (раньше 14, 15, 17; сдвиг из‑за двух новых).
 _RULE_14_VERBATIM = RULE_NO_OPEN_QUESTIONS
 _RULE_15_VERBATIM = (
     "Разрешения продолжать не спрашивают: есть что рассказать — рассказывают. "
@@ -2909,10 +2912,10 @@ _INITIATIVE_CALL_EXAMPLES: tuple[str, ...] = (
 
 
 def test_правила_14_15_17_не_изменились():
-    """Правила 14, 15 и 17 в SPEECH_RULES остались дословно прежними."""
-    assert SPEECH_RULES[14] == _RULE_14_VERBATIM
-    assert SPEECH_RULES[15] == _RULE_15_VERBATIM
-    assert SPEECH_RULES[17] == _RULE_17_VERBATIM
+    """Правила про открытые вопросы, разрешения и переход остались дословно прежними."""
+    assert SPEECH_RULES[16] == _RULE_14_VERBATIM
+    assert SPEECH_RULES[17] == _RULE_15_VERBATIM
+    assert SPEECH_RULES[19] == _RULE_17_VERBATIM
 
 
 def test_инициатива_последний_раздел_полной_сборки(script):
@@ -3096,3 +3099,57 @@ def test_добивка_без_новых_строк_инициативы(script
     assert "держанием связи" not in pull
     assert "«всегда на связи»" not in pull
     assert "«напомню за день»" not in pull
+
+
+def test_speech_rules_запрет_темы_подачи():
+    """В правилах речи — запрет спрашивать про темп и объём подачи."""
+    block = speech_rules_block(mode="normal")
+    assert "сразу всю информацию или по шагам" in block
+    assert "меняет только то, КАК агент говорит" in block
+
+
+def test_speech_rules_запрет_внутренней_работы_вслух():
+    """В правилах речи — запрет проговаривать внутреннюю работу агента."""
+    block = speech_rules_block(mode="normal")
+    assert "скидку молодым мамам не смотрим" in block
+    assert "записала в форму" in block
+
+
+def test_speech_rules_новые_запреты_во_всех_режимах():
+    """Запреты про темп подачи и внутреннюю работу есть в normal, repeat и pull."""
+    for mode in ("normal", "repeat", "pull"):
+        block = speech_rules_block(mode=mode)
+        assert "сразу всю информацию или по шагам" in block
+        assert "меняет только то, КАК агент говорит" in block
+        assert "скидку молодым мамам не смотрим" in block
+        assert "записала в форму" in block
+
+
+def test_speech_rules_нумерация_сплошная_и_жёсткий_запрет_последний():
+    """Номера правил идут подряд с нуля; последний пункт — запрет фактов вне данных."""
+    lines = speech_rules_block().splitlines()
+    numbers: list[int] = []
+    for line in lines:
+        prefix, _, _ = line.partition(". ")
+        numbers.append(int(prefix))
+    assert numbers == list(range(len(SPEECH_RULES) + 1))
+    assert lines[-1] == f"{len(SPEECH_RULES)}. {_HARD_FACT_BAN}"
+
+
+def test_initiative_дополнен_проверкой_темпа_подачи():
+    """В разделе «ИНИЦИАТИВА» — дописанный признак вопроса о темпе подачи."""
+    assert "меняет ответ собеседника суть договорённости" in _INITIATIVE_BLOCK
+
+
+def test_speech_rules_выросли_на_два_старые_на_месте():
+    """Число правил выросло на 2; опорные старые формулировки не исчезли."""
+    assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
+    assert _SPEECH_RULES_COUNT == 30
+    joined = "\n".join(SPEECH_RULES)
+    assert "К клиенту обращение только на «Вы»" in joined
+    assert "Одна тема за реплику" in joined
+    assert any(rule.startswith("Разговор ведёт агент:") for rule in SPEECH_RULES)
+    assert any(rule.startswith("Как вести разговор — агент решает молча") for rule in SPEECH_RULES)
+    assert any(
+        rule.startswith("Свою внутреннюю работу вслух не проговаривать") for rule in SPEECH_RULES
+    )
