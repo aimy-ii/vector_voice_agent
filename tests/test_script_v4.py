@@ -380,18 +380,75 @@ def test_v4_закрытие_branch_требует_согласия(script_v4):
     assert "Названный, но не подтверждённый филиал шаг не закрывает" in req
 
 
-def test_v4_закрытие_discount_check_фиксирует_ответ_по_категории(script_v4):
-    """Закрытие discount_check: открытый вопрос без перечня, ответ закрывает шаг.
+def test_v4_location_hint_просит_то_что_находится_по_координатам(script_v4):
+    """Шаг location_hint просит район/улицу/метро, не абстрактный ориентир."""
+    req = script_v4.step("location_hint").requirements
+    assert "район города, улица или станция метро" in req
+    assert "или ориентир" not in req
 
-    Категории из данных вслух не зачитываются и неподходящие не отбрасываются
-    репликой. Шаг закрывает любой ответ человека — и «да», и «нет». Заодно
-    сторожим запрет считать цену со скидкой: сумму со скидкой называет менеджер
-    при оформлении, бот пересчётом не занимается.
+
+def test_v4_location_hint_запрещает_просить_объект(script_v4):
+    """Шаг location_hint не просит здание или торговый центр вместо адреса."""
+    req = script_v4.step("location_hint").requirements
+    assert "просить назвать здание, торговый центр" in req
+
+
+def test_v4_branch_ветка_когда_филиалов_не_передали(script_v4):
+    """Шаг branch просит другой ориентир, если филиалов не передали."""
+    req = script_v4.step("branch").requirements
+    assert "Филиалов не передали" in req
+    assert "попросить другой ориентир" in req
+
+
+def test_v4_branch_возвращается_к_филиалу_после_ориентира(script_v4):
+    """После нового ориентира branch снова называет ближайший филиал."""
+    req = script_v4.step("branch").requirements
+    assert "вернуться к филиалу и назвать ближайший" in req
+
+
+def test_v4_branch_запрещает_выдумывать_филиал_и_зацикливаться(script_v4):
+    """Шаг branch не выдумывает филиал и не крутит «подбор идёт» без нового ориентира."""
+    req = script_v4.step("branch").requirements
+    assert "выдумывать филиал по названному месту" in req
+    assert "больше одного раза подряд" in req
+
+
+def test_v4_branch_не_запрещает_обещание_в_мессенджер(script_v4):
+    """Обещание прислать детали в мессенджер в branch не запрещено."""
+    req = script_v4.step("branch").requirements
+    assert "мессенджер" not in req
+    assert "Telegram" not in req
+
+
+def test_v4_location_hint_и_branch_сохраняют_прежние_условия(script_v4):
+    """Регресс: ключевые условия location_hint и branch на месте."""
+    branch = script_v4.step("branch").requirements
+    location = script_v4.step("location_hint").requirements
+    assert "Шаг закрыт, когда человек согласился на конкретный офис" in branch
+    assert "перечислять все филиалы города" in branch
+    assert "Сказать, что подберёшь ближайший филиал" in location
+
+
+def test_v4_location_hint_и_branch_число_строк_requirements(script_v4):
+    """У location_hint три строки требований, у branch — пять."""
+    assert len(script_v4.step("location_hint").requirements.split("\n")) == 3
+    assert len(script_v4.step("branch").requirements.split("\n")) == 5
+
+
+def test_v4_закрытие_discount_check_фиксирует_ответ_по_категории(script_v4):
+    """Закрытие discount_check: категории как подсказка, ответ закрывает шаг.
+
+    Шаг называет две-три категории как подсказку, подбирает их под собеседника
+    и не разбирает отсев вслух. Шаг закрывает любой ответ человека — и «да»,
+    и «нет». Заодно сторожим запрет считать цену со скидкой: сумму со скидкой
+    называет менеджер при оформлении, бот пересчётом не занимается.
     """
     req = script_v4.step("discount_check").requirements
     assert "ответил, попадает он под категорию" in req
-    assert "не зачитывая весь перечень категорий" in req
-    assert "вслух отбрасывать неподходящие" in req
+    assert "Назвать две-три льготные категории" in req
+    assert "мужчине скидку молодым мамам не называть" in req
+    assert "не назвав ни одной категории" in req
+    assert "вслух отбрасывать неподходящие категории" in req
     assert "вычитать скидку из стоимости" in req
 
 
