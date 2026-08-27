@@ -315,6 +315,44 @@ def test_no_client_reply_pull_истинно():
     assert nodes_module._no_client_reply("pull") is True
 
 
+def test_на_ходе_с_репликой_клиента_повтор_не_включается(script, monkeypatch):
+    """Клиент говорит — режим повтора не берётся, каким бы ни был счётчик.
+
+    Правила режима требуют не уходить с темы и обязательно вернуть ход
+    собеседнику. Когда клиент отвечает не по теме шага, а задаёт свой
+    вопрос, это же требование заставляет бота переспрашивать: на живом
+    звонке вышло пять переформулировок вопроса про формат теории подряд.
+    """
+    from graph.prompts import LEAD_REPEAT_INTRO
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
+    step = script.step("city")
+    captured: dict[str, Any] = {}
+    original = nodes_module.build_turn_messages
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["mode"] = kwargs.get("mode")
+        return original(**kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _capture)
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 99},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="client",
+    )
+    assert captured["mode"] == "normal"
+    assert LEAD_REPEAT_INTRO not in messages[0].content
+
+
 def test_повтор_имеет_приоритет_над_pull(script, monkeypatch):
     """При счётчике выше порога на ``pull`` собирается режим повтора."""
     from graph.prompts import LEAD_REPEAT_INTRO, PULL_TASK
