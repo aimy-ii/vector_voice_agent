@@ -71,6 +71,7 @@ from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from graph.transcript import (
     ROLE_AGENT,
+    ROLE_CLIENT,
     TranscriptEntry,
     append_agent,
     append_client,
@@ -493,6 +494,65 @@ def call_summary(state: CallState) -> dict[str, Any]:
     )
 
 
+def client_text_for_turn(
+    *,
+    snapshot: Sequence[Any],
+    context: ConversationContext,
+    entries: Sequence[TranscriptEntry],
+) -> str:
+    """Что человек сказал этим ходом — со страховкой на пустой снимок.
+
+    Обычно фраза берётся из снимка бота. Но снимок иногда приходит без
+    неё: бот заводит ход по концу реплики, а сообщение в его историю
+    дописывается своим чередом, и на быстром ходе гонка проигрывается.
+    Мозг в этом случае записывал в историю пустоту — молча, без единой
+    ошибки в логах, — и фраза пропадала из разговора навсегда.
+
+    Живой пример с разбора: «Дороговато. В соседней автошколе дешевле.
+    Если бы была какая-то скидка, ещё бы можно было подумать.»
+    Распознавание её услышало, лайв-канал получил, бот ответил — а в
+    истории мозга её нет, и дальше он вёл разговор с дырой на месте
+    возражения.
+
+    Страховка берёт ту же фразу из контекста: лайв-канал кладёт её в
+    ``dynamic_reply`` раньше, чем приходит основной ход, и это тот же
+    самый текст того же самого звонка. Повтор исключён сравнением с
+    последней репликой человека в истории.
+
+    Args:
+        snapshot: снимок истории от бота.
+        context: контекст разговора из кеша.
+        entries: история звонка на этот момент.
+
+    Returns:
+        Фраза человека; пустая строка, если её нет нигде.
+    """
+    text = last_user_text(snapshot)
+    if text.strip():
+        return text
+
+    rescued = str(context.dynamic_reply or "").strip()
+    if not rescued:
+        log.warning("[transcript] снимок без реплики человека, взять её неоткуда")
+        return ""
+
+    # Сравниваем со всеми репликами человека, а не только с последней.
+    # ``dynamic_reply`` живёт в кеше и после своего хода: сверив лишь
+    # последнюю запись, можно вклинить позавчерашнюю фразу после более
+    # новой — и разговор поедет назад. Потерять законный повтор («да»,
+    # «ага») здесь дешевле, чем переписать историю задним числом.
+    said = {entry.text.strip() for entry in entries if entry.role == ROLE_CLIENT}
+    if rescued in said:
+        log.info("[transcript] снимок без реплики человека, в истории она уже есть")
+        return ""
+
+    log.warning(
+        "[transcript] снимок без реплики человека, восстановлена из лайв-канала: %r",
+        rescued[:80],
+    )
+    return rescued
+
+
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое.
 
@@ -534,7 +594,11 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             log.info("[transcript] последняя реплика бота приведена к услышанному обрыву")
         entries = synced
     if not _no_client_reply(_turn_kind()):
-        entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
+        entries = append_client(
+            entries,
+            turn=turn_now,
+            text=client_text_for_turn(snapshot=snapshot, context=ctx_in, entries=entries),
+        )
     if entries != ctx_in.transcript:
         await _save_context(
             ctx_in.model_copy(update={"transcript": entries}),
