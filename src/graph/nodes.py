@@ -808,17 +808,21 @@ def _turn_mode(*, state: CallState, turn_kind: str) -> TurnMode:
     берётся только на ходах без реплики клиента: молчание, добивка,
     продолжение.
 
+    На ходе с репликой клиента повторный заход даёт ``revisit``: там
+    подменяется только запрет повтора — «свой вопрос по этой теме ты уже
+    задавал, задать его снова другими словами — ошибка». Остальные правила
+    штатные, и требования держаться темы в них нет.
+
     Returns:
         ``repeat`` — ведущий шаг повторяется не меньше порога и реплики
-        клиента на этом ходе не было; ``pull`` — ход вытаскивания;
-        ``normal`` — штатный ход.
+        клиента на этом ходе не было; ``revisit`` — то же, но клиент
+        говорил; ``pull`` — ход вытаскивания; ``normal`` — штатный ход.
     """
     if (
         settings.lead_repeat_threshold > 0
-        and _no_client_reply(turn_kind)
         and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
     ):
-        return "repeat"
+        return "repeat" if _no_client_reply(turn_kind) else "revisit"
     if turn_kind == "pull":
         return "pull"
     return "normal"

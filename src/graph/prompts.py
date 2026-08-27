@@ -640,10 +640,26 @@ def persona_block() -> str:
     )
 
 
+#: Подмена одного правила для повторного захода на тему, когда собеседник
+#: говорит. Полный режим ``repeat`` здесь не годится: он требует не уходить
+#: с темы и обязательно вернуть ход, а человек в этот момент занят своим
+#: вопросом — и бот переспрашивает одно и то же. Меняется только запрет
+#: повтора; остальные правила штатные, врезки в раздел темы нет.
+LEAD_REVISIT_OVERRIDES: dict[str, str] = {
+    RULE_NO_VERBATIM: (
+        "Свой вопрос по этой теме ты уже задавал, и ответа на него не было — "
+        "человек говорит о своём. Задать его снова, в том числе другими "
+        "словами, — ошибка: со стороны это переспрашивание одного и того же. "
+        "Ответь на то, о чём человек спросил, и веди разговор дальше от его "
+        "слов. К своей теме вернёшься, когда она придётся к месту."
+    ),
+}
+
 #: Режимы сборки хода. ``normal`` — штатный промпт; ``repeat`` — повторный заход
 #: по одной теме; ``pull`` — вытаскивание, когда человек молчит после двух реплик
-#: бота подряд и задача хода — вывести его на слово.
-TurnMode = Literal["normal", "repeat", "pull"]
+#: бота подряд и задача хода — вывести его на слово; ``revisit`` — повторный
+#: заход на тему, когда собеседник говорит: меняется только запрет повтора.
+TurnMode = Literal["normal", "repeat", "pull", "revisit"]
 
 
 def speech_rules_block(*, mode: TurnMode = "normal") -> str:
@@ -655,8 +671,9 @@ def speech_rules_block(*, mode: TurnMode = "normal") -> str:
     Args:
         mode: режим сборки хода. При ``repeat`` часть правил берётся из
             ``LEAD_REPEAT_OVERRIDES``. При ``pull`` — из
-            ``LEAD_PULL_OVERRIDES``. При ``normal`` список штатный,
-            символ в символ, плюс последний пункт-запрет.
+            ``LEAD_PULL_OVERRIDES``. При ``revisit`` подменяется одно
+            правило из ``LEAD_REVISIT_OVERRIDES``. При ``normal`` список
+            штатный, символ в символ, плюс последний пункт-запрет.
 
     Returns:
         Правила речи одной строкой, по одному правилу на строку.
@@ -666,6 +683,8 @@ def speech_rules_block(*, mode: TurnMode = "normal") -> str:
         rules = tuple(LEAD_REPEAT_OVERRIDES.get(rule, rule) for rule in rules)
     elif mode == "pull":
         rules = tuple(LEAD_PULL_OVERRIDES.get(rule, rule) for rule in rules)
+    elif mode == "revisit":
+        rules = tuple(LEAD_REVISIT_OVERRIDES.get(rule, rule) for rule in rules)
     numbered = [f"{index}. {rule}" for index, rule in enumerate(rules)]
     numbered.append(f"{len(rules)}. {_HARD_FACT_BAN}")
     return "\n".join(numbered)

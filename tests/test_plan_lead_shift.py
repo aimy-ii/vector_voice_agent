@@ -316,14 +316,15 @@ def test_no_client_reply_pull_истинно():
 
 
 def test_на_ходе_с_репликой_клиента_повтор_не_включается(script, monkeypatch):
-    """Клиент говорит — режим повтора не берётся, каким бы ни был счётчик.
+    """Клиент говорит — вместо режима повтора берётся ``revisit``.
 
-    Правила режима требуют не уходить с темы и обязательно вернуть ход
-    собеседнику. Когда клиент отвечает не по теме шага, а задаёт свой
+    Правила режима повтора требуют не уходить с темы и обязательно вернуть
+    ход собеседнику. Когда клиент отвечает не по теме шага, а задаёт свой
     вопрос, это же требование заставляет бота переспрашивать: на живом
     звонке вышло пять переформулировок вопроса про формат теории подряд.
+    В ``revisit`` остаётся только запрет задавать свой вопрос заново.
     """
-    from graph.prompts import LEAD_REPEAT_INTRO
+    from graph.prompts import LEAD_REPEAT_INTRO, LEAD_REPEAT_OVERRIDES, RULE_MOVE_ON
 
     monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
     step = script.step("city")
@@ -349,8 +350,12 @@ def test_на_ходе_с_репликой_клиента_повтор_не_вк
         pending_fields=[],
         turn_kind="client",
     )
-    assert captured["mode"] == "normal"
+    assert captured["mode"] == "revisit"
     assert LEAD_REPEAT_INTRO not in messages[0].content
+    assert LEAD_REPEAT_OVERRIDES[RULE_MOVE_ON] not in messages[0].content, (
+        "требование не уходить с темы на ходе с репликой не подаётся"
+    )
+    assert "Задать его снова" in messages[0].content
 
 
 def test_повтор_имеет_приоритет_над_pull(script, monkeypatch):
