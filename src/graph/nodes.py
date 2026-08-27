@@ -708,8 +708,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     # сам, темы разговора смена не касается.
     prev_step_id = state.get("current_step")
     shifted_from: str | None = None
-    lead_repeat = int(state.get("lead_repeat") or 0)
-    lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
     if (
         turn_kind != "silence"
         and step is not None
@@ -719,6 +717,20 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     ):
         shifted_from = step.id
         step = head[1]
+
+    # Счётчик заходов ведётся по шагу, а не по серии подряд идущих ходов.
+    # Сдвиг уводит ведущего ровно на один ход, а следующим ходом шаг снова
+    # первый в шапке — и так по кругу: theory_format -> included ->
+    # theory_format -> practice -> theory_format. Серия при таком качании
+    # всегда равна единице, порог не берётся никогда, и режим «эту тему уже
+    # поднимали» не включается: на разборе живого звонка бот четырежды
+    # переспросил про формат теории разными словами. По счёту заходов
+    # второй приход на шаг виден независимо от того, что было между.
+    lead_counts = dict(state.get("lead_counts") or {})
+    if step is not None:
+        lead_counts[step.id] = int(lead_counts.get(step.id, 0)) + 1
+        lead_repeat = lead_counts[step.id]
+    else:
         lead_repeat = 1
 
     # Новый шаг хода — только ведущий шапки, если взят впервые.
@@ -773,6 +785,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "profile": profile,
         "current_step": step.id if step is not None else None,
         "lead_repeat": lead_repeat,
+        "lead_counts": lead_counts,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
         "head_new_step": new_step_id if not no_client_reply else None,

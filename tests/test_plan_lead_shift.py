@@ -139,7 +139,12 @@ async def test_молчание_копит_счётчик_повторов(store
     monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
     await _seed_pending_head(store)
     out = await nodes_module.plan_node(
-        _base_state(current_step="name", lead_repeat=1, turn_kind="silence"),
+        _base_state(
+            current_step="name",
+            lead_repeat=1,
+            lead_counts={"name": 1},
+            turn_kind="silence",
+        ),
         None,  # type: ignore[arg-type]
     )
     assert out["current_step"] == "name"
@@ -156,6 +161,44 @@ async def test_молчание_с_другим_ведущим_сбрасыва�
     )
     assert out["current_step"] == "name"
     assert out["lead_repeat"] == 1
+
+
+async def test_возврат_на_шаг_после_сдвига_копит_счётчик(store, use_v2, monkeypatch):
+    """Качание ведущего между шагами счётчик заходов не обнуляет.
+
+    Сдвиг уводит ведущего ровно на один ход, а следующим ходом шаг снова
+    первый в шапке: name -> city -> name. Пока счёт вёлся по серии подряд,
+    у каждого из них выходила единица, порог повтора не брался никогда, и
+    на живом звонке бот четырежды переспросил про формат теории разными
+    словами. Второй заход на шаг должен быть виден.
+    """
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+
+    first = await nodes_module.plan_node(_base_state(), None)  # type: ignore[arg-type]
+    assert first["current_step"] == "name"
+    assert first["lead_repeat"] == 1
+
+    second = await nodes_module.plan_node(
+        _base_state(
+            current_step=first["current_step"],
+            lead_repeat=first["lead_repeat"],
+            lead_counts=first["lead_counts"],
+        ),
+        None,  # type: ignore[arg-type]
+    )
+    assert second["current_step"] == "city", "ход между заходами уводит ведущего"
+
+    third = await nodes_module.plan_node(
+        _base_state(
+            current_step=second["current_step"],
+            lead_repeat=second["lead_repeat"],
+            lead_counts=second["lead_counts"],
+        ),
+        None,  # type: ignore[arg-type]
+    )
+    assert third["current_step"] == "name"
+    assert third["lead_repeat"] == 2
 
 
 @pytest.mark.parametrize("turn_kind", ["continuation", "silence", "pull"])
@@ -207,7 +250,11 @@ async def test_повтор_ведущего_шага_даёт_lead_repeat_дв�
     assert first["lead_repeat"] == 1
 
     second = await nodes_module.plan_node(
-        _base_state(current_step="name", lead_repeat=1),
+        _base_state(
+            current_step="name",
+            lead_repeat=first["lead_repeat"],
+            lead_counts=first["lead_counts"],
+        ),
         None,  # type: ignore[arg-type]
     )
     assert second["current_step"] == "name"
@@ -336,7 +383,12 @@ async def test_двигать_некуда_включается_повтор(sto
     assert first["lead_repeat"] == 1
 
     second = await nodes_module.plan_node(
-        _base_state(current_step="name", lead_repeat=1, turn_kind="pull"),
+        _base_state(
+            current_step="name",
+            lead_repeat=first["lead_repeat"],
+            lead_counts=first["lead_counts"],
+            turn_kind="pull",
+        ),
         None,  # type: ignore[arg-type]
     )
     assert second["current_step"] == "name"
