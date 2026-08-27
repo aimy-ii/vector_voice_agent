@@ -114,7 +114,9 @@ def test_waiting_history_дефолт():
     """Лимит хвоста для реплики ожидания и живой реакции."""
     assert Settings.model_fields["waiting_history_limit"].default == 4
     assert Settings.model_fields["filler_history_limit"].default == 2
-    assert Settings.model_fields["ladder_deadline_seconds"].default == 5.0
+    # Потолок лестницы ушёл вместе с самой лестницей: за ход одна ступень,
+    # и ждать внутри хода больше нечего.
+    assert "ladder_deadline_seconds" not in Settings.model_fields
     assert "silence_history_limit" not in Settings.model_fields
     assert "searching_stale_turns" not in Settings.model_fields
     assert "status_wait_timeout" not in Settings.model_fields

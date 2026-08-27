@@ -1695,7 +1695,11 @@ def test_filler_ограничение_длины_и_запреты_оценки
     assert "звучит основательно" in lowered
     assert "не рассуждать" in lowered
     assert "чувствах" in lowered
-    assert "не задавать вопросов" in lowered
+    assert "вопросов не задавать" in lowered
+    # Запрет именно на знак: длину паузы после реплики бот выбирает по
+    # наличию «?», и заглушка с вопросом уводит его на проверку связи
+    # вместо продолжения мысли.
+    assert "вопросительного знака" in lowered
     assert "не сообщать фактов" in lowered
     assert "не повторять" in lowered
     assert _HARD_FACT_BAN in content

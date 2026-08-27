@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage
 
 from graph import nodes as nodes_module
 from graph.context import (
+    DYN_NONE,
     DYN_READY,
     DYN_SEARCHING,
     DYN_WORKING,
@@ -38,7 +39,6 @@ def spoken(monkeypatch) -> Any:
 @pytest.fixture()
 def use_v2(monkeypatch) -> None:
     monkeypatch.setattr(nodes_module.settings, "script_version", "2")
-    monkeypatch.setattr(nodes_module.settings, "ladder_deadline_seconds", 5.0)
 
 
 @pytest.fixture()
@@ -157,222 +157,141 @@ async def test_лестница_не_запускается_если_данны�
     assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
 
 
-async def test_лестница_в_работе_затем_готово(spoken, store, ctx_store, model, use_v2):
-    """«в работе» → «готово»: ровно две генерации — заглушка и штатная."""
+
+
+async def test_статус_в_работе_даёт_одну_заглушку(spoken, store, ctx_store, model, use_v2):
+    """«В работе» — ровно одна генерация-заглушка, и ход на этом кончен."""
     reply = "какие филиалы у Просвещения?"
     ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
     await ctx_store.save("local", ctx)
-
-    async def _on_call(n: int, _messages: Any) -> None:
-        if n == 1:
-            updated = ctx.model_copy(
-                update={
-                    "dynamic_status": DYN_READY,
-                    "dynamic_text": "Филиалы: ул. Ленина, 1.",
-                }
-            )
-            await ctx_store.save("local", updated)
-
-    model["on_call"] = _on_call
-    model["result"] = [
-        {"reply": "Секунду…"},
-        {"reply": "Ближайший на Ленина."},
-    ]
-    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    assert model["calls"] == 2
-    assert spoken.kinds == ["filler", "full"]
-    assert out.get("expect_continuation") is False
-
-
-async def test_лестница_в_работе_поиск_готово(spoken, store, ctx_store, model, use_v2):
-    """«в работе» → «в поиске» → «готово»: три сборки по порядку."""
-    reply = "какие филиалы у Просвещения?"
-    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
-    await ctx_store.save("local", ctx)
-
-    async def _on_call(n: int, _messages: Any) -> None:
-        if n == 1:
-            await ctx_store.save(
-                "local",
-                ctx.model_copy(
-                    update={
-                        "dynamic_status": DYN_SEARCHING,
-                        "situation_slug": "филиалы",
-                    }
-                ),
-            )
-        elif n == 2:
-            await ctx_store.save(
-                "local",
-                ctx.model_copy(
-                    update={
-                        "dynamic_status": DYN_READY,
-                        "dynamic_text": "Филиалы: ул. Ленина, 1.",
-                        "situation_slug": None,
-                    }
-                ),
-            )
-
-    model["on_call"] = _on_call
-    model["result"] = [
-        {"reply": "Секунду…"},
-        {"reply": "Сейчас подберу филиалы."},
-        {"reply": "Ближайший на Ленина."},
-    ]
-    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    assert model["calls"] == 3
-    assert spoken.kinds == ["filler", "waiting", "full"]
-    assert out.get("expect_continuation") is False
-
-
-async def test_лестница_статус_не_меняется_штатная(spoken, store, ctx_store, model, use_v2):
-    """Статус не меняется — та же сборка не повторяется, сразу штатная."""
-    reply = "какие филиалы у Просвещения?"
-    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
-    await ctx_store.save("local", ctx)
-    model["result"] = [
-        {"reply": "Секунду…"},
-        {"reply": "Пока точных данных нет, давайте так."},
-    ]
-    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    assert model["calls"] == 2
-    assert spoken.kinds == ["filler", "full"]
-    assert out.get("expect_continuation") is False
-
-
-async def test_лестница_поиск_не_повторяет_waiting(spoken, store, ctx_store, model, use_v2):
-    """«в поиске» без смены — waiting один раз, затем штатная."""
-    reply = "какие филиалы у Просвещения?"
-    ctx = _missing_branches_ctx(reply=reply, status=DYN_SEARCHING)
-    await ctx_store.save("local", ctx)
-    model["result"] = [
-        {"reply": "Сейчас подберу филиалы."},
-        {"reply": "Пока точных адресов нет."},
-    ]
-    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    assert model["calls"] == 2
-    assert spoken.kinds == ["waiting", "full"]
-    assert out.get("expect_continuation") is False
-
-
-async def test_лестница_вторая_ступень_слышит_первую(spoken, store, ctx_store, model, use_v2):
-    """Промпт второй ступени содержит текст, произнесённый первой."""
-    reply = "какие филиалы у Просвещения?"
-    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
-    await ctx_store.save("local", ctx)
-    first_reply = "Секунду, гляну."
-
-    async def _on_call(n: int, _messages: Any) -> None:
-        if n == 1:
-            await ctx_store.save(
-                "local",
-                ctx.model_copy(update={"dynamic_status": DYN_READY}),
-            )
-
-    model["on_call"] = _on_call
-    model["result"] = [
-        {"reply": first_reply},
-        {"reply": "Ближайший на Ленина."},
-    ]
-    await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    assert model["calls"] == 2
-    second_history = [m.content for m in model["all_messages"][1][1:]]
-    assert first_reply in second_history
-
-
-async def test_лестница_произнесённое_не_слипается(spoken, store, ctx_store, model, use_v2):
-    """Между текстами ступеней в накопителе есть разделитель."""
-    reply = "какие филиалы у Просвещения?"
-    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
-    await ctx_store.save("local", ctx)
-    first = "Секунду, уточню."
-    second = "Сейчас подберу филиалы."
-    third = "Ближайший на Ленина."
-
-    async def _on_call(n: int, _messages: Any) -> None:
-        if n == 1:
-            await ctx_store.save(
-                "local",
-                ctx.model_copy(
-                    update={
-                        "dynamic_status": DYN_SEARCHING,
-                        "situation_slug": "филиалы",
-                    }
-                ),
-            )
-        elif n == 2:
-            await ctx_store.save(
-                "local",
-                ctx.model_copy(
-                    update={
-                        "dynamic_status": DYN_READY,
-                        "dynamic_text": "Филиалы: ул. Ленина, 1.",
-                        "situation_slug": None,
-                    }
-                ),
-            )
-
-    model["on_call"] = _on_call
-    model["result"] = [
-        {"reply": first},
-        {"reply": second},
-        {"reply": third},
-    ]
-    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
-    joined = "".join(out.get("spoken") or [])
-    assert spoken.kinds == ["filler", "waiting", "full"]
-    assert f"{first}{second}" not in joined
-    assert f"{second}{third}" not in joined
-    assert f"{first} {second}" in joined
-    assert f"{second} {third}" in joined
-
-
-async def test_лестница_смена_хеша_обрывает(spoken, store, ctx_store, model, use_v2):
-    """Смена хеша реплики между ступенями обрывает лестницу."""
-    reply = "какие филиалы у Просвещения?"
-    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
-    await ctx_store.save("local", ctx)
-
-    async def _on_call(n: int, _messages: Any) -> None:
-        if n == 1:
-            await ctx_store.save(
-                "local",
-                ctx.model_copy(
-                    update={
-                        "dynamic_reply_hash": reply_hash("совсем другая реплика"),
-                        "dynamic_status": DYN_WORKING,
-                    }
-                ),
-            )
-
-    model["on_call"] = _on_call
-    model["result"] = {"reply": "Секунду…"}
+    model["result"] = {"reply": "Секунду, гляну."}
     out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
     assert model["calls"] == 1
     assert spoken.kinds == ["filler"]
     assert out.get("expect_continuation") is False
 
 
-async def test_лестница_истёкший_дедлайн_штатная(
-    spoken, store, ctx_store, model, use_v2, monkeypatch
+async def test_статус_поиска_даёт_одну_заглушку(spoken, store, ctx_store, model, use_v2):
+    """«В поиске» — одна генерация ожидания, дальше ход не идёт."""
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_SEARCHING)
+    await ctx_store.save("local", ctx)
+    model["result"] = {"reply": "Сейчас подберу филиалы."}
+    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
+    assert model["calls"] == 1
+    assert spoken.kinds == ["waiting"]
+    assert out.get("expect_continuation") is False
+
+
+async def test_данные_подъехали_во_время_генерации_второй_ступени_нет(
+    spoken, store, ctx_store, model, use_v2
 ):
-    """Истёкший дедлайн даёт штатную генерацию сразу."""
-    monkeypatch.setattr(nodes_module.settings, "ladder_deadline_seconds", 0.0)
+    """Даже если фон успел с данными, второй генерации в этом ходе не будет.
+
+    Продолжение — работа бота: он выдержит паузу после реплики без вопроса
+    и заведёт следующий ход сам. Мозг за один ход говорит один раз.
+    """
     reply = "какие филиалы у Просвещения?"
     ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
+    await ctx_store.save("local", ctx)
+
+    async def _on_call(n: int, _messages: Any) -> None:
+        if n == 1:
+            await ctx_store.save(
+                "local",
+                ctx.model_copy(
+                    update={
+                        "dynamic_status": DYN_READY,
+                        "dynamic_text": "Филиалы: ул. Ленина, 1.",
+                    }
+                ),
+            )
+
+    model["on_call"] = _on_call
+    model["result"] = [{"reply": "Секунду…"}, {"reply": "Ближайший на Ленина."}]
+    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
+    assert model["calls"] == 1
+    assert spoken.kinds == ["filler"]
+    assert "Ближайший на Ленина." not in "".join(out.get("spoken") or [])
+
+
+async def test_за_ход_склеивать_нечего(spoken, store, ctx_store, model, use_v2):
+    """В эфир уходит ровно один текст: разделителей и склеек не бывает.
+
+    Это и есть починка боевой жалобы «Сейчас уточню… Одну минуту. Поняла.
+    По коробке уже определились?» — трёх ступеней одним вдохом.
+    """
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
+    await ctx_store.save("local", ctx)
+    model["result"] = {"reply": "Секунду, уточню."}
+    out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
+    assert "".join(out.get("spoken") or []) == "Секунду, уточню."
+    assert spoken.chunks == ["Секунду, уточню."]
+
+
+async def test_без_статуса_фона_штатная_генерация(spoken, store, ctx_store, model, use_v2):
+    """Фон ещё не взял реплику — говорим штатно, заглушка не нужна."""
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_NONE)
     await ctx_store.save("local", ctx)
     model["result"] = {"reply": "Пока без точных адресов."}
     out = await nodes_module.respond_node(_branch_state(reply, ctx), None)  # type: ignore[arg-type]
     assert model["calls"] == 1
     assert spoken.kinds == ["full"]
-    assert out.get("expect_continuation") is False
     assert "# СЕЙЧАС ГОВОРИМ ОБ ЭТОМ" in model["messages"][0].content
+    assert out.get("expect_continuation") is False
 
 
 def test_условие_входа_в_лестницу_только_нехватка_данных():
-    """Лестница включается только по нехватке данных ведущего шага."""
+    """Заглушка включается только по нехватке данных ведущего шага."""
     import inspect
 
     source = inspect.getsource(nodes_module.respond_node)
-    assert "use_ladder = bool(lead_missing) and not is_continuation and not is_silence" in source
+    assert "use_ladder = bool(lead_missing) and not _no_client_reply(turn_kind)" in source
     assert "lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []" in source
+
+
+def test_за_ход_ровно_одна_генерация_в_коде():
+    """В генераторе не осталось цикла ступеней: одна ступень — один ход.
+
+    Проверка по исходнику намеренно: цикл было легко вернуть правкой
+    «на всякий случай», а в трубке это снова даст склейку.
+    """
+    import inspect
+
+    source = inspect.getsource(nodes_module.respond_node)
+    assert "while True:" not in source
+    assert 'spoken.append(" ")' not in source
+
+
+async def test_вытаскивание_не_повторяет_заглушку(spoken, store, ctx_store, model, use_v2):
+    """Ход, который бот завёл сам, говорит по делу, а не заглушкой снова.
+
+    Боевой прогон: «Поняла, Приморский район рядом с домом» → пауза →
+    та же фраза слово в слово. Заглушку слышат один раз; продолжение —
+    содержательная реплика с тем, что есть.
+    """
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_WORKING)
+    await ctx_store.save("local", ctx)
+    state = {**_branch_state(reply, ctx), "turn_kind": "pull"}
+    model["result"] = {"reply": "Пока адресов нет, но филиалы есть в каждом районе."}
+    out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert model["calls"] == 1
+    assert spoken.kinds == ["full"]
+    assert out.get("expect_continuation") is False
+
+
+@pytest.mark.parametrize("kind", ["continuation", "silence", "pull"])
+async def test_ход_без_реплики_человека_не_даёт_заглушку(
+    spoken, store, ctx_store, model, use_v2, kind: str
+):
+    """Ни один ход без реплики человека не уходит в заглушку."""
+    reply = "какие филиалы у Просвещения?"
+    ctx = _missing_branches_ctx(reply=reply, status=DYN_SEARCHING)
+    await ctx_store.save("local", ctx)
+    state = {**_branch_state(reply, ctx), "turn_kind": kind}
+    model["result"] = {"reply": "Скажу по тому, что есть."}
+    await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
+    assert spoken.kinds == ["full"]

@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -872,7 +871,12 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     digest = reply_hash(user_text) if user_text else ""
     lead = _lead_of(head, _current_step(state))
     lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
-    use_ladder = bool(lead_missing) and not is_continuation and not is_silence
+    # Заглушка — ответ на реплику человека, и только на неё. Ход, который
+    # бот завёл сам (продолжение, молчание, вытаскивание), обязан говорить
+    # по делу с тем, что есть: иначе выходит «Поняла, Приморский район
+    # рядом с домом» → пауза → та же фраза снова, и так до конца звонка.
+    # Заглушку слышат один раз, продолжение — уже содержательное.
+    use_ladder = bool(lead_missing) and not _no_client_reply(turn_kind)
 
     if is_silence:
         # Молчание собирается полным промптом, как обычный ход: короткая
@@ -1000,56 +1004,42 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             out["last_error"] = last_error
         return out
 
-    # Лестница: filler / waiting / full, не больше двух заглушек за ход.
-    # Одна и та же сборка дважды подряд не выполняется: статус без смены → full.
-    deadline = time.monotonic() + float(settings.ladder_deadline_seconds)
-    stubs_spoken = 0
-    step_index = 0
-    prev_kind: str | None = None
-    while True:
-        last_ctx = await _load_context(state)
-        if step_index > 0 and digest and last_ctx.dynamic_reply_hash != digest:
-            stage("respond", "хеш реплики сменился, лестница прервана", "done")
-            break
+    # Одна ступень за ход, и ход на этом кончается.
+    #
+    # Раньше ступени шли подряд внутри одного хода и склеивались пробелом:
+    # в трубке звучало «Сейчас уточню, как проходят занятия. Одну минуту.
+    # Поняла. По коробке уже определились?» — три отдельные мысли одним
+    # вдохом. Продолжение берёт на себя бот: после реплики без вопроса он
+    # выдерживает короткую паузу (VOICE_BOT_SILENCE_PAUSE_STATEMENT) и сам
+    # заводит ход вытаскивания, к которому фон уже успевает с данными.
+    #
+    # Поэтому заглушка обязана быть без вопросительного знака: реплику с
+    # вопросом бот считает заданным вопросом, ждёт ответа четыре секунды и
+    # уходит на «Алло, меня слышно?» вместо продолжения. Запрет живёт в
+    # сборке промпта (``build_filler_messages`` / ``build_waiting_messages``):
+    # реплика звучит по мере генерации, и вырезать знак задним числом уже
+    # поздно — он прозвучит.
+    last_ctx = await _load_context(state)
+    status = last_ctx.dynamic_status or DYN_NONE
+    same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
+    kind = _ladder_prompt_kind(
+        status=status,
+        same_reply=same_reply,
+        stubs_spoken=0,
+        force_full=False,
+    )
+    if kind == "filler":
+        reason = "статус в работе"
+    elif kind == "waiting":
+        reason = "статус поиска"
+    else:
+        reason = f"статус {status}"
 
-        force_full = time.monotonic() >= deadline
-        status = last_ctx.dynamic_status or DYN_NONE
-        same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
-        if force_full:
-            kind = "full"
-            reason = "дедлайн лестницы"
-        else:
-            kind = _ladder_prompt_kind(
-                status=status,
-                same_reply=same_reply,
-                stubs_spoken=stubs_spoken,
-                force_full=False,
-            )
-            if prev_kind is not None and kind == prev_kind and kind != "full":
-                kind = "full"
-                reason = "сборка не сменилась"
-            elif stubs_spoken >= 2:
-                reason = "лимит заглушек"
-            elif kind == "filler":
-                reason = "статус в работе"
-            elif kind == "waiting":
-                reason = "статус поиска"
-            else:
-                reason = f"статус {status}"
-
-        # Между ступенями — разделитель, чтобы commit не склеил фразы.
-        if step_index > 0 and spoken:
-            spoken.append(" ")
-            say(" ")
-
-        text = await _generate(kind, reason, step=step_index + 1)
-        if text:
-            local_history.append(AIMessage(content=text))
-        step_index += 1
-        if kind == "full":
-            break
-        prev_kind = kind
-        stubs_spoken += 1
+    text = await _generate(kind, reason, step=1)
+    if text:
+        local_history.append(AIMessage(content=text))
+    if kind != "full":
+        stage("respond", "заглушка произнесена, ход окончен, продолжение за ботом", "done")
 
     return {
         "turn_result": last_result.model_dump(),
