@@ -29,7 +29,13 @@ from graph.history import last_user_text, normalize
 from graph.log_fmt import format_check_pending, format_check_verdict
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep, Step
-from script.planner import is_closed, iter_available, profile_has, render_step_text
+from script.planner import (
+    exhausted,
+    is_closed,
+    iter_available,
+    profile_has,
+    render_step_text,
+)
 from script.source import registry
 from script.store import ScriptProgress, progress_from_state
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
@@ -504,6 +510,24 @@ async def check_pass(
                 updated.status[step.id] = "closed"
                 closures.append((step.id, "бессмысленно"))
                 continue
+
+    # Страховка на зависший шаг: закрывается тот, что провисел в шапке
+    # дольше порога. Судья остаётся главным и отрабатывает первым — сюда
+    # доходит только то, что он закрыть не смог.
+    #
+    # Без страховки висли презентационные шаги: человек их выслушивает, а
+    # не отвечает на них, судье закрывать нечем, и бот возвращается к ним
+    # ход за ходом. На разборе живого звонка так висели четыре шага сразу,
+    # до восьми ходов каждый — снаружи это ровно та жалоба «повторяет
+    # вопросы, не удерживает данные».
+    for step in available:
+        if is_closed(updated.status.get(step.id)) or step.id not in work_ids:
+            continue
+        if not exhausted(step, updated.attempts, limit=settings.step_head_limit):
+            continue
+        age_in_head = int(updated.attempts.get(step.id, 0))
+        updated.status[step.id] = "closed"
+        closures.append((step.id, f"висит {age_in_head} ходов"))
 
     return updated, closures, asks_inform
 
