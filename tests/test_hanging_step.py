@@ -130,3 +130,72 @@ async def test_страховка_работает_для_любого_шага(
 def test_скрипт_v4_поднимается():
     """Страховка считается по реальному скрипту, а не по выдуманному."""
     assert registry.get("vector_ru", "4").steps["practice"] is not None
+
+
+GIVE_UP = settings.lead_give_up
+
+
+def progress_led(step_id: str, led: int, *, attempts: int = 1) -> ScriptProgress:
+    """Прогресс, где шаг вёл разговор заданное число раз.
+
+    Args:
+        step_id: слаг шага.
+        led: сколько ходов шаг был ведущим.
+        attempts: сколько ходов шаг пролежал в шапке.
+
+    Returns:
+        Прогресс звонка.
+    """
+    return ScriptProgress.from_mapping(
+        {
+            "status": {step_id: "pending"},
+            "attempts": {step_id: attempts},
+            "in_work": [step_id],
+            "taken_turn": {step_id: 1},
+            "lead_counts": {step_id: led},
+            "profile": {},
+        }
+    )
+
+
+async def test_шаг_спрошенный_дважды_остаётся_открытым():
+    """Второй заход — обычный переспрос, тему не бросают."""
+    progress = progress_led("theory_format", GIVE_UP - 1)
+    updated, closures, _ = await check_pass(
+        state_with(progress),
+        reply="а сколько это стоит?",
+        judge=NeverCloses(),
+        progress=progress,
+    )
+    assert updated.status["theory_format"] != "closed"
+    assert closures == []
+
+
+async def test_шаг_спрошенный_трижды_закрывается():
+    """Третий заход на одну тему без ответа — тему оставляем.
+
+    На живых прогонах бот трижды за звонок спрашивал про формат теории,
+    пока человек задавал свои вопросы про цену и скидки. В шапке шаг при
+    этом лежал всего пару ходов, и порог ``step_head_limit`` не срабатывал.
+    """
+    progress = progress_led("theory_format", GIVE_UP)
+    updated, closures, _ = await check_pass(
+        state_with(progress),
+        reply="а сколько это стоит?",
+        judge=NeverCloses(),
+        progress=progress,
+    )
+    assert updated.status["theory_format"] == "closed"
+    assert any(step == "theory_format" and "без ответа" in reason for step, reason in closures)
+
+
+async def test_ответивший_шаг_закрывает_судья_а_не_счётчик():
+    """Судья остаётся главным: его основание не перехватывается."""
+    progress = progress_led("theory_format", GIVE_UP + 2)
+    _updated, closures, _ = await check_pass(
+        state_with(progress),
+        reply="давайте очно",
+        judge=ClosesByDialogue(),
+        progress=progress,
+    )
+    assert closures == [("theory_format", "диалог")]

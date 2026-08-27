@@ -520,14 +520,24 @@ async def check_pass(
     # ход за ходом. На разборе живого звонка так висели четыре шага сразу,
     # до восьми ходов каждый — снаружи это ровно та жалоба «повторяет
     # вопросы, не удерживает данные».
+    # Второе основание — заходы. ``attempts`` растёт у всей шапки и до
+    # порога доходит поздно; ``lead_counts`` растёт только у ведущего шага,
+    # то есть считает, сколько раз человека об этой теме спросили. Трижды
+    # спросить об одном и том же и не получить ответа — не настойчивость,
+    # а долбёж: живой менеджер тему оставляет и идёт дальше.
     for step in available:
         if is_closed(updated.status.get(step.id)) or step.id not in work_ids:
             continue
-        if not exhausted(step, updated.attempts, limit=settings.step_head_limit):
-            continue
         age_in_head = int(updated.attempts.get(step.id, 0))
+        led = int(updated.lead_counts.get(step.id, 0))
+        if exhausted(step, updated.attempts, limit=settings.step_head_limit):
+            reason = f"висит {age_in_head} ходов"
+        elif settings.lead_give_up > 0 and led >= settings.lead_give_up:
+            reason = f"спрошен {led} раза без ответа"
+        else:
+            continue
         updated.status[step.id] = "closed"
-        closures.append((step.id, f"висит {age_in_head} ходов"))
+        closures.append((step.id, reason))
 
     return updated, closures, asks_inform
 

@@ -22,12 +22,14 @@ KEY_PREFIX = "vector:script:"
 
 
 #: Поля прогресса, которые пишет канал генератора.
-PROGRESS_FIELDS_GENERATOR: frozenset[str] = frozenset({"attempts", "taken_turn", "in_work"})
+PROGRESS_FIELDS_GENERATOR: frozenset[str] = frozenset(
+    {"attempts", "taken_turn", "in_work", "lead_counts"}
+)
 #: Поля прогресса, которые пишет канал чекера.
 PROGRESS_FIELDS_CHECKER: frozenset[str] = frozenset({"status", "profile"})
 #: Все поля прогресса (полная запись без слияния).
 PROGRESS_FIELDS_ALL: frozenset[str] = frozenset(
-    {"status", "attempts", "taken_turn", "in_work", "profile"}
+    {"status", "attempts", "taken_turn", "in_work", "profile", "lead_counts"}
 )
 
 
@@ -42,6 +44,10 @@ class ScriptProgress:
         taken_turn: номер хода, когда шаг впервые ушёл в генерацию.
         in_work: идентификаторы шагов, отданных генератору.
         profile: базовые поля профиля, накопленные чекером в кеше.
+        lead_counts: сколько ходов шаг вёл разговор. От ``attempts``
+            отличается тем, что растёт только у ведущего шага хода, а не у
+            всей шапки: по нему видно, сколько раз человека действительно
+            спросили об этой теме.
     """
 
     status: dict[str, str] = field(default_factory=dict)
@@ -49,6 +55,7 @@ class ScriptProgress:
     taken_turn: dict[str, int] = field(default_factory=dict)
     in_work: list[str] = field(default_factory=list)
     profile: dict[str, str] = field(default_factory=dict)
+    lead_counts: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Если пометки нет, а счётчик есть — считаем шаг взятым в работу."""
@@ -110,6 +117,7 @@ class ScriptProgress:
                 for k, v in dict(profile_raw).items()
                 if v is not None and str(v).strip()
             },
+            lead_counts={str(k): int(v) for k, v in dict(data.get("lead_counts") or {}).items()},
         )
 
 
@@ -135,6 +143,8 @@ def merge_progress_fields(
         merged.attempts = {**merged.attempts, **overlay.attempts}
     if "taken_turn" in fields:
         merged.taken_turn = {**merged.taken_turn, **overlay.taken_turn}
+    if "lead_counts" in fields:
+        merged.lead_counts = {**merged.lead_counts, **overlay.lead_counts}
     if "in_work" in fields:
         seen = set(merged.in_work)
         for step_id in overlay.in_work:

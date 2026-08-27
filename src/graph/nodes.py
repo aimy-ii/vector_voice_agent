@@ -726,12 +726,16 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     # поднимали» не включается: на разборе живого звонка бот четырежды
     # переспросил про формат теории разными словами. По счёту заходов
     # второй приход на шаг виден независимо от того, что было между.
-    lead_counts = dict(state.get("lead_counts") or {})
+    #
+    # Счётчик живёт в прогрессе рядом с ``attempts``: закрывает шаги чекер,
+    # и без общего хранилища он о заходах не узнает.
+    lead_counts = dict(progress.lead_counts or state.get("lead_counts") or {})
     if step is not None:
         lead_counts[step.id] = int(lead_counts.get(step.id, 0)) + 1
         lead_repeat = lead_counts[step.id]
     else:
         lead_repeat = 1
+    progress.lead_counts = lead_counts
 
     # Новый шаг хода — только ведущий шапки, если взят впервые.
     new_step_id: str | None = None
