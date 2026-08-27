@@ -323,7 +323,9 @@ async def test_lookup_nearby_успех() -> None:
     result = await lookup_nearby(kb, city_slug="perm", place="Солнечный", key=key)
 
     assert len(kb.geocode_calls) == 1
-    assert kb.geocode_calls[0] == {"text": "Солнечный", "city_slug": "perm"}
+    assert kb.geocode_calls[0] == {"text": "солнечный", "city_slug": "perm"}, (
+        "в справочник уходит нормализованное место, а не строка из формы"
+    )
     assert len(kb.nearest_calls) == 1
     assert kb.nearest_calls[0]["lat"] == 58.01
     assert kb.nearest_calls[0]["lon"] == 56.25
@@ -493,3 +495,31 @@ def test_format_missing_запрет_адреса_и_технеудачи() -> N
 def test_format_missing_обрезает_пробелы_места() -> None:
     """Место с пробелами по краям попадает в кавычки без лишних пробелов."""
     assert "«Солнечный»" in format_missing("  Солнечный  ")
+
+
+async def test_lookup_nearby_снимает_ведущие_слова_перед_геокодером() -> None:
+    """Оценочные и предложные слова до справочника не доходят.
+
+    Взято с живого звонка: агент профиля записал в форму «Ближайшее метро
+    Пионерская», геокодер по этой фразе не нашёл ничего, и бот пять ходов
+    подряд просил назвать улицу. По «метро Пионерская» филиалы находятся
+    с первой попытки.
+    """
+    for spoken in (
+        "Ближайшее метро Пионерская",
+        "у метро Пионерская",
+        "рядом с метро Пионерская",
+    ):
+        kb = FakeNearbyKB(
+            point=(60.0, 30.29),
+            items=[{"slug": "primorskiy", "address": "Коломяжский, 15", "distance_km": 1.2}],
+        )
+        result = await lookup_nearby(
+            kb,
+            city_slug="sankt-peterburg",
+            place=spoken,
+            key="sankt-peterburg:метро пионерская",
+        )
+        assert kb.geocode_calls[0]["text"] == "метро пионерская", spoken
+        assert result.found, spoken
+        assert spoken in result.text, "человеку показывается его собственная формулировка"
