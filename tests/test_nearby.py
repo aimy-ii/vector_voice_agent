@@ -17,6 +17,7 @@ from graph.nearby import (
     lookup_nearby,
     nearby_key,
     normalize_place,
+    place_queries,
     should_refresh,
 )
 
@@ -523,3 +524,68 @@ async def test_lookup_nearby_снимает_ведущие_слова_перед
         assert kb.geocode_calls[0]["text"] == "метро пионерская", spoken
         assert result.found, spoken
         assert spoken in result.text, "человеку показывается его собственная формулировка"
+
+
+def test_place_queries_широкий_ориентир_идёт_вторым() -> None:
+    """Из фразы с предлогом получается два запроса: точный и широкий."""
+    assert place_queries("у торгового дома Кит в Приморском районе") == [
+        "торгового дома кит в приморском районе",
+        "приморском районе",
+    ]
+
+
+def test_place_queries_без_предлога_один_запрос() -> None:
+    """Когда широкому ориентиру взяться неоткуда, запрос остаётся один."""
+    assert place_queries("метро Пионерская") == ["метро пионерская"]
+    assert place_queries("Коломяжский проспект, 15") == ["коломяжский проспект, 15"]
+
+
+def test_place_queries_пустое_место_запросов_не_даёт() -> None:
+    """Из пустой строки и из голого предлога запросов не выходит."""
+    assert place_queries("") == []
+    assert place_queries("рядом с") == []
+
+
+async def test_lookup_nearby_широкий_ориентир_спасает_подбор() -> None:
+    """Здание не опознано — филиалы берутся по району из той же фразы.
+
+    Взято с живого звонка: человек сказал «живу у торгового дома Кит в
+    Приморском районе». Здания в геокодере нет, и бот пять ходов подряд
+    просил назвать улицу, хотя район прозвучал с первого раза.
+    """
+
+    class TwoStepKB(FakeNearbyKB):
+        """Опознаёт только второй запрос — широкий ориентир."""
+
+        async def geocode(
+            self, text: str, *, city_slug: str | None = None
+        ) -> tuple[float, float] | None:
+            self.geocode_calls.append({"text": text, "city_slug": city_slug})
+            return (59.98, 30.24) if text == "приморском районе" else None
+
+    kb = TwoStepKB(items=[{"slug": "primorskiy", "address": "Коломяжский, 15"}])
+    result = await lookup_nearby(
+        kb,
+        city_slug="sankt-peterburg",
+        place="у торгового дома Кит в Приморском районе",
+        key="sankt-peterburg:торгового дома кит в приморском районе",
+    )
+    assert [call["text"] for call in kb.geocode_calls] == [
+        "торгового дома кит в приморском районе",
+        "приморском районе",
+    ], "точный запрос идёт первым, широкий — только после его неудачи"
+    assert result.found
+    assert result.branch_slugs == ["primorskiy"]
+
+
+async def test_lookup_nearby_точный_ориентир_второго_захода_не_делает() -> None:
+    """Нашлось с первого запроса — второго похода в справочник нет."""
+    kb = FakeNearbyKB(point=(59.98, 30.24), items=[{"slug": "primorskiy"}])
+    result = await lookup_nearby(
+        kb,
+        city_slug="sankt-peterburg",
+        place="Коломяжский проспект в Приморском районе",
+        key="sankt-peterburg:коломяжский проспект в приморском районе",
+    )
+    assert len(kb.geocode_calls) == 1
+    assert result.found

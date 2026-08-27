@@ -173,6 +173,45 @@ def has_place_name(place: str) -> bool:
     return any(word not in _GENERIC_PLACE_WORDS for word in words)
 
 
+#: Предлоги внутри фразы, после которых обычно идёт более широкий ориентир:
+#: «торговый дом Кит В ПРИМОРСКОМ РАЙОНЕ», «Кит НА КОМЕНДАНТСКОМ».
+_INNER_PLACE_MARKERS: tuple[str, ...] = (" в ", " на ", " у ", " возле ", " около ")
+
+
+def place_queries(place: str) -> list[str]:
+    """Строит запросы к геокодеру от точного к широкому.
+
+    Человек называет место так, как ему удобно: «у торгового дома Кит в
+    Приморском районе». Геокодер ищет по всей фразе целиком и по такой не
+    находит ничего — здания в нём нет. При этом хвост «приморском районе»
+    он находит сразу.
+
+    Широкий ориентир хуже точного, поэтому он идёт вторым и берётся только
+    тогда, когда точный не сработал. Филиал в своём районе — верный ответ;
+    молчание про адрес и пятый круг «назовите улицу» — нет.
+
+    Args:
+        place: место так, как его назвал человек.
+
+    Returns:
+        Запросы без повторов, от точного к широкому; пустой список, если
+        искать нечего.
+    """
+    queries: list[str] = []
+    head = normalize_place(place)
+    if head:
+        queries.append(head)
+    lowered = f" {head} "
+    for marker in _INNER_PLACE_MARKERS:
+        position = lowered.rfind(marker)
+        if position == -1:
+            continue
+        tail = normalize_place(lowered[position + len(marker) :])
+        if tail and tail != head and has_place_name(tail) and tail not in queries:
+            queries.append(tail)
+    return queries
+
+
 def nearby_key(city_slug: str | None, place: str) -> str:
     """Ключ пересчёта: город плюс нормализованное место.
 
@@ -370,12 +409,19 @@ async def lookup_nearby(
     # нет. Нормализация для этого и написана, но до сих пор считала только
     # ключ пересчёта, а в запрос шла строка из формы как есть. Человеку в
     # блоке контекста по-прежнему показывается его собственная формулировка.
-    query = normalize_place(place)
-    try:
-        point = await kb.geocode(query, city_slug=city_slug)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("Геокодер не ответил по месту %r: %s", place, exc)
-        point = None
+    #
+    # Запросов может быть два: точное место и широкий ориентир из той же
+    # фразы. Второй берётся, только если по первому ничего не нашлось.
+    point: tuple[float, float] | None = None
+    for query in place_queries(place):
+        try:
+            point = await kb.geocode(query, city_slug=city_slug)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Геокодер не ответил по запросу %r: %s", query, exc)
+            point = None
+        if point is not None:
+            log.info("Подбор филиалов: место %r опознано по запросу %r", place, query)
+            break
     if point is None:
         log.info("Подбор филиалов: место %r не опознано, город %r", place, city_slug)
         return NearbyResult(key=key, text=format_missing(place), found=False)
