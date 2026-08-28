@@ -290,7 +290,12 @@ def test_заглушки_и_фолбэк_v4_из_настроек(script_v4, da
 
 
 def test_реестр_инструментов_всегда_branches_faq_details(script_v4, script):
-    """Реестр одинаков для продаж и legacy: город, филиалы, FAQ, детали, ближайшие, факты."""
+    """Реестр одинаков для продаж и legacy.
+
+    Город, филиалы, FAQ, детали филиала, ближайшие, факты шага и доводы
+    под возражение. Порядок закреплён: агент контекстера выбирает
+    инструмент по описанию, и перестановка меняет то, что он видит первым.
+    """
     for compiled in (script_v4, script):
         tools = build_context_tools(compiled)
         assert [t.name for t in tools] == [
@@ -300,6 +305,7 @@ def test_реестр_инструментов_всегда_branches_faq_details
             "branch_details",
             "nearest_branches",
             "facts",
+            "objections",
         ]
 
 
