@@ -489,6 +489,34 @@ class ContextState(BaseModel):
         return ConversationContext.model_validate(self.model_dump())
 
 
+#: Подсказка боту, когда вместо города назван район внутри него.
+#:
+#: Одна на всех: её кладёт в динамику инструмент города и по ней же чекер
+#: понимает, что города у разговора нет. Сверять по тексту наугад нельзя —
+#: правка формулировки молча сломала бы проверку.
+DISTRICT_HINT = (
+    "Клиент назвал район внутри города, а не город сети. "
+    "Уточни город обучения, район городом не записывай."
+)
+
+
+def city_unresolved(context: ConversationContext) -> bool:
+    """Город разговора так и не определён.
+
+    Признак структурный, а не по пустому полю анкеты: заполнитель работает
+    в фоне и может отставать на ход, а слаг города ставит резолвер.
+
+    Args:
+        context: контекст разговора.
+
+    Returns:
+        True, если слага города нет и резолвер сказал, что назван район.
+    """
+    if (context.city_slug or "").strip():
+        return False
+    return DISTRICT_HINT in (context.dynamic_text or "")
+
+
 def context_from_state(data: Mapping[str, Any] | None) -> ConversationContext:
     """Достаёт контекст из состояния треда.
 

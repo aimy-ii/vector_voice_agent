@@ -12,7 +12,12 @@ import json
 import logging
 from typing import Any, Mapping, Protocol, Sequence
 
-from graph.context import ConversationContext, format_branch_static, merge_static
+from graph.context import (
+    DISTRICT_HINT,
+    ConversationContext,
+    format_branch_static,
+    merge_static,
+)
 from graph.nearby import apply_result, lookup_nearby, normalize_place, should_refresh
 from graph.resolvers import CityResolver, resolve_city
 from kb.client import vector_kb
@@ -180,10 +185,7 @@ class CityTool:
         resolution = await resolve_city(text, cities, resolver=self.resolver)
         if resolution.is_district:
             log.info("CityTool: резолвер вернул район, query=%r", preview)
-            return (
-                "Клиент назвал район внутри города, а не город сети. "
-                "Уточни город обучения, район городом не записывай."
-            )
+            return DISTRICT_HINT
         if not resolution.slug or not resolution.name:
             log.info(
                 "CityTool: резолвер не дал слаг или название, query=%r",

@@ -25,6 +25,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core.config import settings
+from graph.context import city_unresolved, context_from_state
 from graph.history import last_user_text, normalize
 from graph.log_fmt import format_check_pending, format_check_verdict
 from script.build import AnyStep, CompiledScript
@@ -363,6 +364,10 @@ def _script_from_state(state: Mapping[str, Any]) -> CompiledScript:
     )
 
 
+#: Слаг шага, на котором выясняется город обучения.
+CITY_STEP = "city"
+
+
 async def check_pass(
     state: Mapping[str, Any],
     *,
@@ -401,6 +406,7 @@ async def check_pass(
         (progress if progress is not None else progress_from_state(state)).to_dict()
     )
     profile = dict(state.get("profile") or {})
+    context = context_from_state(state.get("conversation_context"))
     # Профиль из кеша прогресса — для закрытия по fills.
     for key, value in updated.profile.items():
         if value and key not in profile:
@@ -502,6 +508,22 @@ async def check_pass(
             if not verdict.reply_usable:
                 # Реплика негодна целиком, а не для одного шага.
                 break
+            if verdict.step_closed and step.id == CITY_STEP and city_unresolved(context):
+                # Судья закрывает по диалогу: человек ответил — вопрос снят.
+                # Для города этого мало. На разборе звонка клиент ответил
+                # «Приморский район рядом с метро Пионерская», судья счёл
+                # вопрос отвеченным, а резолвер сказал, что это район, а не
+                # город сети. Города не стало, и вместе с ним — ни цены, ни
+                # сроков, ни филиалов: без слага код туда не ходит вовсе.
+                # Весь остаток звонка бот отвечал «сейчас уточню», уточнять
+                # было неоткуда, человек бросил трубку.
+                #
+                # Держим шаг открытым, чтобы бот переспросил. Признак
+                # структурный, от заполнителя анкеты не зависит: слаг ставит
+                # резолвер в том же проходе. Страховка на зависший шаг
+                # остаётся — до конца разговора шаг не провисит.
+                log.info("[check|hold] город: назван район, держим шаг открытым")
+                continue
             if verdict.step_closed:
                 updated.status[step.id] = "closed"
                 closures.append((step.id, "диалог"))
