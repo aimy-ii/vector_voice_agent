@@ -177,39 +177,59 @@ def has_place_name(place: str) -> bool:
 #: «торговый дом Кит В ПРИМОРСКОМ РАЙОНЕ», «Кит НА КОМЕНДАНТСКОМ».
 _INNER_PLACE_MARKERS: tuple[str, ...] = (" в ", " на ", " у ", " возле ", " около ")
 
+#: Сколько запросов к геокодеру делаем на один ориентир.
+#:
+#: Каждый — поход наружу с таймаутом, и подбор идёт в фоновом канале, но
+#: висеть на нём весь ход всё равно нельзя. Четырёх хватает: целая фраза
+#: и три части.
+MAX_PLACE_QUERIES = 4
+
 
 def place_queries(place: str) -> list[str]:
     """Строит запросы к геокодеру от точного к широкому.
 
-    Человек называет место так, как ему удобно: «у торгового дома Кит в
-    Приморском районе». Геокодер ищет по всей фразе целиком и по такой не
-    находит ничего — здания в нём нет. При этом хвост «приморском районе»
-    он находит сразу.
+    Человек называет место так, как ему удобно, и агент профиля пишет в
+    форму всё, что услышал: «Пионерская, Приморский район, у Торгового
+    дома Кит». Геокодер ищет по всей фразе целиком и по такой не находит
+    ничего — здания в нём нет. При этом «Пионерская» и «Приморский район»
+    он находит с первой попытки.
 
-    Широкий ориентир хуже точного, поэтому он идёт вторым и берётся только
-    тогда, когда точный не сработал. Филиал в своём районе — верный ответ;
-    молчание про адрес и пятый круг «назовите улицу» — нет.
+    Поэтому кроме целой фразы пробуем её части. Порядок частей — как их
+    назвал человек: первым он говорит то, что считает главным ориентиром.
+    Хвост после предлога внутри части идёт последним: «торгового дома Кит
+    в Приморском районе» находится по «приморском районе».
 
     Args:
         place: место так, как его назвал человек.
 
     Returns:
         Запросы без повторов, от точного к широкому; пустой список, если
-        искать нечего.
+        искать нечего. Длина ограничена ``MAX_PLACE_QUERIES``.
     """
     queries: list[str] = []
-    head = normalize_place(place)
-    if head:
-        queries.append(head)
-    lowered = f" {head} "
+
+    def offer(text: str) -> None:
+        """Добавляет запрос, если он новый, с названием и не голое число.
+
+        Часть без единой буквы — это номер дома. Сам по себе он не место:
+        «15» геокодер найдёт где угодно, и филиал подберётся не тот.
+        """
+        item = normalize_place(text)
+        if not item or item in queries or not has_place_name(item):
+            return
+        if not any(char.isalpha() for char in item):
+            return
+        queries.append(item)
+
+    whole = normalize_place(place)
+    offer(whole)
+    for part in whole.split(","):
+        offer(part)
     for marker in _INNER_PLACE_MARKERS:
-        position = lowered.rfind(marker)
-        if position == -1:
-            continue
-        tail = normalize_place(lowered[position + len(marker) :])
-        if tail and tail != head and has_place_name(tail) and tail not in queries:
-            queries.append(tail)
-    return queries
+        position = f" {whole} ".rfind(marker)
+        if position != -1:
+            offer(f" {whole} "[position + len(marker) :])
+    return queries[:MAX_PLACE_QUERIES]
 
 
 def nearby_key(city_slug: str | None, place: str) -> str:
