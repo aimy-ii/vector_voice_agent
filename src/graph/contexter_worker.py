@@ -67,17 +67,41 @@ class ContexterTaskState(TypedDict, total=False):
     script_version: str
 
 
-def _keep_concurrent_dynamic(base: ConversationContext, overlay: ConversationContext) -> None:
-    """Не даёт локальной динамике затереть текст, появившийся в кеше параллельно.
+def _keep_concurrent_dynamic(
+    base: ConversationContext,
+    overlay: ConversationContext,
+    *,
+    current_hash: str = "",
+) -> None:
+    """Не даёт локальной динамике затереть текст, появившийся параллельно.
+
+    Подклеивается только то, что относится к той же реплике. Динамика
+    описывает сказанное сейчас, и текст по прошлой реплике к этому ходу
+    отношения не имеет.
+
+    Без этого указания копились за звонок. На разборе провалившегося
+    прогона в динамике к последнему ходу лежала подсказка «уточни город
+    обучения» со второго хода — вместе с блоком возражения из последних.
+    Пока город не определён, подсказка верна; после того как определится,
+    она заставит переспрашивать город без причины.
+
+    Чужой текст без пометки о разобранной реплике сохраняется как прежде:
+    это признак прохода, который ещё идёт, и терять его нельзя.
 
     Args:
         base: свежий слепок кеша перед записью.
         overlay: локальный результат разбора; ``dynamic_text`` дополняется
             чужим текстом на месте.
+        current_hash: хеш реплики, которую разбирает этот проход.
     """
     concurrent = (base.dynamic_text or "").strip()
+    if not concurrent:
+        return
+    cached_hash = (base.last_reply_hash or "").strip()
+    if cached_hash and current_hash and cached_hash != current_hash:
+        return
     local = (overlay.dynamic_text or "").strip()
-    if concurrent and concurrent not in (overlay.dynamic_text or ""):
+    if concurrent not in (overlay.dynamic_text or ""):
         overlay.dynamic_text = f"{concurrent}\n{local}".strip() if local else concurrent
 
 
@@ -235,7 +259,7 @@ async def contexter_task_node(state: ContexterTaskState) -> dict[str, Any]:
         if base.conversation_ended:
             stage("contexter-worker", f"звонок {call_id}: завершён во время разбора", "done")
             return {}
-        _keep_concurrent_dynamic(base, updated)
+        _keep_concurrent_dynamic(base, updated, current_hash=reply_hash(reply))
     merged = merge_context_fields(
         base if base is not None else updated,
         updated,
