@@ -64,7 +64,12 @@ PROFILE_FORM: tuple[ProfileFormField, ...] = (
     ProfileFormField(key="second_category", title="Интерес ко второй категории"),
     ProfileFormField(key="messenger", title="Мессенджер для документов"),
     ProfileFormField(
-        key="caller_phone", title="Номер для переписки, если он не тот, с которого звонят"
+        key="caller_phone",
+        title=(
+            "Номер для переписки, если он не тот, с которого звонят: только "
+            "сам номер цифрами — «+7 921 555-01-23». Слова про номер "
+            "(«тот же», «на этот», «как для связи») сюда не писать"
+        ),
     ),
     ProfileFormField(key="urgency", title="Срочность и сравнение с другими школами"),
 )

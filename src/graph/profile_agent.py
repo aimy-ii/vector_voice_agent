@@ -14,6 +14,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from graph.names import given_name
+from graph.phone import phone_number
 from graph.profile_form import REWRITABLE_MARK, field_pairs
 from script.build import CompiledScript
 from utils.llm_gen import astream_structured, get_llm, response_format_from
@@ -22,6 +23,9 @@ log = logging.getLogger(__name__)
 
 #: Поля имени — значение прогоняется через ``given_name``.
 _NAME_KEYS = frozenset({"caller_name", "student_name"})
+
+#: Поля номера — значение принимается только если в нём есть номер.
+_PHONE_KEYS = frozenset({"caller_phone"})
 
 #: Сколько последних сообщений отдаём агенту как хвост диалога.
 _HISTORY_TAIL = 8
@@ -163,7 +167,8 @@ async def guess_profile(
     Returns:
         Угаданные значения: ключи вне перечня и пустые отброшены, заполненные
         не перезаписываются кроме уточняемых, повтор того же значения отброшен,
-        имена прогнаны через ``given_name``. Ошибка агента наружу не летит —
+        имена прогнаны через ``given_name``, номер — через ``phone_number``
+        и отброшен, если это не номер. Ошибка агента наружу не летит —
         пустой результат.
     """
     worker = agent or LlmProfileAgent()
@@ -186,6 +191,8 @@ async def guess_profile(
             continue
         if key in _NAME_KEYS:
             value = given_name(value) or value
+        if key in _PHONE_KEYS:
+            value = phone_number(value)
         if not value or value == current:
             continue
         seen.add(key)
