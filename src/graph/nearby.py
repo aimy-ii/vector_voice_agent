@@ -67,7 +67,7 @@ class NearbyResult(BaseModel):
 #: Оценочные слова здесь же. Человек говорит «ближайшее метро Пионерская», и
 #: агент профиля пишет в форму ровно эту фразу. Геокодер по ней не находит
 #: ничего, а по «метро Пионерская» находит с первой попытки.
-_PLACE_PREFIXES: tuple[str, ...] = (
+PLACE_PREFIXES: tuple[str, ...] = (
     "рядом со",
     "рядом с",
     "недалеко от",
@@ -108,7 +108,7 @@ def normalize_place(text: str) -> str:
     changed = True
     while changed and body:
         changed = False
-        for prefix in _PLACE_PREFIXES:
+        for prefix in PLACE_PREFIXES:
             head = f"{prefix} "
             if body.startswith(head):
                 body = body[len(head) :].strip()

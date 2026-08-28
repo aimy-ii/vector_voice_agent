@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from graph.names import given_name
 from graph.phone import phone_number
 from graph.profile_form import REWRITABLE_MARK, field_pairs
+from graph.profile_tidy import tidy_value
 from script.build import CompiledScript
 from utils.llm_gen import astream_structured, get_llm, response_format_from
 
@@ -168,7 +169,8 @@ async def guess_profile(
         Угаданные значения: ключи вне перечня и пустые отброшены, заполненные
         не перезаписываются кроме уточняемых, повтор того же значения отброшен,
         имена прогнаны через ``given_name``, номер — через ``phone_number``
-        и отброшен, если это не номер. Ошибка агента наружу не летит —
+        и отброшен, если это не номер, остальные значения приведены к виду
+        записи через ``tidy_value``. Ошибка агента наружу не летит —
         пустой результат.
     """
     worker = agent or LlmProfileAgent()
@@ -193,6 +195,8 @@ async def guess_profile(
             value = given_name(value) or value
         if key in _PHONE_KEYS:
             value = phone_number(value)
+        else:
+            value = tidy_value(key, value)
         if not value or value == current:
             continue
         seen.add(key)

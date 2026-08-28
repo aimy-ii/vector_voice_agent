@@ -175,6 +175,15 @@ async def contexter_task_node(state: ContexterTaskState) -> dict[str, Any]:
                 continue
             profile[key] = value
             changed = True
+        # Город в анкету берём из справочника, а не из речи. Человек
+        # отвечает падежом разговора — «в Санкт-Петербурге», — и в поле
+        # ложится форма, по которой звонки между собой не сравнить.
+        # Справочник уже разобрал сказанное в город сети и знает его
+        # название в именительном.
+        resolved_city = (updated.city_name or "").strip()
+        if resolved_city and profile.get("city") != resolved_city:
+            profile["city"] = resolved_city
+            changed = True
         if changed and progress is not None:
             progress.profile = dict(profile)
             cached = await script_store.load(call_id)
