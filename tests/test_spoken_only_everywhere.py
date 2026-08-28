@@ -87,3 +87,21 @@ def test_запрет_покрывает_выбор_и_после_звонка(s
     short = _body(build_filler_messages(sales_script, messages=[], history_limit=2))
     assert "ни сейчас, ни после" in short
     assert "напишите или позвоните" in short
+
+
+def test_скрипт_не_предлагает_анкету_на_заполнение() -> None:
+    """Исход «оформить дистанционно» есть, но заполняет не человек.
+
+    Требование шага закрытия называло рабочим исходом «дистанционное
+    оформление через анкету». Бот честно следовал ему и предлагал:
+    «Я отправлю вам анкету в Telegram, вы её заполните» — то есть нарушал
+    запрет просить писать, потому что тот противоречил самому скрипту.
+    """
+    raw = json.loads(DATA.read_text(encoding="utf-8"))
+    closing = next(step for step in raw["steps"] if step["id"] == "closing")
+
+    assert "через анкету" not in closing["requirements"]
+    assert "вопросы задаёт агент вслух" in closing["requirements"]
+    assert "дистанционное оформление" in closing["requirements"], (
+        "исход остаётся рабочим, меняется только способ"
+    )
