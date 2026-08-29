@@ -589,3 +589,30 @@ def test_v4_branch_examples_называют_адрес(script_v4):
     examples = script_v4.step("branch").examples
     assert examples
     assert all("<адрес из данных>" in example for example in examples), examples
+
+
+def test_v4_образцы_не_подставляют_свои_данные(script_v4):
+    """Где требование велит брать из справочника, образцы не называют своё.
+
+    Четыре дефекта подряд оказались одной природы: требование шага велит
+    одно, образцы показывают другое, и побеждают образцы — модель копирует
+    их форму, а не вычитывает требование. Так бот не называл адрес филиала,
+    предлагал заполнить анкету и перечислял скидки, которых в городе может
+    не быть.
+
+    Значение из справочника в образце обозначается подстановкой, как у
+    шага цены: «<адрес из данных>», «<категории из данных>».
+    """
+    data_driven = {
+        "branch": "адрес",
+        "discount_check": "категории",
+        "messenger": "мессенджеры",
+        "tariff": "тарифы",
+        "group": "частота",
+    }
+    for step_id, marker in data_driven.items():
+        examples = script_v4.step(step_id).examples
+        assert examples, step_id
+        assert any(f"<{marker} из данных>" in example for example in examples), (
+            f"{step_id}: образцы должны показывать подстановку, а не своё значение"
+        )
