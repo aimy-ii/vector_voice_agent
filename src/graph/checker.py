@@ -25,7 +25,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core.config import settings
-from graph.context import city_unresolved, context_from_state
+from graph.context import branch_picked, city_unresolved, context_from_state
 from graph.history import last_user_text, normalize
 from graph.log_fmt import format_check_pending, format_check_verdict
 from script.build import AnyStep, CompiledScript
@@ -367,6 +367,9 @@ def _script_from_state(state: Mapping[str, Any]) -> CompiledScript:
 #: Слаг шага, на котором выясняется город обучения.
 CITY_STEP = "city"
 
+#: Слаг шага, на котором договариваются о филиале.
+BRANCH_STEP = "branch"
+
 
 async def check_pass(
     state: Mapping[str, Any],
@@ -523,6 +526,20 @@ async def check_pass(
                 # резолвер в том же проходе. Страховка на зависший шаг
                 # остаётся — до конца разговора шаг не провисит.
                 log.info("[check|hold] город: назван район, держим шаг открытым")
+                continue
+            if verdict.step_closed and step.id == BRANCH_STEP and not branch_picked(context):
+                # То же, что с городом. На разборе звонка человек назвал
+                # ориентир, распознавание переврало название станции, и
+                # филиалы не подобрались. Бот сказал «сейчас подберу
+                # ближайший филиал», судья счёл вопрос отвеченным и закрыл
+                # шаг за один ход — адрес так и не прозвучал, а обещание
+                # осталось невыполненным.
+                #
+                # Держим шаг открытым: скрипт на этот случай велит просить
+                # другой ориентир, и без открытого шага бот к филиалу уже
+                # не вернётся. Признак структурный — карточки филиалов
+                # приходят от подбора, не от заполнителя анкеты.
+                log.info("[check|hold] филиал: адреса нет, держим шаг открытым")
                 continue
             if verdict.step_closed:
                 updated.status[step.id] = "closed"

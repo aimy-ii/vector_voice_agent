@@ -759,3 +759,22 @@ def branch_addresses(context: ConversationContext) -> tuple[str, ...]:
         if address and address not in out:
             out.append(address)
     return tuple(out)
+
+
+def branch_picked(context: ConversationContext) -> bool:
+    """Договорились ли о конкретном филиале.
+
+    Скрипт закрывает шаг филиала, когда человек согласился на конкретный
+    офис. Судья видит только диалог: на «сейчас подберу ближайший филиал»
+    он считает вопрос отвеченным, хотя адрес ещё не прозвучал. Признак
+    берём структурный — по тому, что подбор действительно дал филиалы.
+
+    Args:
+        context: контекст разговора.
+
+    Returns:
+        ``True``, если филиал зафиксирован или есть из чего выбирать.
+    """
+    if (context.branch_slug or "").strip():
+        return True
+    return bool(context.branch_cards)
