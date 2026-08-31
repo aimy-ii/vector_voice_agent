@@ -1073,10 +1073,19 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 # лестница окликов на стороне бота.
                 stage("respond", "модель не ответила, реплики человека не было — молчим", "done")
             else:
+                # Человек сказал, а модель не успела. Просить повторить
+                # незачем — его услышали, это агент не поспел. Говорим
+                # «секундочку» и берём следующий ход сами: человеку нужен
+                # ответ, а не просьба повторить. От бесконечной цепочки
+                # оберегает предел продолжений на стороне бота.
+                nonlocal expect_continuation
+                expect_continuation = True
                 say(script.params.fallback)
                 spoken.append(script.params.fallback)
                 streamed.append(script.params.fallback)
-                stage("respond", "модель не ответила, отдана аварийная реплика", "done")
+                stage(
+                    "respond", "модель не ответила, сказано «секундочку», ход продолжится", "done"
+                )
             last_result = TurnResult(reply="".join(streamed))
             return "".join(streamed)
 
