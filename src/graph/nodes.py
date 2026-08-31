@@ -1118,11 +1118,20 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     last_ctx = await _load_context(state)
     status = last_ctx.dynamic_status or DYN_NONE
     same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
+    # Ждать имеет смысл только по тем данным, которых не хватает этому
+    # шагу. Статус динамики один на весь контекст: пока фон подбирает
+    # филиалы, он стоит «в поиске» независимо от того, о чём сейчас
+    # разговор. По одному ему бот тянул время на шаге «кто учится» —
+    # «стоимость сейчас уточняю» — при том, что цена уже лежала в данных.
+    #
+    # Чего не хватает шагу, знает ``missing_needs``: он отбрасывает и то,
+    # что уже в контексте, и то, на что справочник ответил пусто.
+    lead_missing_data = bool(missing_needs(last_ctx, needs_of(lead), profile))
     kind = _ladder_prompt_kind(
         status=status,
         same_reply=same_reply,
         stubs_spoken=0,
-        force_full=False,
+        force_full=not lead_missing_data,
     )
     if kind == "filler":
         reason = "статус в работе"
