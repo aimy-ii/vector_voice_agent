@@ -14,7 +14,12 @@ from __future__ import annotations
 import pytest
 
 from graph.profile_agent import ProfileGuess, ProfileValue, guess_profile
-from graph.profile_values import branch_address, theory_format
+from graph.profile_values import branch_address
+from script.field_choices import load_field_choices, match_choice
+
+
+#: Варианты формата теории так, как их задаёт файл данных скрипта.
+THEORY = load_field_choices()["theory_format"]
 
 
 class FakeAgent:
@@ -43,7 +48,7 @@ class FakeAgent:
 )
 def test_формат_теории_сводится_к_варианту(spoken: str, expected: str) -> None:
     """Сказанное приводится к одному из трёх вариантов скрипта."""
-    assert theory_format(spoken) == expected
+    assert match_choice(spoken, THEORY) == expected
 
 
 def test_очно_дома_это_очно() -> None:
@@ -52,15 +57,15 @@ def test_очно_дома_это_очно() -> None:
     Порядок проверки в этом и состоит: «дома» без «очно» значит
     дистанционно, а вместе с ним — очно.
     """
-    assert theory_format("Очно дома") == "Очно"
-    assert theory_format("В теории лучше очно дома отвлекается") == "Очно"
-    assert theory_format("Дома") == "Дистанционно"
+    assert match_choice("Очно дома", THEORY) == "Очно"
+    assert match_choice("В теории лучше очно дома отвлекается", THEORY) == "Очно"
+    assert match_choice("Дома", THEORY) == "Дистанционно"
 
 
 def test_неузнанный_формат_отбрасывается() -> None:
     """Ничего не узнали — поле остаётся пустым, а не мусорным."""
-    assert theory_format("не знаю пока") == ""
-    assert theory_format("") == ""
+    assert match_choice("не знаю пока", THEORY) == ""
+    assert match_choice("", THEORY) == ""
 
 
 @pytest.mark.parametrize(
@@ -138,3 +143,25 @@ async def test_агент_профиля_чистит_оба_поля() -> None:
         ("theory_format", "Очно"),
         ("city", "Екатеринбург"),
     ]
+
+
+def test_варианты_лежат_в_данных_а_не_в_коде() -> None:
+    """Заказчик правит варианты в файле рядом со скриптом, без выката кода.
+
+    Форматы теории названы в требованиях шага прозой — «очно,
+    дистанционно или комбинированно», — а технических полей в ``SalesStep``
+    нет намеренно. Поэтому перечень лежит отдельным файлом данных, как
+    перечень возражений.
+    """
+    from script.field_choices import DEFAULT_FILE
+
+    assert DEFAULT_FILE.exists()
+    values = {choice.value for choice in THEORY}
+    assert values == {"Очно", "Дистанционно", "Комбинированно"}
+
+
+def test_без_файла_значение_идёт_в_анкету_как_есть(tmp_path) -> None:
+    """Отсутствие перечня не ломает разбор — оно лишь снимает сведение."""
+    from script.field_choices import load_field_choices as load
+
+    assert load(tmp_path / "нет-такого.json") == {}

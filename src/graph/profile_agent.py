@@ -17,8 +17,9 @@ from graph.names import given_name
 from graph.phone import phone_number
 from graph.profile_form import REWRITABLE_MARK, field_pairs
 from graph.profile_tidy import tidy_value
-from graph.profile_values import branch_address, theory_format
+from graph.profile_values import branch_address
 from script.build import CompiledScript
+from script.field_choices import load_field_choices, match_choice
 from utils.llm_gen import astream_structured, get_llm, response_format_from
 
 log = logging.getLogger(__name__)
@@ -29,8 +30,8 @@ _NAME_KEYS = frozenset({"caller_name", "student_name"})
 #: Поля номера — значение принимается только если в нём есть номер.
 _PHONE_KEYS = frozenset({"caller_phone"})
 
-#: Поля со своей формой: свободный текст в них хуже пустоты.
-_SHAPED_KEYS: frozenset[str] = frozenset({"theory_format", "branch"})
+#: Варианты полей с заранее заданной формой — из данных скрипта.
+_FIELD_CHOICES = load_field_choices()
 
 #: Сколько последних сообщений отдаём агенту как хвост диалога.
 _HISTORY_TAIL = 8
@@ -176,8 +177,9 @@ async def guess_profile(
         Угаданные значения: ключи вне перечня и пустые отброшены, заполненные
         не перезаписываются кроме уточняемых, повтор того же значения отброшен,
         имена прогнаны через ``given_name``, номер — через ``phone_number``
-        и отброшен, если это не номер; филиал и формат теории сведены к
-        своей форме и отброшены, если не узнаны; остальные значения
+        и отброшен, если это не номер; поля с перечнем вариантов сведены
+        к варианту, филиал — к адресу справочника, и оба отброшены, если не
+        узнаны; остальные значения
         приведены к виду записи через ``tidy_value``. Ошибка агента наружу не летит —
         пустой результат.
     """
@@ -203,8 +205,8 @@ async def guess_profile(
             value = given_name(value) or value
         if key in _PHONE_KEYS:
             value = phone_number(value)
-        elif key == "theory_format":
-            value = theory_format(value)
+        elif key in _FIELD_CHOICES:
+            value = match_choice(value, _FIELD_CHOICES[key])
         elif key == "branch":
             value = branch_address(value, branches)
         else:
