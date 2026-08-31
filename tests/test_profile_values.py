@@ -1,0 +1,102 @@
+"""Филиал и формат теории попадают в анкету своей формой, а не фразой.
+
+Разбор прогонов по легенде с матерью за сына. В поле выбранного филиала
+ложилось «Нурамыше» — распознавание переврало «на Уралмаше» — и «Метро
+Проспект Космонавтов»: ориентир вместо адреса. В формате теории — «Дома»,
+«Очно дома», «В теории лучше очно дома отвлекается».
+
+Из анкеты работают дальше, а не читают её глазами: свободный текст в
+таких полях хуже пустоты.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from graph.profile_agent import ProfileGuess, ProfileValue, guess_profile
+from graph.profile_values import branch_address, theory_format
+
+
+class FakeAgent:
+    """Агент профиля, отдающий заранее заданное."""
+
+    def __init__(self, values: list[tuple[str, str]]) -> None:
+        self._values = values
+
+    async def guess(self, *_args, **_kwargs) -> ProfileGuess:
+        """Возвращает заготовленные поля."""
+        return ProfileGuess(values=[ProfileValue(key=k, value=v) for k, v in self._values])
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("Теорию хочет— очно", "Очно"),
+        ("очно", "Очно"),
+        ("в классе", "Очно"),
+        ("Дома", "Дистанционно"),
+        ("дистанционно", "Дистанционно"),
+        ("онлайн, в приложении", "Дистанционно"),
+        ("комбинированно", "Комбинированно"),
+        ("и так и так", "Комбинированно"),
+    ],
+)
+def test_формат_теории_сводится_к_варианту(spoken: str, expected: str) -> None:
+    """Сказанное приводится к одному из трёх вариантов скрипта."""
+    assert theory_format(spoken) == expected
+
+
+def test_очно_дома_это_очно() -> None:
+    """«Очно дома» — про очные занятия рядом с домом, а не про удалёнку.
+
+    Порядок проверки в этом и состоит: «дома» без «очно» значит
+    дистанционно, а вместе с ним — очно.
+    """
+    assert theory_format("Очно дома") == "Очно"
+    assert theory_format("В теории лучше очно дома отвлекается") == "Очно"
+    assert theory_format("Дома") == "Дистанционно"
+
+
+def test_неузнанный_формат_отбрасывается() -> None:
+    """Ничего не узнали — поле остаётся пустым, а не мусорным."""
+    assert theory_format("не знаю пока") == ""
+    assert theory_format("") == ""
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    ["Улица Восстания, дом 21", "Коломяжский проспект, 15, корпус 2", "Кузнецова 9к2"],
+)
+def test_адрес_филиала_принимается(spoken: str) -> None:
+    """Адрес филиала всегда с номером дома."""
+    assert branch_address(spoken) == spoken
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    ["Нурамыше", "Метро Проспект Космонавотов", "Приморский район", "", "   "],
+)
+def test_ориентир_филиалом_не_считается(spoken: str) -> None:
+    """По ориентиру филиал ещё только подбирают, и он лежит в своём поле."""
+    assert branch_address(spoken) == ""
+
+
+async def test_агент_профиля_чистит_оба_поля() -> None:
+    """Мусор до анкеты не доходит, годное доходит."""
+    guess = await guess_profile(
+        "на Уралмаше, теорию очно",
+        known={},
+        fields=[("branch", "Филиал"), ("theory_format", "Формат"), ("city", "Город")],
+        agent=FakeAgent(
+            [
+                ("branch", "Нурамыше"),
+                ("theory_format", "Теорию хочет— очно"),
+                ("city", "Екатеринбург"),
+            ]
+        ),
+    )
+
+    assert [(v.key, v.value) for v in guess.values] == [
+        ("theory_format", "Очно"),
+        ("city", "Екатеринбург"),
+    ]
