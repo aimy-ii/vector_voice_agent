@@ -349,11 +349,15 @@ def format_city_static(
             freq = item.get("start_frequency") or ""
             piece = f"{code}"
             if duration:
-                piece += f" — {duration}"
+                # Срок называется словом, а не тире: на вопрос «сколько
+                # длится обучение» бот отвечал «уточню при оформлении»,
+                # хотя «B — 3 месяца» стояло у него перед глазами. Строка
+                # читалась как перечень категорий, а не как срок.
+                piece += f": срок обучения {duration}"
             if freq:
-                piece += f", набор: {freq}"
+                piece += f", набор {freq}"
             cat_parts.append(piece)
-        lines.append("Категории: " + "; ".join(cat_parts) + ".")
+        lines.append("Категории и сроки: " + "; ".join(cat_parts) + ".")
     manual = vehicles.get("manual") or []
     auto = vehicles.get("automatic") or []
     if manual or auto:

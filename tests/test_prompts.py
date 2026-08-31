@@ -19,6 +19,7 @@ from graph.facts import (
 )
 from graph.prompts import (
     _HARD_FACT_BAN,
+    _HARD_FACT_BAN_SHORT,
     _INITIATIVE_BLOCK,
     _MISSING_KNOWLEDGE_GUARD,
     _NO_MECHANICS,
@@ -1645,7 +1646,7 @@ def test_жёсткий_запрет_фактов_вне_данных(script):
     assert "из переданных данных как есть" in content
     assert _HARD_FACT_BAN in content
     filler = build_filler_messages(script, messages=[], history_limit=2)
-    assert _HARD_FACT_BAN in filler[0].content
+    assert _HARD_FACT_BAN_SHORT in filler[0].content
 
 
 def test_запрет_служебных_слов_и_обещания_сходить_за_данными(script):
@@ -1672,19 +1673,19 @@ def test_persona_и_naturalness_суммарно_не_больше_7500():
 
 def test_filler_содержит_запрет_фактов_вне_данных(script):
     """Системное сообщение filler содержит запрет называть факты вне данных."""
-    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+    from graph.prompts import _HARD_FACT_BAN_SHORT, build_filler_messages
 
     filler = build_filler_messages(
         script,
         messages=[HumanMessage(content="сколько стоит?")],
         history_limit=2,
     )
-    assert _HARD_FACT_BAN in filler[0].content
+    assert _HARD_FACT_BAN_SHORT in filler[0].content
 
 
 def test_filler_ограничение_длины_и_запреты_оценки_рассуждений(script):
     """Заглушка: лимит длины, без оценки, рассуждений, вопросов и фактов."""
-    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+    from graph.prompts import _HARD_FACT_BAN_SHORT, build_filler_messages
 
     content = build_filler_messages(
         script,
@@ -1706,7 +1707,7 @@ def test_filler_ограничение_длины_и_запреты_оценки
     assert "вопросительного знака" in lowered
     assert "не сообщать фактов" in lowered
     assert "не повторять" in lowered
-    assert _HARD_FACT_BAN in content
+    assert _HARD_FACT_BAN_SHORT in content
     assert "не реплика" in lowered
 
 
@@ -1795,7 +1796,7 @@ def test_spoken_intro_не_попадает_в_добивку_и_ожидани�
 
 def test_waiting_содержит_запрет_фактов_вне_данных(script):
     """Системное сообщение waiting содержит запрет называть факты вне данных."""
-    from graph.prompts import _HARD_FACT_BAN, build_waiting_messages
+    from graph.prompts import _HARD_FACT_BAN_SHORT, build_waiting_messages
 
     waiting = build_waiting_messages(
         script,
@@ -1805,7 +1806,7 @@ def test_waiting_содержит_запрет_фактов_вне_данных(
         step=script.step("price"),
         history_limit=2,
     )
-    assert _HARD_FACT_BAN in waiting[0].content
+    assert _HARD_FACT_BAN_SHORT in waiting[0].content
 
 
 #: Маркеры указания при «не нашлось» — только в dynamic_status_block.
@@ -1875,8 +1876,11 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         step=script.step("price"),
         history_limit=2,
     )[0].content
-    for content in (filler, waiting, full):
-        assert _HARD_FACT_BAN in content
+    assert _HARD_FACT_BAN in full
+    # Заглушки держат паузу и фактов не называют: там короткая версия
+    # запрета, иначе она вдвое длиннее самой сборки.
+    for content in (filler, waiting):
+        assert _HARD_FACT_BAN_SHORT in content
 
 
 #: Заголовки верхнего уровня полной сборки — порядок разделов.
