@@ -58,3 +58,40 @@ def test_диспетчер_отбрасывает_уже_добытое(script_
     assert missing_needs(context, needs_of(step), {}) == [], (
         "шагу «кто учится» справочник не нужен — ждать нечего"
     )
+
+
+def test_вопрос_клиента_держит_ход_на_ожидании() -> None:
+    """Ищут то, о чём человек спросил — ждём, даже если шагу данные не нужны.
+
+    Поиск запускают двое: код по нуждам шага и агент по вопросу клиента.
+    Второй помечает предмет в ``situation_slug``. Без этой ветки бот
+    ответил бы на вопрос, не дождавшись данных, которые уже едут.
+    """
+    context = ConversationContext(dynamic_status=DYN_SEARCHING, situation_slug="медкомиссия")
+
+    asked_by_client = bool((context.situation_slug or "").strip())
+    lead_missing = missing_needs(context, [], {})
+
+    kind = _ladder_prompt_kind(
+        status=DYN_SEARCHING,
+        same_reply=True,
+        stubs_spoken=0,
+        force_full=not (bool(lead_missing) or asked_by_client),
+    )
+    assert kind == "waiting"
+
+
+def test_поиск_по_чужой_теме_ход_не_держит() -> None:
+    """Предмета нет и шагу данные не нужны — это фон по чужой теме."""
+    context = ConversationContext(dynamic_status=DYN_SEARCHING)
+
+    asked_by_client = bool((context.situation_slug or "").strip())
+    lead_missing = missing_needs(context, [], {})
+
+    kind = _ladder_prompt_kind(
+        status=DYN_SEARCHING,
+        same_reply=True,
+        stubs_spoken=0,
+        force_full=not (bool(lead_missing) or asked_by_client),
+    )
+    assert kind == "full"

@@ -1126,12 +1126,19 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     #
     # Чего не хватает шагу, знает ``missing_needs``: он отбрасывает и то,
     # что уже в контексте, и то, на что справочник ответил пусто.
+    #
+    # Поиск запускают двое: код по нуждам шага и агент по вопросу клиента.
+    # Второй помечает предмет в ``situation_slug`` — по нему и видно, что
+    # ищут именно то, о чём человек только что спросил. Тогда ждать надо,
+    # даже если самому шагу справочник не нужен: иначе бот ответит на
+    # вопрос, не дождавшись данных, которые уже едут.
+    asked_by_client = bool((last_ctx.situation_slug or "").strip())
     lead_missing_data = bool(missing_needs(last_ctx, needs_of(lead), profile))
     kind = _ladder_prompt_kind(
         status=status,
         same_reply=same_reply,
         stubs_spoken=0,
-        force_full=not lead_missing_data,
+        force_full=not (lead_missing_data or asked_by_client),
     )
     if kind == "filler":
         reason = "статус в работе"
