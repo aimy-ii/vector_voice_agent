@@ -189,7 +189,10 @@ async def contexter_task_node(state: ContexterTaskState) -> dict[str, Any]:
             known=profile,
             fields=fields,
             rewritable=rewritable,
-            branches=branch_addresses(updated),
+            # Карточки берём свежими из кеша по той же причине, что и
+            # транскрипт: подбор филиалов мог закончиться уже после того,
+            # как воркер взял контекст в работу.
+            branches=branch_addresses(fresh_for_history or updated),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("Воркер: анкета не разобралась: %s", exc)
