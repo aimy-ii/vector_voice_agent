@@ -185,14 +185,22 @@ def _theory_format_names(raw: Any) -> list[str]:
 
 
 def _document_names(raw: Any) -> list[str]:
-    """Достаёт названия документов через запятую."""
+    """Достаёт названия документов вместе с этапом, к которому они нужны.
+
+    Этап в справочнике есть у каждого документа, а в контекст уходили одни
+    названия. Бот видел «права категории В, возраст от 18 лет» рядом с
+    паспортом и СНИЛС и не знал, что первые два нужны только для
+    переобучения с В на С, а не всем подряд.
+    """
     names: list[str] = []
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         for item in raw:
             if isinstance(item, Mapping):
                 name = item.get("name") or item.get("title") or item.get("doc")
                 if name:
-                    names.append(str(name).strip())
+                    stage = str(item.get("stage") or "").strip()
+                    text = str(name).strip()
+                    names.append(f"{text} ({stage})" if stage else text)
             elif item:
                 names.append(str(item).strip())
     elif isinstance(raw, Mapping):
