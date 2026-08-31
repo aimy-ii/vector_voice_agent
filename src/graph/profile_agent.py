@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -30,10 +30,7 @@ _NAME_KEYS = frozenset({"caller_name", "student_name"})
 _PHONE_KEYS = frozenset({"caller_phone"})
 
 #: Поля со своей формой: свободный текст в них хуже пустоты.
-_SHAPED_KEYS: dict[str, Callable[[str], str]] = {
-    "theory_format": theory_format,
-    "branch": branch_address,
-}
+_SHAPED_KEYS: frozenset[str] = frozenset({"theory_format", "branch"})
 
 #: Сколько последних сообщений отдаём агенту как хвост диалога.
 _HISTORY_TAIL = 8
@@ -160,6 +157,7 @@ async def guess_profile(
     history: Sequence[BaseMessage] = (),
     agent: ProfileAgent | None = None,
     rewritable: frozenset[str] = frozenset(),
+    branches: Sequence[str] = (),
 ) -> ProfileGuess:
     """Точка входа агента профиля с валидацией результата.
 
@@ -171,6 +169,8 @@ async def guess_profile(
         agent: подмена для офлайн-тестов.
         rewritable: ключи, которые разрешено уточнять. Пустое множество —
             прежнее поведение: заполненное поле не трогаем.
+        branches: адреса филиалов, которые бот предлагал по ходу разговора.
+            Филиал пишется адресом справочника, а не пересказом клиента.
 
     Returns:
         Угаданные значения: ключи вне перечня и пустые отброшены, заполненные
@@ -203,8 +203,10 @@ async def guess_profile(
             value = given_name(value) or value
         if key in _PHONE_KEYS:
             value = phone_number(value)
-        elif key in _SHAPED_KEYS:
-            value = _SHAPED_KEYS[key](value)
+        elif key == "theory_format":
+            value = theory_format(value)
+        elif key == "branch":
+            value = branch_address(value, branches)
         else:
             value = tidy_value(key, value)
         if not value or value == current:

@@ -715,3 +715,25 @@ def record_empty_needs(
         if need not in known:
             context.empty_needs.append(need)
             known.add(need)
+
+
+def branch_addresses(context: ConversationContext) -> tuple[str, ...]:
+    """Адреса филиалов, которые бот предлагал по ходу разговора.
+
+    Филиал в анкете — значение из справочника, а не пересказ клиента:
+    «Восстание двадцать один» и «улица Восстания, дом 21» должны
+    записываться одинаково. Сверять есть с чем только пока карточки
+    подобраны — до подбора кортеж пуст.
+
+    Args:
+        context: контекст разговора.
+
+    Returns:
+        Адреса подобранных филиалов в порядке близости.
+    """
+    out: list[str] = []
+    for card in context.branch_cards or []:
+        address = str((card or {}).get("address") or "").strip()
+        if address and address not in out:
+            out.append(address)
+    return tuple(out)

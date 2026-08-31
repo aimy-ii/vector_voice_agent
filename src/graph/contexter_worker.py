@@ -24,7 +24,13 @@ from typing import Any, TypedDict
 from langgraph.graph import StateGraph
 
 from core.config import settings
-from graph.context import DYN_MISSING, DYN_READY, DYN_SEARCHING, ConversationContext
+from graph.context import (
+    DYN_MISSING,
+    DYN_READY,
+    DYN_SEARCHING,
+    ConversationContext,
+    branch_addresses,
+)
 from graph.context_store import (
     CONTEXT_FIELDS_DYNAMIC,
     CONTEXT_FIELDS_STATIC,
@@ -183,6 +189,7 @@ async def contexter_task_node(state: ContexterTaskState) -> dict[str, Any]:
             known=profile,
             fields=fields,
             rewritable=rewritable,
+            branches=branch_addresses(updated),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("Воркер: анкета не разобралась: %s", exc)
