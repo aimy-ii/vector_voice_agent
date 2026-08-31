@@ -57,7 +57,7 @@ from graph.prompts import (
 #: Правило про отбор под собеседника добавлено по разбору живого звонка:
 #: бот сказал «для мужчин действует скидка студентам и именинникам» —
 #: проговорил вслух признак, по которому отбирал категории.
-_SPEECH_RULES_COUNT = 33
+_SPEECH_RULES_COUNT = 34
 
 #: Начала правил про ведение разговора — подряд после «одна тема».
 _LEAD_SPEECH_RULE_STARTS: tuple[str, ...] = (
@@ -3160,7 +3160,7 @@ def test_speech_rules_выросли_старые_на_месте():
     эффектом правки соседнего пункта.
     """
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
-    assert _SPEECH_RULES_COUNT == 33
+    assert _SPEECH_RULES_COUNT == 34
     joined = "\n".join(SPEECH_RULES)
     assert "К клиенту обращение только на «Вы»" in joined
     assert "Одна тема за реплику" in joined

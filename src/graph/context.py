@@ -184,6 +184,10 @@ def _theory_format_names(raw: Any) -> list[str]:
     return [n for n in names if n]
 
 
+#: По этому слову возрастные условия отделяются от прочих документов.
+AGE_MARK = "возраст"
+
+
 def _document_names(raw: Any) -> list[str]:
     """Достаёт названия документов вместе с этапом, к которому они нужны.
 
@@ -193,6 +197,11 @@ def _document_names(raw: Any) -> list[str]:
     переобучения с В на С, а не всем подряд.
     """
     names: list[str] = []
+    # Справочник отдаёт документы списком, а в файлах города они лежат
+    # словарём с ключом items. Разворачиваем, иначе в контекст уйдёт
+    # слово «items» вместо перечня.
+    if isinstance(raw, Mapping) and isinstance(raw.get("items"), Sequence):
+        raw = raw["items"]
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         for item in raw:
             if isinstance(item, Mapping):
@@ -360,8 +369,17 @@ def format_city_static(
     if theory_names:
         lines.append("Форматы теории: " + ", ".join(theory_names) + ".")
     doc_names = _document_names(city_meta.get("documents"))
-    if doc_names:
-        lines.append("Документы: " + ", ".join(doc_names) + ".")
+    ages = [name for name in doc_names if AGE_MARK in name.lower()]
+    papers = [name for name in doc_names if AGE_MARK not in name.lower()]
+    if papers:
+        lines.append("Документы: " + ", ".join(papers) + ".")
+    if ages:
+        # Возраст стоит отдельно от документов. В общем перечне рядом
+        # оказывались «возраст от 18 лет (для переобучения с В на С)» и
+        # «возраст от 16 лет (для начала обучения)», и бот выбирал между
+        # ними наугад: на «сыну семнадцать» ответил «учиться можно с
+        # семнадцати», подстроив цифру под собеседника.
+        lines.append("Возраст: " + "; ".join(ages) + ".")
     messengers = city_meta.get("messengers")
     row = _line("Мессенджеры", messengers)
     if row:
