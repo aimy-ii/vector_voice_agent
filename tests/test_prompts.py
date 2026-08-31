@@ -2586,8 +2586,11 @@ def test_dynamic_status_block_поиск_и_не_нашлось():
     assert searching
     lowered = searching.lower()
     assert "готовятся" in lowered
-    assert "цифры" in lowered
-    assert "уточняем" in lowered
+    # Запрет привязан к тому, чего в разделах данных нет. Статус один на
+    # весь контекст: на прогоне цена лежала в статике, а бот отвечал
+    # «стоимость сейчас уточняю» — распространял запрет на всё подряд.
+    assert "чего в них нет" in lowered
+    assert "называется как обычно" in lowered
     assert dynamic_status_block(status=DYN_MISSING) == _MISSING_STATUS_TEXT
 
 
