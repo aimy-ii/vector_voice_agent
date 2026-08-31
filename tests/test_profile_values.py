@@ -17,7 +17,6 @@ from graph.profile_agent import ProfileGuess, ProfileValue, guess_profile
 from graph.profile_values import branch_address
 from script.field_choices import load_field_choices, match_choice
 
-
 #: Варианты формата теории так, как их задаёт файл данных скрипта.
 THEORY = load_field_choices()["theory_format"]
 
