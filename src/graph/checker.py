@@ -573,6 +573,7 @@ async def run_checker(
     turn: int,
     client: CheckerClient | None = None,
     attempt_limit: int | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> tuple[ScriptProgress, list[tuple[str, str]]]:
     """Закрывает шаги по вердикту судьи.
 
@@ -586,6 +587,8 @@ async def run_checker(
         profile: профиль для доступности шагов.
         turn: номер хода.
         client: клиент модели; пусто — боевой.
+        context: контекст разговора. Нужен шагу города: пока слага города
+            нет, шаг держится открытым.
         attempt_limit: устаревший порог; игнорируется.
 
     Returns:
@@ -598,6 +601,7 @@ async def run_checker(
         "messages": list(messages),
         "profile": profile,
         "turn": turn,
+        "conversation_context": dict(context or {}),
     }
     updated, closures, _asks = await check_pass(
         state,

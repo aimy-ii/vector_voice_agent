@@ -53,9 +53,16 @@ def _progress() -> ScriptProgress:
 
 
 def test_признак_нераспознанного_города() -> None:
-    """Слага нет и резолвер сказал «район» — города у разговора нет."""
+    """Города нет, пока нет слага — по какой причине, неважно.
+
+    Сначала признак требовал ещё и подсказки про район. Этого оказалось
+    мало: на прогоне распознавание переврало «Питер» в «Итер», клиент
+    назвал район, резолвер не понял вовсе и подсказку не поставил. Шаг
+    закрылся, справочник не тронули, и бот весь звонок отвечал
+    «уточняется».
+    """
     assert city_unresolved(ConversationContext(dynamic_text=DISTRICT_HINT))
-    assert not city_unresolved(ConversationContext())
+    assert city_unresolved(ConversationContext()), "пустой контекст — города нет"
     assert not city_unresolved(
         ConversationContext(city_slug="sankt-peterburg", dynamic_text=DISTRICT_HINT)
     ), "город определён — подсказка из прошлого хода роли не играет"

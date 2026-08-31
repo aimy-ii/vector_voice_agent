@@ -147,6 +147,9 @@ def _state(
         "script_version": script.version,
         "messages": [],
         "profile": {"city": "Пермь"},
+        # Слаг города в состоянии: без него шаг города держится открытым,
+        # и предмет этих тестов — разбор реплики — не проверился бы.
+        "conversation_context": {"city_slug": "perm", "city_name": "Пермь"},
         "turn": 4,
         "turn_kind": "client",
         "partial_reply": partial,
@@ -372,7 +375,16 @@ async def test_шаг_добычи_репликой_бота_не_закрыва
 
 async def test_разбор_реплики_человека_в_сценарии_продаж_не_изменился(script_v4, _offline_context):
     """Человеку по-прежнему отдают все шаги в работе, включая шаги добычи."""
-    await _offline_context.save("local", ConversationContext(transcript=_sales_transcript()))
+    # Город разобран: без слага шаг города держится открытым, и предмет
+    # этого теста — разбор реплики — не проверился бы.
+    await _offline_context.save(
+        "local",
+        ConversationContext(
+            transcript=_sales_transcript(),
+            city_slug="perm",
+            city_name="Пермь",
+        ),
+    )
     progress = _sales_progress()
     partial = "Учиться буду в Перми"
     client = SpeakerChecker({"client": {"city"}})
