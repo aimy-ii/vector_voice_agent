@@ -5,19 +5,23 @@
 получалось складно, но неуправляемо — заказчик не мог задать, чем именно
 отвечать, и от звонка к звонку доводы менялись.
 
-Перечень лежит рядом со скриптом, в ``objections_ru.json``, и правится без
-кода. Подбор здесь детерминированный: совпадение по словам-приметам, без
-модели. Модель получает уже выбранные доводы и говорит их своими словами —
-решение о том, что сказать, принимает файл, а не она.
+Перечень правится без кода: он лежит в админке справочника, а рядом со
+скриптом остаётся файл ``objections_ru.json`` — запасной вариант на случай,
+когда админка недоступна.
+
+Подбор здесь детерминированный: совпадение по словам-приметам, без модели.
+Модель получает уже выбранные доводы и говорит их своими словами — решение
+о том, что сказать, принимает перечень, а не она.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from script.documents import load_document
 
 #: Файл с перечнем возражений рядом с данными скрипта.
 DEFAULT_FILE = Path(__file__).resolve().parent / "data" / "objections_ru.json"
@@ -68,9 +72,9 @@ def load_objections(path: str | Path | None = None) -> tuple[Objection, ...]:
         работал, из общего промпта.
     """
     source = Path(path or DEFAULT_FILE)
-    if not source.exists():
+    raw = load_document("objections", source)
+    if not raw:
         return ()
-    raw: Mapping[str, Any] = json.loads(source.read_text(encoding="utf-8"))
     items: Sequence[Mapping[str, Any]] = raw.get("objections") or ()
     out: list[Objection] = []
     for item in items:
