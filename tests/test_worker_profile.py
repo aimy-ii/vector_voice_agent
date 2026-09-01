@@ -241,3 +241,24 @@ async def test_проход_пишет_только_статус(
     assert saved_fields
     for fields in saved_fields:
         assert fields == frozenset({"status"})
+
+
+def test_адреса_филиалов_берутся_из_карточек() -> None:
+    """Сверять названный филиал есть с чем только пока карточки подобраны."""
+    from graph.context import ConversationContext, branch_addresses
+
+    empty = ConversationContext()
+    assert branch_addresses(empty) == ()
+
+    picked = ConversationContext(
+        branch_cards=[
+            {"slug": "a", "address": "улица Восстания, дом 21"},
+            {"slug": "b", "address": "улица Кузнецова, дом 9, корпус 2"},
+            {"slug": "c", "address": ""},
+            {"slug": "d", "address": "улица Восстания, дом 21"},
+        ]
+    )
+    assert branch_addresses(picked) == (
+        "улица Восстания, дом 21",
+        "улица Кузнецова, дом 9, корпус 2",
+    )

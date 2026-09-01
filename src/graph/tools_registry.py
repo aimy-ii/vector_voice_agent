@@ -12,11 +12,22 @@ import json
 import logging
 from typing import Any, Mapping, Protocol, Sequence
 
-from graph.context import ConversationContext, format_branch_static, merge_static
+from graph.context import (
+    DISTRICT_HINT,
+    ConversationContext,
+    format_branch_static,
+    merge_static,
+)
 from graph.nearby import apply_result, lookup_nearby, normalize_place, should_refresh
 from graph.resolvers import CityResolver, resolve_city
 from kb.client import vector_kb
 from script.build import CompiledScript
+from script.objections import (
+    Objection,
+    format_objection,
+    load_objections,
+    match_objection,
+)
 from script.price import price_line, price_line_from_kb
 
 log = logging.getLogger(__name__)
@@ -174,10 +185,7 @@ class CityTool:
         resolution = await resolve_city(text, cities, resolver=self.resolver)
         if resolution.is_district:
             log.info("CityTool: резолвер вернул район, query=%r", preview)
-            return (
-                "Клиент назвал район внутри города, а не город сети. "
-                "Уточни город обучения, район городом не записывай."
-            )
+            return DISTRICT_HINT
         if not resolution.slug or not resolution.name:
             log.info(
                 "CityTool: резолвер не дал слаг или название, query=%r",
@@ -553,10 +561,60 @@ class NearestBranchesTool:
         )
 
 
+class ObjectionsTool:
+    """Доводы под возражение клиента из перечня заказчика."""
+
+    name = "objections"
+    description = (
+        "Чем отвечать на возражение клиента: дорого, нет времени, надо подумать, "
+        "почему предоплата, далеко ехать. В query передай реплику клиента дословно."
+    )
+
+    def __init__(self, objections: Sequence[Objection] | None = None) -> None:
+        """Готовит инструмент с перечнем возражений.
+
+        Args:
+            objections: перечень; ``None`` — прочитать файл рядом со скриптом.
+        """
+        self._objections = tuple(objections) if objections is not None else load_objections()
+
+    async def run(
+        self,
+        query: str,
+        context: ConversationContext,
+        *,
+        slugs: Sequence[str] = (),
+    ) -> str:
+        """Подбирает возражение по реплике и отдаёт доводы к нему.
+
+        Подбор детерминированный, по словам-приметам: решение о том, чем
+        отвечать, принимает файл заказчика, а не модель.
+
+        Args:
+            query: реплика клиента дословно.
+            context: контекст разговора; не используется.
+            slugs: не используется; оставлен для единого интерфейса.
+
+        Returns:
+            Блок с доводами или пустая строка, если возражение не узнано.
+        """
+        _ = context, slugs
+        found = match_objection(query, self._objections)
+        if found is None:
+            return ""
+        log.info(
+            "[objections] узнано «%s» по приметам: %s",
+            found.name,
+            ", ".join(found.hits),
+        )
+        return format_objection(found)
+
+
 def build_context_tools(script: CompiledScript) -> list[ContextTool]:
     """Собирает реестр инструментов контекстера.
 
-    Город, филиалы, FAQ, детали филиала, ближайшие филиалы и факты шага.
+    Город, филиалы, FAQ, детали филиала, ближайшие филиалы, факты шага и
+    доводы под возражение клиента.
 
     Args:
         script: скомпилированный скрипт (цена и ``FactsTool``).
@@ -571,4 +629,5 @@ def build_context_tools(script: CompiledScript) -> list[ContextTool]:
         BranchDetailsTool(),
         NearestBranchesTool(),
         FactsTool(script),
+        ObjectionsTool(),
     ]

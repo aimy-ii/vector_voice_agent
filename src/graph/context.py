@@ -184,15 +184,32 @@ def _theory_format_names(raw: Any) -> list[str]:
     return [n for n in names if n]
 
 
+#: По этому слову возрастные условия отделяются от прочих документов.
+AGE_MARK = "возраст"
+
+
 def _document_names(raw: Any) -> list[str]:
-    """Достаёт названия документов через запятую."""
+    """Достаёт названия документов вместе с этапом, к которому они нужны.
+
+    Этап в справочнике есть у каждого документа, а в контекст уходили одни
+    названия. Бот видел «права категории В, возраст от 18 лет» рядом с
+    паспортом и СНИЛС и не знал, что первые два нужны только для
+    переобучения с В на С, а не всем подряд.
+    """
     names: list[str] = []
+    # Справочник отдаёт документы списком, а в файлах города они лежат
+    # словарём с ключом items. Разворачиваем, иначе в контекст уйдёт
+    # слово «items» вместо перечня.
+    if isinstance(raw, Mapping) and isinstance(raw.get("items"), Sequence):
+        raw = raw["items"]
     if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
         for item in raw:
             if isinstance(item, Mapping):
                 name = item.get("name") or item.get("title") or item.get("doc")
                 if name:
-                    names.append(str(name).strip())
+                    stage = str(item.get("stage") or "").strip()
+                    text = str(name).strip()
+                    names.append(f"{text} ({stage})" if stage else text)
             elif item:
                 names.append(str(item).strip())
     elif isinstance(raw, Mapping):
@@ -332,11 +349,15 @@ def format_city_static(
             freq = item.get("start_frequency") or ""
             piece = f"{code}"
             if duration:
-                piece += f" — {duration}"
+                # Срок называется словом, а не тире: на вопрос «сколько
+                # длится обучение» бот отвечал «уточню при оформлении»,
+                # хотя «B — 3 месяца» стояло у него перед глазами. Строка
+                # читалась как перечень категорий, а не как срок.
+                piece += f": срок обучения {duration}"
             if freq:
-                piece += f", набор: {freq}"
+                piece += f", набор {freq}"
             cat_parts.append(piece)
-        lines.append("Категории: " + "; ".join(cat_parts) + ".")
+        lines.append("Категории и сроки: " + "; ".join(cat_parts) + ".")
     manual = vehicles.get("manual") or []
     auto = vehicles.get("automatic") or []
     if manual or auto:
@@ -352,8 +373,17 @@ def format_city_static(
     if theory_names:
         lines.append("Форматы теории: " + ", ".join(theory_names) + ".")
     doc_names = _document_names(city_meta.get("documents"))
-    if doc_names:
-        lines.append("Документы: " + ", ".join(doc_names) + ".")
+    ages = [name for name in doc_names if AGE_MARK in name.lower()]
+    papers = [name for name in doc_names if AGE_MARK not in name.lower()]
+    if papers:
+        lines.append("Документы: " + ", ".join(papers) + ".")
+    if ages:
+        # Возраст стоит отдельно от документов. В общем перечне рядом
+        # оказывались «возраст от 18 лет (для переобучения с В на С)» и
+        # «возраст от 16 лет (для начала обучения)», и бот выбирал между
+        # ними наугад: на «сыну семнадцать» ответил «учиться можно с
+        # семнадцати», подстроив цифру под собеседника.
+        lines.append("Возраст: " + "; ".join(ages) + ".")
     messengers = city_meta.get("messengers")
     row = _line("Мессенджеры", messengers)
     if row:
@@ -487,6 +517,42 @@ class ContextState(BaseModel):
     def to_context(self) -> ConversationContext:
         """Преобразует в рабочий объект контекста."""
         return ConversationContext.model_validate(self.model_dump())
+
+
+#: Подсказка боту, когда вместо города назван район внутри него.
+#:
+#: Одна на всех: её кладёт в динамику инструмент города и по ней же чекер
+#: понимает, что города у разговора нет. Сверять по тексту наугад нельзя —
+#: правка формулировки молча сломала бы проверку.
+DISTRICT_HINT = (
+    "Клиент назвал район внутри города, а не город сети. "
+    "Уточни город обучения, район городом не записывай."
+)
+
+
+def city_unresolved(context: ConversationContext) -> bool:
+    """Город разговора так и не определён.
+
+    Признак структурный, а не по пустому полю анкеты: заполнитель работает
+    в фоне и может отставать на ход, а слаг города ставит резолвер в том же
+    проходе, что и разбор реплики.
+
+    Сначала признак требовал ещё и подсказки про район. Этого оказалось
+    мало: на прогоне распознавание переврало «Питер» в «Итер», клиент
+    назвал район, резолвер не понял вовсе и подсказку не поставил. Шаг
+    закрылся, города не стало, справочник не тронули — статика осталась
+    пустой, и бот весь звонок отвечал «уточняется».
+
+    Города нет — значит нет ни цены, ни сроков, ни филиалов: без слага код
+    в справочник не ходит. Уточнить город надо в любом случае.
+
+    Args:
+        context: контекст разговора.
+
+    Returns:
+        True, если слага города нет.
+    """
+    return not (context.city_slug or "").strip()
 
 
 def context_from_state(data: Mapping[str, Any] | None) -> ConversationContext:
@@ -671,3 +737,44 @@ def record_empty_needs(
         if need not in known:
             context.empty_needs.append(need)
             known.add(need)
+
+
+def branch_addresses(context: ConversationContext) -> tuple[str, ...]:
+    """Адреса филиалов, которые бот предлагал по ходу разговора.
+
+    Филиал в анкете — значение из справочника, а не пересказ клиента:
+    «Восстание двадцать один» и «улица Восстания, дом 21» должны
+    записываться одинаково. Сверять есть с чем только пока карточки
+    подобраны — до подбора кортеж пуст.
+
+    Args:
+        context: контекст разговора.
+
+    Returns:
+        Адреса подобранных филиалов в порядке близости.
+    """
+    out: list[str] = []
+    for card in context.branch_cards or []:
+        address = str((card or {}).get("address") or "").strip()
+        if address and address not in out:
+            out.append(address)
+    return tuple(out)
+
+
+def branch_picked(context: ConversationContext) -> bool:
+    """Договорились ли о конкретном филиале.
+
+    Скрипт закрывает шаг филиала, когда человек согласился на конкретный
+    офис. Судья видит только диалог: на «сейчас подберу ближайший филиал»
+    он считает вопрос отвеченным, хотя адрес ещё не прозвучал. Признак
+    берём структурный — по тому, что подбор действительно дал филиалы.
+
+    Args:
+        context: контекст разговора.
+
+    Returns:
+        ``True``, если филиал зафиксирован или есть из чего выбирать.
+    """
+    if (context.branch_slug or "").strip():
+        return True
+    return bool(context.branch_cards)

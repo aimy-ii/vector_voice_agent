@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import logging
 import re
-import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -72,6 +71,7 @@ from graph.state import CallContext, CallState, new_state_defaults
 from graph.summary import build_summary
 from graph.transcript import (
     ROLE_AGENT,
+    ROLE_CLIENT,
     TranscriptEntry,
     append_agent,
     append_client,
@@ -494,6 +494,65 @@ def call_summary(state: CallState) -> dict[str, Any]:
     )
 
 
+def client_text_for_turn(
+    *,
+    snapshot: Sequence[Any],
+    context: ConversationContext,
+    entries: Sequence[TranscriptEntry],
+) -> str:
+    """Что человек сказал этим ходом — со страховкой на пустой снимок.
+
+    Обычно фраза берётся из снимка бота. Но снимок иногда приходит без
+    неё: бот заводит ход по концу реплики, а сообщение в его историю
+    дописывается своим чередом, и на быстром ходе гонка проигрывается.
+    Мозг в этом случае записывал в историю пустоту — молча, без единой
+    ошибки в логах, — и фраза пропадала из разговора навсегда.
+
+    Живой пример с разбора: «Дороговато. В соседней автошколе дешевле.
+    Если бы была какая-то скидка, ещё бы можно было подумать.»
+    Распознавание её услышало, лайв-канал получил, бот ответил — а в
+    истории мозга её нет, и дальше он вёл разговор с дырой на месте
+    возражения.
+
+    Страховка берёт ту же фразу из контекста: лайв-канал кладёт её в
+    ``dynamic_reply`` раньше, чем приходит основной ход, и это тот же
+    самый текст того же самого звонка. Повтор исключён сравнением с
+    последней репликой человека в истории.
+
+    Args:
+        snapshot: снимок истории от бота.
+        context: контекст разговора из кеша.
+        entries: история звонка на этот момент.
+
+    Returns:
+        Фраза человека; пустая строка, если её нет нигде.
+    """
+    text = last_user_text(snapshot)
+    if text.strip():
+        return text
+
+    rescued = str(context.dynamic_reply or "").strip()
+    if not rescued:
+        log.warning("[transcript] снимок без реплики человека, взять её неоткуда")
+        return ""
+
+    # Сравниваем со всеми репликами человека, а не только с последней.
+    # ``dynamic_reply`` живёт в кеше и после своего хода: сверив лишь
+    # последнюю запись, можно вклинить позавчерашнюю фразу после более
+    # новой — и разговор поедет назад. Потерять законный повтор («да»,
+    # «ага») здесь дешевле, чем переписать историю задним числом.
+    said = {entry.text.strip() for entry in entries if entry.role == ROLE_CLIENT}
+    if rescued in said:
+        log.info("[transcript] снимок без реплики человека, в истории она уже есть")
+        return ""
+
+    log.warning(
+        "[transcript] снимок без реплики человека, восстановлена из лайв-канала: %r",
+        rescued[:80],
+    )
+    return rescued
+
+
 async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str, Any]:
     """Принимает ход: чистит историю, поднимает скрипт, сверяет произнесённое.
 
@@ -535,7 +594,11 @@ async def ingest_node(state: CallState, runtime: Runtime[CallContext]) -> dict[s
             log.info("[transcript] последняя реплика бота приведена к услышанному обрыву")
         entries = synced
     if not _no_client_reply(_turn_kind()):
-        entries = append_client(entries, turn=turn_now, text=last_user_text(snapshot))
+        entries = append_client(
+            entries,
+            turn=turn_now,
+            text=client_text_for_turn(snapshot=snapshot, context=ctx_in, entries=entries),
+        )
     if entries != ctx_in.transcript:
         await _save_context(
             ctx_in.model_copy(update={"transcript": entries}),
@@ -645,8 +708,6 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     # сам, темы разговора смена не касается.
     prev_step_id = state.get("current_step")
     shifted_from: str | None = None
-    lead_repeat = int(state.get("lead_repeat") or 0)
-    lead_repeat = lead_repeat + 1 if step is not None and step.id == prev_step_id else 1
     if (
         turn_kind != "silence"
         and step is not None
@@ -656,7 +717,25 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
     ):
         shifted_from = step.id
         step = head[1]
+
+    # Счётчик заходов ведётся по шагу, а не по серии подряд идущих ходов.
+    # Сдвиг уводит ведущего ровно на один ход, а следующим ходом шаг снова
+    # первый в шапке — и так по кругу: theory_format -> included ->
+    # theory_format -> practice -> theory_format. Серия при таком качании
+    # всегда равна единице, порог не берётся никогда, и режим «эту тему уже
+    # поднимали» не включается: на разборе живого звонка бот четырежды
+    # переспросил про формат теории разными словами. По счёту заходов
+    # второй приход на шаг виден независимо от того, что было между.
+    #
+    # Счётчик живёт в прогрессе рядом с ``attempts``: закрывает шаги чекер,
+    # и без общего хранилища он о заходах не узнает.
+    lead_counts = dict(progress.lead_counts or state.get("lead_counts") or {})
+    if step is not None:
+        lead_counts[step.id] = int(lead_counts.get(step.id, 0)) + 1
+        lead_repeat = lead_counts[step.id]
+    else:
         lead_repeat = 1
+    progress.lead_counts = lead_counts
 
     # Новый шаг хода — только ведущий шапки, если взят впервые.
     new_step_id: str | None = None
@@ -710,6 +789,7 @@ async def plan_node(state: CallState, runtime: Runtime[CallContext]) -> dict[str
         "profile": profile,
         "current_step": step.id if step is not None else None,
         "lead_repeat": lead_repeat,
+        "lead_counts": lead_counts,
         "next_step": nxt.id if nxt is not None else None,
         "head_steps": [s.id for s in head],
         "head_new_step": new_step_id if not no_client_reply else None,
@@ -723,15 +803,30 @@ def _turn_mode(*, state: CallState, turn_kind: str) -> TurnMode:
         state: состояние звонка; читается счётчик ``lead_repeat``.
         turn_kind: вид хода из состояния.
 
+    Режим повтора собран под случай «человек не дал реплики»: правила в
+    нём требуют не уходить с темы и обязательно вернуть ход собеседнику.
+    На ходе, где клиент говорит, но говорит о своём — задаёт встречный
+    вопрос про цену или скидки, — это же требование гонит бота
+    переспрашивать одно и то же. На разборе живого звонка так вышло пять
+    переформулировок вопроса про формат теории подряд. Поэтому режим
+    берётся только на ходах без реплики клиента: молчание, добивка,
+    продолжение.
+
+    На ходе с репликой клиента повторный заход даёт ``revisit``: там
+    подменяется только запрет повтора — «свой вопрос по этой теме ты уже
+    задавал, задать его снова другими словами — ошибка». Остальные правила
+    штатные, и требования держаться темы в них нет.
+
     Returns:
-        ``repeat`` — ведущий шаг повторяется не меньше порога; ``pull`` —
-        ход вытаскивания; ``normal`` — штатный ход.
+        ``repeat`` — ведущий шаг повторяется не меньше порога и реплики
+        клиента на этом ходе не было; ``revisit`` — то же, но клиент
+        говорил; ``pull`` — ход вытаскивания; ``normal`` — штатный ход.
     """
     if (
         settings.lead_repeat_threshold > 0
         and int(state.get("lead_repeat") or 0) >= settings.lead_repeat_threshold
     ):
-        return "repeat"
+        return "repeat" if _no_client_reply(turn_kind) else "revisit"
     if turn_kind == "pull":
         return "pull"
     return "normal"
@@ -872,7 +967,12 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
     digest = reply_hash(user_text) if user_text else ""
     lead = _lead_of(head, _current_step(state))
     lead_missing = missing_needs(ctx, needs_of(lead), profile) if lead else []
-    use_ladder = bool(lead_missing) and not is_continuation and not is_silence
+    # Заглушка — ответ на реплику человека, и только на неё. Ход, который
+    # бот завёл сам (продолжение, молчание, вытаскивание), обязан говорить
+    # по делу с тем, что есть: иначе выходит «Поняла, Приморский район
+    # рядом с домом» → пауза → та же фраза снова, и так до конца звонка.
+    # Заглушку слышат один раз, продолжение — уже содержательное.
+    use_ladder = bool(lead_missing) and not _no_client_reply(turn_kind)
 
     if is_silence:
         # Молчание собирается полным промптом, как обычный ход: короткая
@@ -973,10 +1073,19 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
                 # лестница окликов на стороне бота.
                 stage("respond", "модель не ответила, реплики человека не было — молчим", "done")
             else:
+                # Человек сказал, а модель не успела. Просить повторить
+                # незачем — его услышали, это агент не поспел. Говорим
+                # «секундочку» и берём следующий ход сами: человеку нужен
+                # ответ, а не просьба повторить. От бесконечной цепочки
+                # оберегает предел продолжений на стороне бота.
+                nonlocal expect_continuation
+                expect_continuation = True
                 say(script.params.fallback)
                 spoken.append(script.params.fallback)
                 streamed.append(script.params.fallback)
-                stage("respond", "модель не ответила, отдана аварийная реплика", "done")
+                stage(
+                    "respond", "модель не ответила, сказано «секундочку», ход продолжится", "done"
+                )
             last_result = TurnResult(reply="".join(streamed))
             return "".join(streamed)
 
@@ -1000,56 +1109,58 @@ async def respond_node(state: CallState, runtime: Runtime[CallContext]) -> dict[
             out["last_error"] = last_error
         return out
 
-    # Лестница: filler / waiting / full, не больше двух заглушек за ход.
-    # Одна и та же сборка дважды подряд не выполняется: статус без смены → full.
-    deadline = time.monotonic() + float(settings.ladder_deadline_seconds)
-    stubs_spoken = 0
-    step_index = 0
-    prev_kind: str | None = None
-    while True:
-        last_ctx = await _load_context(state)
-        if step_index > 0 and digest and last_ctx.dynamic_reply_hash != digest:
-            stage("respond", "хеш реплики сменился, лестница прервана", "done")
-            break
+    # Одна ступень за ход, и ход на этом кончается.
+    #
+    # Раньше ступени шли подряд внутри одного хода и склеивались пробелом:
+    # в трубке звучало «Сейчас уточню, как проходят занятия. Одну минуту.
+    # Поняла. По коробке уже определились?» — три отдельные мысли одним
+    # вдохом. Продолжение берёт на себя бот: после реплики без вопроса он
+    # выдерживает короткую паузу (VOICE_BOT_SILENCE_PAUSE_STATEMENT) и сам
+    # заводит ход вытаскивания, к которому фон уже успевает с данными.
+    #
+    # Поэтому заглушка обязана быть без вопросительного знака: реплику с
+    # вопросом бот считает заданным вопросом, ждёт ответа четыре секунды и
+    # уходит на «Алло, меня слышно?» вместо продолжения. Запрет живёт в
+    # сборке промпта (``build_filler_messages`` / ``build_waiting_messages``):
+    # реплика звучит по мере генерации, и вырезать знак задним числом уже
+    # поздно — он прозвучит.
+    last_ctx = await _load_context(state)
+    status = last_ctx.dynamic_status or DYN_NONE
+    same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
+    # Ждать имеет смысл только по тем данным, которых не хватает этому
+    # шагу. Статус динамики один на весь контекст: пока фон подбирает
+    # филиалы, он стоит «в поиске» независимо от того, о чём сейчас
+    # разговор. По одному ему бот тянул время на шаге «кто учится» —
+    # «стоимость сейчас уточняю» — при том, что цена уже лежала в данных.
+    #
+    # Чего не хватает шагу, знает ``missing_needs``: он отбрасывает и то,
+    # что уже в контексте, и то, на что справочник ответил пусто.
+    #
+    # Поиск запускают двое: код по нуждам шага и агент по вопросу клиента.
+    # Второй помечает предмет в ``situation_slug`` — по нему и видно, что
+    # ищут именно то, о чём человек только что спросил. Тогда ждать надо,
+    # даже если самому шагу справочник не нужен: иначе бот ответит на
+    # вопрос, не дождавшись данных, которые уже едут.
+    asked_by_client = bool((last_ctx.situation_slug or "").strip())
+    lead_missing_data = bool(missing_needs(last_ctx, needs_of(lead), profile))
+    kind = _ladder_prompt_kind(
+        status=status,
+        same_reply=same_reply,
+        stubs_spoken=0,
+        force_full=not (lead_missing_data or asked_by_client),
+    )
+    if kind == "filler":
+        reason = "статус в работе"
+    elif kind == "waiting":
+        reason = "статус поиска"
+    else:
+        reason = f"статус {status}"
 
-        force_full = time.monotonic() >= deadline
-        status = last_ctx.dynamic_status or DYN_NONE
-        same_reply = (not digest) or last_ctx.dynamic_reply_hash == digest
-        if force_full:
-            kind = "full"
-            reason = "дедлайн лестницы"
-        else:
-            kind = _ladder_prompt_kind(
-                status=status,
-                same_reply=same_reply,
-                stubs_spoken=stubs_spoken,
-                force_full=False,
-            )
-            if prev_kind is not None and kind == prev_kind and kind != "full":
-                kind = "full"
-                reason = "сборка не сменилась"
-            elif stubs_spoken >= 2:
-                reason = "лимит заглушек"
-            elif kind == "filler":
-                reason = "статус в работе"
-            elif kind == "waiting":
-                reason = "статус поиска"
-            else:
-                reason = f"статус {status}"
-
-        # Между ступенями — разделитель, чтобы commit не склеил фразы.
-        if step_index > 0 and spoken:
-            spoken.append(" ")
-            say(" ")
-
-        text = await _generate(kind, reason, step=step_index + 1)
-        if text:
-            local_history.append(AIMessage(content=text))
-        step_index += 1
-        if kind == "full":
-            break
-        prev_kind = kind
-        stubs_spoken += 1
+    text = await _generate(kind, reason, step=1)
+    if text:
+        local_history.append(AIMessage(content=text))
+    if kind != "full":
+        stage("respond", "заглушка произнесена, ход окончен, продолжение за ботом", "done")
 
     return {
         "turn_result": last_result.model_dump(),

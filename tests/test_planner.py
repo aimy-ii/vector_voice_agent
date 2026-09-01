@@ -254,19 +254,25 @@ def test_exhausted_только_по_порогу_из_аргумента(script
     assert exhausted(step, {"city": 3}, limit=3) is True
 
 
-def test_порог_попыток_по_умолчанию_2():
-    """Закрытие по порогу из настроек; дефолт — 2 попытки задать шаг."""
+def test_порог_зависания_шага_из_настроек():
+    """Закрытие зависшего шага по порогу ходов в шапке.
+
+    Имя настройки новое: прежний ``step_attempt_limit`` со значением 2 в
+    решениях не участвовал вовсе, и подставить его сюда нельзя — счётчик
+    растёт у всех шагов шапки, а не только у ведущего, и половина сценария
+    закрылась бы на втором ходу.
+    """
     from core.config import Settings
 
-    assert Settings.model_fields["step_attempt_limit"].default == 2
-    step_limit = Settings().step_attempt_limit
-    assert step_limit == 2 or isinstance(step_limit, int)
+    assert "step_attempt_limit" not in Settings.model_fields
+    default = Settings.model_fields["step_head_limit"].default
+    assert default >= 5
+
     from script.models import Step
     from script.planner import exhausted
 
     # Синтетический шаг: закрытие ровно на пороге из настроек.
     fake = Step(id="x", kind="question", priority=1, goal="g", text="t")
-    default = Settings.model_fields["step_attempt_limit"].default
     assert exhausted(fake, {"x": default - 1}, limit=default) is False
     assert exhausted(fake, {"x": default}, limit=default) is True
 

@@ -165,7 +165,7 @@ def test_waiting_с_контекстом_короче_полного(script):
 async def test_генератор_без_ready_hash_берёт_waiting(
     spoken, store, ctx_store, model, use_v2, monkeypatch
 ):
-    """Недостающие данные и «в поиске» — лестница со waiting, затем full."""
+    """Недостающие данные и «в поиске» — одна короткая сборка waiting."""
     kinds: list[str] = []
 
     def _stage(name: str, _msg: str, _status: str = "done", **kwargs: Any) -> None:
@@ -223,11 +223,13 @@ async def test_генератор_без_ready_hash_берёт_waiting(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert kinds == ["waiting", "full"]
+    # Одна ступень за ход: продолжение заводит бот паузой после реплики
+    # без вопроса, а не вторая генерация внутри того же хода.
+    assert kinds == ["waiting"]
     prompt = model["all_messages"][0][0].content
     assert "Шапка скрипта" not in prompt
     assert "предмет" in prompt.lower() or "готовиш" in prompt.lower()
-    assert model["calls"] == 2
+    assert model["calls"] == 1
 
 
 async def test_respond_читает_динамику_из_кеша_без_контекстера(

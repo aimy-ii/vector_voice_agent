@@ -139,7 +139,12 @@ async def test_молчание_копит_счётчик_повторов(store
     monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
     await _seed_pending_head(store)
     out = await nodes_module.plan_node(
-        _base_state(current_step="name", lead_repeat=1, turn_kind="silence"),
+        _base_state(
+            current_step="name",
+            lead_repeat=1,
+            lead_counts={"name": 1},
+            turn_kind="silence",
+        ),
         None,  # type: ignore[arg-type]
     )
     assert out["current_step"] == "name"
@@ -156,6 +161,44 @@ async def test_молчание_с_другим_ведущим_сбрасыва�
     )
     assert out["current_step"] == "name"
     assert out["lead_repeat"] == 1
+
+
+async def test_возврат_на_шаг_после_сдвига_копит_счётчик(store, use_v2, monkeypatch):
+    """Качание ведущего между шагами счётчик заходов не обнуляет.
+
+    Сдвиг уводит ведущего ровно на один ход, а следующим ходом шаг снова
+    первый в шапке: name -> city -> name. Пока счёт вёлся по серии подряд,
+    у каждого из них выходила единица, порог повтора не брался никогда, и
+    на живом звонке бот четырежды переспросил про формат теории разными
+    словами. Второй заход на шаг должен быть виден.
+    """
+    monkeypatch.setattr(nodes_module.settings, "pending_steps_soft_cap", 4)
+    await _seed_pending_head(store)
+
+    first = await nodes_module.plan_node(_base_state(), None)  # type: ignore[arg-type]
+    assert first["current_step"] == "name"
+    assert first["lead_repeat"] == 1
+
+    second = await nodes_module.plan_node(
+        _base_state(
+            current_step=first["current_step"],
+            lead_repeat=first["lead_repeat"],
+            lead_counts=first["lead_counts"],
+        ),
+        None,  # type: ignore[arg-type]
+    )
+    assert second["current_step"] == "city", "ход между заходами уводит ведущего"
+
+    third = await nodes_module.plan_node(
+        _base_state(
+            current_step=second["current_step"],
+            lead_repeat=second["lead_repeat"],
+            lead_counts=second["lead_counts"],
+        ),
+        None,  # type: ignore[arg-type]
+    )
+    assert third["current_step"] == "name"
+    assert third["lead_repeat"] == 2
 
 
 @pytest.mark.parametrize("turn_kind", ["continuation", "silence", "pull"])
@@ -207,7 +250,11 @@ async def test_повтор_ведущего_шага_даёт_lead_repeat_дв�
     assert first["lead_repeat"] == 1
 
     second = await nodes_module.plan_node(
-        _base_state(current_step="name", lead_repeat=1),
+        _base_state(
+            current_step="name",
+            lead_repeat=first["lead_repeat"],
+            lead_counts=first["lead_counts"],
+        ),
         None,  # type: ignore[arg-type]
     )
     assert second["current_step"] == "name"
@@ -266,6 +313,49 @@ def test_нулевой_порог_не_включает_характер_пов
 def test_no_client_reply_pull_истинно():
     """Вид хода ``pull`` считается ходом без реплики клиента."""
     assert nodes_module._no_client_reply("pull") is True
+
+
+def test_на_ходе_с_репликой_клиента_повтор_не_включается(script, monkeypatch):
+    """Клиент говорит — вместо режима повтора берётся ``revisit``.
+
+    Правила режима повтора требуют не уходить с темы и обязательно вернуть
+    ход собеседнику. Когда клиент отвечает не по теме шага, а задаёт свой
+    вопрос, это же требование заставляет бота переспрашивать: на живом
+    звонке вышло пять переформулировок вопроса про формат теории подряд.
+    В ``revisit`` остаётся только запрет задавать свой вопрос заново.
+    """
+    from graph.prompts import LEAD_REPEAT_INTRO, LEAD_REPEAT_OVERRIDES, RULE_MOVE_ON
+
+    monkeypatch.setattr(nodes_module.settings, "lead_repeat_threshold", 2)
+    step = script.step("city")
+    captured: dict[str, Any] = {}
+    original = nodes_module.build_turn_messages
+
+    def _capture(**kwargs: Any) -> Any:
+        captured["mode"] = kwargs.get("mode")
+        return original(**kwargs)
+
+    monkeypatch.setattr(nodes_module, "build_turn_messages", _capture)
+    messages = nodes_module._build_respond_messages(
+        prompt_kind="full",
+        script=script,
+        state={**new_state_defaults(), "lead_repeat": 99},
+        history=[],
+        profile={},
+        facts={},
+        lead=step,
+        head=[step],
+        context_text="",
+        dynamic_status="",
+        pending_fields=[],
+        turn_kind="client",
+    )
+    assert captured["mode"] == "revisit"
+    assert LEAD_REPEAT_INTRO not in messages[0].content
+    assert LEAD_REPEAT_OVERRIDES[RULE_MOVE_ON] not in messages[0].content, (
+        "требование не уходить с темы на ходе с репликой не подаётся"
+    )
+    assert "Задать его снова" in messages[0].content
 
 
 def test_повтор_имеет_приоритет_над_pull(script, monkeypatch):
@@ -336,7 +426,12 @@ async def test_двигать_некуда_включается_повтор(sto
     assert first["lead_repeat"] == 1
 
     second = await nodes_module.plan_node(
-        _base_state(current_step="name", lead_repeat=1, turn_kind="pull"),
+        _base_state(
+            current_step="name",
+            lead_repeat=first["lead_repeat"],
+            lead_counts=first["lead_counts"],
+            turn_kind="pull",
+        ),
         None,  # type: ignore[arg-type]
     )
     assert second["current_step"] == "name"

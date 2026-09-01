@@ -25,11 +25,18 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core.config import settings
+from graph.context import branch_picked, city_unresolved, context_from_state
 from graph.history import last_user_text, normalize
 from graph.log_fmt import format_check_pending, format_check_verdict
 from script.build import AnyStep, CompiledScript
 from script.models import SalesStep, Step
-from script.planner import is_closed, iter_available, profile_has, render_step_text
+from script.planner import (
+    exhausted,
+    is_closed,
+    iter_available,
+    profile_has,
+    render_step_text,
+)
 from script.source import registry
 from script.store import ScriptProgress, progress_from_state
 from utils.llm_gen import LLMTurnFailed, astream_structured, get_llm, response_format_from
@@ -357,6 +364,13 @@ def _script_from_state(state: Mapping[str, Any]) -> CompiledScript:
     )
 
 
+#: Слаг шага, на котором выясняется город обучения.
+CITY_STEP = "city"
+
+#: Слаг шага, на котором договариваются о филиале.
+BRANCH_STEP = "branch"
+
+
 async def check_pass(
     state: Mapping[str, Any],
     *,
@@ -395,6 +409,7 @@ async def check_pass(
         (progress if progress is not None else progress_from_state(state)).to_dict()
     )
     profile = dict(state.get("profile") or {})
+    context = context_from_state(state.get("conversation_context"))
     # Профиль из кеша прогресса — для закрытия по fills.
     for key, value in updated.profile.items():
         if value and key not in profile:
@@ -496,6 +511,36 @@ async def check_pass(
             if not verdict.reply_usable:
                 # Реплика негодна целиком, а не для одного шага.
                 break
+            if verdict.step_closed and step.id == CITY_STEP and city_unresolved(context):
+                # Судья закрывает по диалогу: человек ответил — вопрос снят.
+                # Для города этого мало. На разборе звонка клиент ответил
+                # «Приморский район рядом с метро Пионерская», судья счёл
+                # вопрос отвеченным, а резолвер сказал, что это район, а не
+                # город сети. Города не стало, и вместе с ним — ни цены, ни
+                # сроков, ни филиалов: без слага код туда не ходит вовсе.
+                # Весь остаток звонка бот отвечал «сейчас уточню», уточнять
+                # было неоткуда, человек бросил трубку.
+                #
+                # Держим шаг открытым, чтобы бот переспросил. Признак
+                # структурный, от заполнителя анкеты не зависит: слаг ставит
+                # резолвер в том же проходе. Страховка на зависший шаг
+                # остаётся — до конца разговора шаг не провисит.
+                log.info("[check|hold] город: назван район, держим шаг открытым")
+                continue
+            if verdict.step_closed and step.id == BRANCH_STEP and not branch_picked(context):
+                # То же, что с городом. На разборе звонка человек назвал
+                # ориентир, распознавание переврало название станции, и
+                # филиалы не подобрались. Бот сказал «сейчас подберу
+                # ближайший филиал», судья счёл вопрос отвеченным и закрыл
+                # шаг за один ход — адрес так и не прозвучал, а обещание
+                # осталось невыполненным.
+                #
+                # Держим шаг открытым: скрипт на этот случай велит просить
+                # другой ориентир, и без открытого шага бот к филиалу уже
+                # не вернётся. Признак структурный — карточки филиалов
+                # приходят от подбора, не от заполнителя анкеты.
+                log.info("[check|hold] филиал: адреса нет, держим шаг открытым")
+                continue
             if verdict.step_closed:
                 updated.status[step.id] = "closed"
                 closures.append((step.id, "диалог"))
@@ -504,6 +549,34 @@ async def check_pass(
                 updated.status[step.id] = "closed"
                 closures.append((step.id, "бессмысленно"))
                 continue
+
+    # Страховка на зависший шаг: закрывается тот, что провисел в шапке
+    # дольше порога. Судья остаётся главным и отрабатывает первым — сюда
+    # доходит только то, что он закрыть не смог.
+    #
+    # Без страховки висли презентационные шаги: человек их выслушивает, а
+    # не отвечает на них, судье закрывать нечем, и бот возвращается к ним
+    # ход за ходом. На разборе живого звонка так висели четыре шага сразу,
+    # до восьми ходов каждый — снаружи это ровно та жалоба «повторяет
+    # вопросы, не удерживает данные».
+    # Второе основание — заходы. ``attempts`` растёт у всей шапки и до
+    # порога доходит поздно; ``lead_counts`` растёт только у ведущего шага,
+    # то есть считает, сколько раз человека об этой теме спросили. Трижды
+    # спросить об одном и том же и не получить ответа — не настойчивость,
+    # а долбёж: живой менеджер тему оставляет и идёт дальше.
+    for step in available:
+        if is_closed(updated.status.get(step.id)) or step.id not in work_ids:
+            continue
+        age_in_head = int(updated.attempts.get(step.id, 0))
+        led = int(updated.lead_counts.get(step.id, 0))
+        if exhausted(step, updated.attempts, limit=settings.step_head_limit):
+            reason = f"висит {age_in_head} ходов"
+        elif settings.lead_give_up > 0 and led >= settings.lead_give_up:
+            reason = f"спрошен {led} раза без ответа"
+        else:
+            continue
+        updated.status[step.id] = "closed"
+        closures.append((step.id, reason))
 
     return updated, closures, asks_inform
 
@@ -517,6 +590,7 @@ async def run_checker(
     turn: int,
     client: CheckerClient | None = None,
     attempt_limit: int | None = None,
+    context: Mapping[str, Any] | None = None,
 ) -> tuple[ScriptProgress, list[tuple[str, str]]]:
     """Закрывает шаги по вердикту судьи.
 
@@ -530,6 +604,8 @@ async def run_checker(
         profile: профиль для доступности шагов.
         turn: номер хода.
         client: клиент модели; пусто — боевой.
+        context: контекст разговора. Нужен шагу города: пока слага города
+            нет, шаг держится открытым.
         attempt_limit: устаревший порог; игнорируется.
 
     Returns:
@@ -542,6 +618,7 @@ async def run_checker(
         "messages": list(messages),
         "profile": profile,
         "turn": turn,
+        "conversation_context": dict(context or {}),
     }
     updated, closures, _asks = await check_pass(
         state,

@@ -286,3 +286,49 @@ async def test_финальное_слияние_прохода_не_затир�
     assert "ул. Чернышевского, 4" in loaded.nearby_text
     assert loaded.nearby_found is True
     assert loaded.branch_candidates == ["perm_a"]
+
+
+def test_динамика_прошлой_реплики_не_подклеивается():
+    """Указания не копятся за звонок: динамика описывает сказанное сейчас.
+
+    На разборе провалившегося прогона в динамике к последнему ходу лежала
+    подсказка «уточни город обучения» со второго хода — вместе с блоком
+    возражения из последних. Пока город не определён, подсказка верна;
+    после — заставит переспрашивать город без причины.
+    """
+    from graph.context import ConversationContext
+    from graph.contexter_worker import _keep_concurrent_dynamic
+
+    base = ConversationContext(dynamic_text="старое указание", last_reply_hash="реплика-1")
+    overlay = ConversationContext(dynamic_text="свежий блок")
+
+    _keep_concurrent_dynamic(base, overlay, current_hash="реплика-2")
+
+    assert overlay.dynamic_text == "свежий блок"
+
+
+def test_динамика_той_же_реплики_сохраняется():
+    """Параллельный проход по той же реплике терять нельзя."""
+    from graph.context import ConversationContext
+    from graph.contexter_worker import _keep_concurrent_dynamic
+
+    base = ConversationContext(dynamic_text="блок соседа", last_reply_hash="реплика-1")
+    overlay = ConversationContext(dynamic_text="свой блок")
+
+    _keep_concurrent_dynamic(base, overlay, current_hash="реплика-1")
+
+    assert "блок соседа" in overlay.dynamic_text
+    assert "свой блок" in overlay.dynamic_text
+
+
+def test_динамика_без_пометки_реплики_сохраняется():
+    """Проход ещё идёт и пометку не поставил — текст сохраняем как прежде."""
+    from graph.context import ConversationContext
+    from graph.contexter_worker import _keep_concurrent_dynamic
+
+    base = ConversationContext(dynamic_text="блок на лету")
+    overlay = ConversationContext(dynamic_text="свой блок")
+
+    _keep_concurrent_dynamic(base, overlay, current_hash="реплика-2")
+
+    assert "блок на лету" in overlay.dynamic_text

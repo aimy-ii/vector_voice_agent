@@ -47,7 +47,7 @@ async def test_агент_получает_хвост_диалога():
         agent=agent,
     )
     assert agent.history_seen == history
-    assert [(v.key, v.value) for v in result.values] == [("transmission", "механика")]
+    assert [(v.key, v.value) for v in result.values] == [("transmission", "Механика")]
 
 
 async def test_отбрасывает_ключи_вне_перечня_и_пустые():
@@ -131,7 +131,7 @@ async def test_уточняемое_поле_перезаписывается():
         agent=agent,
         rewritable=frozenset({"location_hint"}),
     )
-    assert [(v.key, v.value) for v in result.values] == [("location_hint", "центр")]
+    assert [(v.key, v.value) for v in result.values] == [("location_hint", "Центр")]
 
 
 async def test_то_же_значение_не_перезаписывает():

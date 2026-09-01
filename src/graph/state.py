@@ -133,8 +133,12 @@ class CallState(TypedDict, total=False):
     resume_step: str | None
     asides_done: list[str]
     current_step: str | None
-    #: Сколько ходов подряд ведущим идёт один и тот же шаг.
+    #: Какой по счёту ход этот шаг ведёт разговор. Заходы считаются все,
+    #: а не только подряд идущие: ведущий качается между висящими шагами,
+    #: и серия подряд у каждого из них всегда равна единице.
     lead_repeat: int
+    #: Сколько ходов вёл разговор каждый шаг — источник ``lead_repeat``.
+    lead_counts: dict[str, int]
     next_step: str | None
     head_steps: list[str]
     head_new_step: str | None
@@ -185,6 +189,7 @@ def new_state_defaults() -> dict[str, Any]:
         "asides_done": [],
         "current_step": None,
         "lead_repeat": 0,
+        "lead_counts": {},
         "next_step": None,
         "head_steps": [],
         "head_new_step": None,

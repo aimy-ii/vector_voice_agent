@@ -66,6 +66,7 @@ async def test_вход_разделён_история_и_реплика_не_�
         profile={},
         turn=2,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert client.calls
     call = client.calls[0]
@@ -216,6 +217,7 @@ async def test_реплика_не_годится_цикл_рвётся(script):
         profile={},
         turn=1,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status.get("name") != "closed"
     assert len(client.calls) == 1
@@ -240,6 +242,7 @@ async def test_незакрытый_шаг_не_глушит_следующие(
         profile={},
         turn=2,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert len(client.calls) == 2
     assert client.calls[0]["step_id"] == "name"
@@ -267,6 +270,7 @@ async def test_модель_не_ответила_цикл_рвётся(script):
         profile={},
         turn=2,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert len(client.calls) == 1
     assert updated.status.get("name") != "closed"
@@ -293,6 +297,7 @@ async def test_цикл_останавливается_на_первом_нез�
         profile={"caller_name": "Андрей"},
         turn=2,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status.get("name") == "closed"
     assert updated.status.get("city") != "closed"
@@ -310,6 +315,7 @@ async def test_модель_не_ответила_шаги_не_тронуты(s
         profile={},
         turn=1,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status.get("name") == "pending"
 
@@ -374,6 +380,7 @@ async def test_не_в_работе_модель_не_вызывается(scrip
         profile={},
         turn=1,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert client.calls == []
     assert updated.status.get("name") != "closed"
@@ -403,6 +410,7 @@ async def test_question_с_пустыми_fills_закрывается_по_ве
         },
         turn=5,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status.get("theory_format") == "closed"
     assert ("theory_format", "диалог") in closures
@@ -427,6 +435,7 @@ async def test_закрытие_не_зависит_от_порядка_запо
         profile={"caller_name": "Андрей"},
         turn=2,
         client=FakeChecker(list(verdicts)),
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     after_fill, closures_after = await run_checker(
         script=script,
@@ -435,6 +444,7 @@ async def test_закрытие_не_зависит_от_порядка_запо
         profile={"caller_name": "Андрей", "city": "Санкт-Петербург"},
         turn=2,
         client=FakeChecker(list(verdicts)),
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert before_fill.status.get("city") == "closed"
     assert after_fill.status.get("city") == "closed"
@@ -466,6 +476,7 @@ async def test_question_с_заполненным_fills_закрывается(s
         },
         turn=5,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status["theory_format"] == "closed"
     assert not any(c["step_id"] == "theory_format" for c in client.calls)
@@ -494,6 +505,7 @@ async def test_inform_не_попадает_в_pending(script):
         },
         turn=4,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert not any(c["step_id"] == "terms" for c in client.calls)
     assert updated.status.get("terms") != "closed"
@@ -539,6 +551,7 @@ async def test_inform_check_закрывается_ответом_на_пров�
         },
         turn=6,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert client.calls and client.calls[0]["step_id"] == "practice"
     assert updated.status["practice"] == "closed"
@@ -622,6 +635,7 @@ async def test_просьба_повторить_не_закрывает_шаг(
         profile={},
         turn=2,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status.get("name") == "pending"
     assert len(client.calls) == 2
@@ -678,6 +692,7 @@ async def test_asking_pointless_закрывает_с_основанием_бе�
         profile={},
         turn=5,
         client=client,
+        context={"city_slug": "sankt-peterburg", "city_name": "Санкт-Петербург"},
     )
     assert updated.status["name"] == "closed"
     assert ("name", "бессмысленно") in closures

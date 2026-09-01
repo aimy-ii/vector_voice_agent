@@ -19,6 +19,7 @@ from graph.facts import (
 )
 from graph.prompts import (
     _HARD_FACT_BAN,
+    _HARD_FACT_BAN_SHORT,
     _INITIATIVE_BLOCK,
     _MISSING_KNOWLEDGE_GUARD,
     _NO_MECHANICS,
@@ -53,7 +54,11 @@ from graph.prompts import (
 )
 
 #: Число правил речи, включая пункт 0 про примеры и пункт про опору на диалог.
-_SPEECH_RULES_COUNT = 30
+#:
+#: Правило про отбор под собеседника добавлено по разбору живого звонка:
+#: бот сказал «для мужчин действует скидка студентам и именинникам» —
+#: проговорил вслух признак, по которому отбирал категории.
+_SPEECH_RULES_COUNT = 34
 
 #: Начала правил про ведение разговора — подряд после «одна тема».
 _LEAD_SPEECH_RULE_STARTS: tuple[str, ...] = (
@@ -1641,7 +1646,7 @@ def test_жёсткий_запрет_фактов_вне_данных(script):
     assert "из переданных данных как есть" in content
     assert _HARD_FACT_BAN in content
     filler = build_filler_messages(script, messages=[], history_limit=2)
-    assert _HARD_FACT_BAN in filler[0].content
+    assert _HARD_FACT_BAN_SHORT in filler[0].content
 
 
 def test_запрет_служебных_слов_и_обещания_сходить_за_данными(script):
@@ -1668,19 +1673,19 @@ def test_persona_и_naturalness_суммарно_не_больше_7500():
 
 def test_filler_содержит_запрет_фактов_вне_данных(script):
     """Системное сообщение filler содержит запрет называть факты вне данных."""
-    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+    from graph.prompts import _HARD_FACT_BAN_SHORT, build_filler_messages
 
     filler = build_filler_messages(
         script,
         messages=[HumanMessage(content="сколько стоит?")],
         history_limit=2,
     )
-    assert _HARD_FACT_BAN in filler[0].content
+    assert _HARD_FACT_BAN_SHORT in filler[0].content
 
 
 def test_filler_ограничение_длины_и_запреты_оценки_рассуждений(script):
     """Заглушка: лимит длины, без оценки, рассуждений, вопросов и фактов."""
-    from graph.prompts import _HARD_FACT_BAN, build_filler_messages
+    from graph.prompts import _HARD_FACT_BAN_SHORT, build_filler_messages
 
     content = build_filler_messages(
         script,
@@ -1695,10 +1700,14 @@ def test_filler_ограничение_длины_и_запреты_оценки
     assert "звучит основательно" in lowered
     assert "не рассуждать" in lowered
     assert "чувствах" in lowered
-    assert "не задавать вопросов" in lowered
+    assert "вопросов не задавать" in lowered
+    # Запрет именно на знак: длину паузы после реплики бот выбирает по
+    # наличию «?», и заглушка с вопросом уводит его на проверку связи
+    # вместо продолжения мысли.
+    assert "вопросительного знака" in lowered
     assert "не сообщать фактов" in lowered
     assert "не повторять" in lowered
-    assert _HARD_FACT_BAN in content
+    assert _HARD_FACT_BAN_SHORT in content
     assert "не реплика" in lowered
 
 
@@ -1787,7 +1796,7 @@ def test_spoken_intro_не_попадает_в_добивку_и_ожидани�
 
 def test_waiting_содержит_запрет_фактов_вне_данных(script):
     """Системное сообщение waiting содержит запрет называть факты вне данных."""
-    from graph.prompts import _HARD_FACT_BAN, build_waiting_messages
+    from graph.prompts import _HARD_FACT_BAN_SHORT, build_waiting_messages
 
     waiting = build_waiting_messages(
         script,
@@ -1797,7 +1806,7 @@ def test_waiting_содержит_запрет_фактов_вне_данных(
         step=script.step("price"),
         history_limit=2,
     )
-    assert _HARD_FACT_BAN in waiting[0].content
+    assert _HARD_FACT_BAN_SHORT in waiting[0].content
 
 
 #: Маркеры указания при «не нашлось» — только в dynamic_status_block.
@@ -1867,8 +1876,11 @@ def test_жёсткий_запрет_фактов_во_всех_сборках(s
         step=script.step("price"),
         history_limit=2,
     )[0].content
-    for content in (filler, waiting, full):
-        assert _HARD_FACT_BAN in content
+    assert _HARD_FACT_BAN in full
+    # Заглушки держат паузу и фактов не называют: там короткая версия
+    # запрета, иначе она вдвое длиннее самой сборки.
+    for content in (filler, waiting):
+        assert _HARD_FACT_BAN_SHORT in content
 
 
 #: Заголовки верхнего уровня полной сборки — порядок разделов.
@@ -2578,8 +2590,11 @@ def test_dynamic_status_block_поиск_и_не_нашлось():
     assert searching
     lowered = searching.lower()
     assert "готовятся" in lowered
-    assert "цифры" in lowered
-    assert "уточняем" in lowered
+    # Запрет привязан к тому, чего в разделах данных нет. Статус один на
+    # весь контекст: на прогоне цена лежала в статике, а бот отвечал
+    # «стоимость сейчас уточняю» — распространял запрет на всё подряд.
+    assert "чего в них нет" in lowered
+    assert "называется как обычно" in lowered
     assert dynamic_status_block(status=DYN_MISSING) == _MISSING_STATUS_TEXT
 
 
@@ -3141,10 +3156,15 @@ def test_initiative_дополнен_проверкой_темпа_подачи(
     assert "меняет ответ собеседника суть договорённости" in _INITIATIVE_BLOCK
 
 
-def test_speech_rules_выросли_на_два_старые_на_месте():
-    """Число правил выросло на 2; опорные старые формулировки не исчезли."""
+def test_speech_rules_выросли_старые_на_месте():
+    """Число правил закреплено; опорные старые формулировки не исчезли.
+
+    Счётчик здесь намеренно продублирован числом: правила пронумерованы, и
+    добавление нового обязано быть осознанным решением, а не побочным
+    эффектом правки соседнего пункта.
+    """
     assert len(SPEECH_RULES) == _SPEECH_RULES_COUNT
-    assert _SPEECH_RULES_COUNT == 30
+    assert _SPEECH_RULES_COUNT == 34
     joined = "\n".join(SPEECH_RULES)
     assert "К клиенту обращение только на «Вы»" in joined
     assert "Одна тема за реплику" in joined
@@ -3153,3 +3173,67 @@ def test_speech_rules_выросли_на_два_старые_на_месте():
     assert any(
         rule.startswith("Свою внутреннюю работу вслух не проговаривать") for rule in SPEECH_RULES
     )
+
+
+def test_отбор_под_собеседника_вслух_не_называется(script):
+    """Живой прогон: «Для мужчин действует скидка студентам и именинникам».
+
+    Правило «подбирать категории под собеседника» модель проговорила
+    вслух, назвав признак отбора. Человек услышал, что его разложили по
+    полу, — а должен был услышать просто перечень.
+    """
+    from graph.prompts import SPEECH_RULES
+
+    joined = "\n".join(SPEECH_RULES).lower()
+    assert "отбор под собеседника" in joined
+    assert "для мужчин" in joined
+    assert "не объясняя" in joined
+    # Правило добавлено в конец: индексы прежних закреплены тестами, и
+    # вставка в середину сдвинула бы половину из них. Проверяем по
+    # содержанию, а не по последнему месту: за ним встают следующие.
+    assert sum("отбор под собеседника" in rule.lower() for rule in SPEECH_RULES) == 1
+
+
+def test_слово_шаг_о_разговоре_запрещено():
+    """Бот не произносит «следующий шаг»: у живого менеджера шагов нет.
+
+    Заказчик услышал это на прогоне и потребовал убрать: фраза выдаёт
+    внутреннее устройство разговора.
+    """
+    from graph.prompts import SPEECH_RULES
+
+    joined = "\n".join(SPEECH_RULES).lower()
+    assert "следующий шаг" in joined
+    assert "у живого" in joined
+
+
+def test_про_поиск_данных_вслух_не_сообщается():
+    """«Сейчас уточняю по стоимости» и следом вопрос о другом — обещание в проброс.
+
+    Взято с прогона: реплика «Спасибо, поняла. Сейчас уточняю по
+    стоимости. Учиться будете сами или для кого-то узнаёте?» пришла с
+    обычного хода по шагу who_studies. Человек после неё ждёт цену, а её
+    не будет. Заглушку ожидания это правило не трогает: она собирается
+    своим промптом, без правил речи.
+    """
+    from graph.prompts import SPEECH_RULES
+
+    joined = "\n".join(SPEECH_RULES).lower()
+    assert "поиск данных от себя не объявлять" in joined
+    assert "обещание в проброс" in joined
+    # Блок подбора филиалов прямо просит сказать о подборе одной фразой:
+    # запрет не должен ему противоречить, иначе бот молчит там, где обещал.
+    assert "только когда об этом прямо просит блок данных" in joined
+    assert "вижу, что по филиалам" in joined
+    # Заказчик забраковал сухую формулировку: фраза должна звучать живой
+    # речью, а примеры оставаться примерами манеры, а не заготовками.
+    assert "как сказал бы человек" in joined
+    assert "примеры манеры, а не заготовки" in joined
+
+
+def test_просьба_написать_не_спасается_выбором():
+    """«Напишите или позвоните» — половина просьбы всё равно про клавиатуру."""
+    from graph.prompts import SPOKEN_INTRO
+
+    assert "напишите или позвоните" in SPOKEN_INTRO
+    assert "только то, что он умеет голосом" in SPOKEN_INTRO

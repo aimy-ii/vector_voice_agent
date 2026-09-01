@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from graph.nearby import (
+    MAX_PLACE_QUERIES,
     NearbyResult,
     apply_result,
     format_found,
@@ -17,6 +18,7 @@ from graph.nearby import (
     lookup_nearby,
     nearby_key,
     normalize_place,
+    place_queries,
     should_refresh,
 )
 
@@ -323,7 +325,9 @@ async def test_lookup_nearby_успех() -> None:
     result = await lookup_nearby(kb, city_slug="perm", place="Солнечный", key=key)
 
     assert len(kb.geocode_calls) == 1
-    assert kb.geocode_calls[0] == {"text": "Солнечный", "city_slug": "perm"}
+    assert kb.geocode_calls[0] == {"text": "солнечный", "city_slug": "perm"}, (
+        "в справочник уходит нормализованное место, а не строка из формы"
+    )
     assert len(kb.nearest_calls) == 1
     assert kb.nearest_calls[0]["lat"] == 58.01
     assert kb.nearest_calls[0]["lon"] == 56.25
@@ -493,3 +497,148 @@ def test_format_missing_запрет_адреса_и_технеудачи() -> N
 def test_format_missing_обрезает_пробелы_места() -> None:
     """Место с пробелами по краям попадает в кавычки без лишних пробелов."""
     assert "«Солнечный»" in format_missing("  Солнечный  ")
+
+
+async def test_lookup_nearby_снимает_ведущие_слова_перед_геокодером() -> None:
+    """Оценочные и предложные слова до справочника не доходят.
+
+    Взято с живого звонка: агент профиля записал в форму «Ближайшее метро
+    Пионерская», геокодер по этой фразе не нашёл ничего, и бот пять ходов
+    подряд просил назвать улицу. По «метро Пионерская» филиалы находятся
+    с первой попытки.
+    """
+    for spoken in (
+        "Ближайшее метро Пионерская",
+        "у метро Пионерская",
+        "рядом с метро Пионерская",
+    ):
+        kb = FakeNearbyKB(
+            point=(60.0, 30.29),
+            items=[{"slug": "primorskiy", "address": "Коломяжский, 15", "distance_km": 1.2}],
+        )
+        result = await lookup_nearby(
+            kb,
+            city_slug="sankt-peterburg",
+            place=spoken,
+            key="sankt-peterburg:метро пионерская",
+        )
+        assert kb.geocode_calls[0]["text"] == "метро пионерская", spoken
+        assert result.found, spoken
+        assert spoken in result.text, "человеку показывается его собственная формулировка"
+
+
+def test_place_queries_широкий_ориентир_идёт_вторым() -> None:
+    """Из фразы с предлогом получается два запроса: точный и широкий."""
+    assert place_queries("у торгового дома Кит в Приморском районе") == [
+        "торгового дома кит в приморском районе",
+        "приморском районе",
+    ]
+
+
+def test_place_queries_без_предлога_один_запрос() -> None:
+    """Когда частям взяться неоткуда, запрос остаётся один."""
+    assert place_queries("метро Пионерская") == ["метро пионерская"]
+
+
+def test_place_queries_номер_дома_отдельно_не_ищется() -> None:
+    """Голый номер дома — не место: по нему нашёлся бы чужой филиал."""
+    assert place_queries("Коломяжский проспект, 15") == [
+        "коломяжский проспект, 15",
+        "коломяжский проспект",
+    ]
+
+
+def test_place_queries_части_перечисления_пробуются_по_порядку() -> None:
+    """Из перечисления пробуем части так, как их назвал человек.
+
+    Взято с живого звонка: агент профиля записал в форму «Пионерская,
+    Приморский район, у Торгового дома Кит». Целиком геокодер такое не
+    находит, «Пионерская» находит сразу — и она названа первой.
+    """
+    assert place_queries("Пионерская, Приморский район, у Торгового дома Кит") == [
+        "пионерская, приморский район, у торгового дома кит",
+        "пионерская",
+        "приморский район",
+        "торгового дома кит",
+    ]
+
+
+def test_place_queries_пустое_место_запросов_не_даёт() -> None:
+    """Из пустой строки и из голого предлога запросов не выходит."""
+    assert place_queries("") == []
+    assert place_queries("рядом с") == []
+
+
+async def test_lookup_nearby_широкий_ориентир_спасает_подбор() -> None:
+    """Здание не опознано — филиалы берутся по району из той же фразы.
+
+    Взято с живого звонка: человек сказал «живу у торгового дома Кит в
+    Приморском районе». Здания в геокодере нет, и бот пять ходов подряд
+    просил назвать улицу, хотя район прозвучал с первого раза.
+    """
+
+    class TwoStepKB(FakeNearbyKB):
+        """Опознаёт только второй запрос — широкий ориентир."""
+
+        async def geocode(
+            self, text: str, *, city_slug: str | None = None
+        ) -> tuple[float, float] | None:
+            self.geocode_calls.append({"text": text, "city_slug": city_slug})
+            return (59.98, 30.24) if text == "приморском районе" else None
+
+    kb = TwoStepKB(items=[{"slug": "primorskiy", "address": "Коломяжский, 15"}])
+    result = await lookup_nearby(
+        kb,
+        city_slug="sankt-peterburg",
+        place="у торгового дома Кит в Приморском районе",
+        key="sankt-peterburg:торгового дома кит в приморском районе",
+    )
+    assert [call["text"] for call in kb.geocode_calls] == [
+        "торгового дома кит в приморском районе",
+        "приморском районе",
+    ], "точный запрос идёт первым, широкий — только после его неудачи"
+    assert result.found
+    assert result.branch_slugs == ["primorskiy"]
+
+
+async def test_lookup_nearby_точный_ориентир_второго_захода_не_делает() -> None:
+    """Нашлось с первого запроса — второго похода в справочник нет."""
+    kb = FakeNearbyKB(point=(59.98, 30.24), items=[{"slug": "primorskiy"}])
+    result = await lookup_nearby(
+        kb,
+        city_slug="sankt-peterburg",
+        place="Коломяжский проспект в Приморском районе",
+        key="sankt-peterburg:коломяжский проспект в приморском районе",
+    )
+    assert len(kb.geocode_calls) == 1
+    assert result.found
+
+
+def test_хвост_берётся_у_части_а_не_у_целой_фразы() -> None:
+    """Иначе хвост перешагнёт запятую и склеит два ориентира в один.
+
+    С живого прогона: человек назвал «Торгового дома Кит в Приморском
+    районе, метро Пионерское». Хвост целой фразы — «приморском районе,
+    метро пионерское», геокодер по нему не нашёл ничего, и филиалы не
+    подобрались вовсе: бот пообещал подобрать и не назвал ни одного.
+    """
+    queries = place_queries("Торгового дома Кит в Приморском районе, метро Пионерское")
+    assert "приморском районе" in queries
+    assert "метро пионерское" in queries
+    assert "приморском районе, метро пионерское" not in queries
+
+
+def test_ориентир_после_рядом_с_пробуется_отдельно() -> None:
+    """«Уралмаш рядом с метро Проспект Космонавтов» — район плюс метро.
+
+    Район распознавание перевирает («Уранмаш»), метро — нет, и по нему
+    филиалы находятся.
+    """
+    queries = place_queries("Уралмаш рядом с метро Проспект Космонавтов")
+    assert "метро проспект космонавтов" in queries
+
+
+def test_запросов_не_больше_потолка() -> None:
+    """Каждый запрос — поход наружу с таймаутом."""
+    long_place = "Пионерская, Приморский район, у Торгового дома Кит, метро Удельная"
+    assert len(place_queries(long_place)) <= MAX_PLACE_QUERIES

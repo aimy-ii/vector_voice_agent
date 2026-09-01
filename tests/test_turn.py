@@ -1377,7 +1377,8 @@ async def test_ready_hash_полная_и_короткая_сборка(
     }
     out = await nodes_module.respond_node(state, None)  # type: ignore[arg-type]
     assert out.get("expect_continuation") is False
-    assert kinds == ["filler", "full"]
+    # Одна заглушка — и ход кончен: продолжение берёт на себя бот.
+    assert kinds == ["filler"]
 
     kinds.clear()
     model["on_call"] = None
