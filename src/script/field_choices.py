@@ -8,18 +8,20 @@
 
 Варианты названы в требованиях шагов прозой, отдельного поля под них в
 ``SalesStep`` нет и не будет: технических полей в скрипте нет намеренно.
-Поэтому перечень лежит рядом со скриптом, в ``field_choices_ru.json``, и
-правится без кода — как перечень возражений.
+Поэтому перечень правится без кода: он лежит в админке справочника, а файл
+``field_choices_ru.json`` рядом со скриптом остаётся запасным вариантом —
+как и у перечня возражений.
 
 Подбор здесь детерминированный, без модели: совпадение по словам-приметам.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+from script.documents import load_document
 
 #: Файл с вариантами полей рядом с данными скрипта.
 DEFAULT_FILE = Path(__file__).resolve().parent / "data" / "field_choices_ru.json"
@@ -55,9 +57,9 @@ def load_field_choices(path: str | Path | None = None) -> dict[str, tuple[FieldC
         анкету как есть, то есть как было до перечня.
     """
     source = Path(path or DEFAULT_FILE)
-    if not source.exists():
+    raw = load_document("field_choices", source)
+    if not raw:
         return {}
-    raw: Mapping[str, Any] = json.loads(source.read_text(encoding="utf-8"))
     fields: Mapping[str, Sequence[Mapping[str, Any]]] = raw.get("fields") or {}
     out: dict[str, tuple[FieldChoice, ...]] = {}
     for key, items in fields.items():
